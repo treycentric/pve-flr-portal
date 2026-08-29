@@ -1,0 +1,5 @@
+fastapi          # backend framework
+uvicorn[standard] # ASGI server
+httpx            # calls to the Proxmox VE / PBS REST API
+jinja2           # server-rendered templates for the htmx frontend
+python-multipart # form/file handling for upload/download endpoints
