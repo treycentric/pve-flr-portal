@@ -1,0 +1,6 @@
+-r requirements.txt
+
+pytest              # test runner for the Python backend
+pytest-asyncio      # lets the async FastAPI / httpx code be tested directly
+respx               # mocks httpx requests so PVE API calls never leave the box
+ruff                # linter (config in ruff.toml); run via ./run-tests.*

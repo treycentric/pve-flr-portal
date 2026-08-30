@@ -1,0 +1,16 @@
+{
+  "name": "pve-flr-portal",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Test tooling for the pve-flr-portal frontend (no build step - app.js/style.css ship as-is).",
+  "scripts": {
+    "test": "node --test \"tests/js/*.test.mjs\"",
+    "test:css": "stylelint \"backend/static/**/*.css\""
+  },
+  "devDependencies": {
+    "stylelint": "^16.10.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

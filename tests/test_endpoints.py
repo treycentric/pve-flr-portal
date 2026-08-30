@@ -1,0 +1,233 @@
+"""End-to-end-ish tests for the FastAPI routes.
+
+The PVE client layer is stubbed out per-test (monkeypatched async fakes),
+so nothing here touches the network. Auth is bypassed by overriding the
+`get_session` dependency, except where the test is specifically about the
+unauthenticated path.
+"""
+
+import io
+import zipfile
+
+import httpx
+import pytest
+
+main = pytest.importorskip(
+    "backend.main",
+    reason="backend.main needs FastAPI and Python 3.14 (compression.zstd)",
+)
+from fastapi.testclient import TestClient
+
+from backend import auth, pve_client
+
+ARCHIVES = [
+    {"volid": "pbs:backup/vm/133/2026-08-30T02:03:57Z", "ctime": 200, "size": 10, "verification": {"state": "ok"}},
+    {"volid": "pbs:backup/vm/133/2026-08-29T02:03:57Z", "ctime": 100, "size": 9, "verification": {"state": "failed"}},
+    {"volid": "pbs:backup/ct/104/2026-08-30T05:00:00Z", "ctime": 150, "size": 5, "verification": {}},
+]
+
+
+@pytest.fixture
+def client(session_data, monkeypatch):
+    async def fake_archives(session):
+        return ARCHIVES
+
+    async def fake_names(session):
+        return {"133": "webserver"}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    with TestClient(main.app) as c:
+        yield c
+    main.app.dependency_overrides.clear()
+
+
+def test_index_lists_groups_and_defaults_to_first(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.text
+    # Groups sort by (type, vmid): ct:104 comes first and is selected by default.
+    assert "2026-08-30T05:00:00Z" in body
+    # The vm/133 group (and its resolved name) still ships in the task-picker JSON.
+    assert "webserver" in body
+
+
+def test_index_respects_task_query(client):
+    resp = client.get("/", params={"task": "vm:133"})
+    assert resp.status_code == 200
+    body = resp.text
+    # vm:133 has two snapshots; the newer one only, sorted first.
+    assert "2026-08-30T02:03:57Z" in body
+    assert "2026-08-29T02:03:57Z" in body
+
+
+def test_index_requires_auth():
+    main.app.dependency_overrides.clear()
+    with TestClient(main.app) as c:
+        resp = c.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/login"
+
+
+def test_htmx_unauthorized_returns_hx_redirect():
+    main.app.dependency_overrides.clear()
+    with TestClient(main.app) as c:
+        resp = c.get("/api/browse", params={"volume": "v"}, headers={"HX-Request": "true"})
+    assert resp.status_code == 200
+    assert resp.headers["HX-Redirect"] == "/login"
+
+
+def test_browse_renders_file_grid(client, monkeypatch):
+    async def fake_list_path(session, volume, filepath="/"):
+        return [
+            {"text": "etc", "leaf": False, "filepath": "L2V0Yw=="},
+            {"text": "hosts", "leaf": True, "filepath": "L2V0Yy9ob3N0cw==", "size": 12, "mtime": 0},
+        ]
+
+    monkeypatch.setattr(pve_client, "list_path", fake_list_path)
+    resp = client.get("/api/browse", params={"volume": "vol", "filepath": "/"})
+    assert resp.status_code == 200
+    assert "etc" in resp.text and "hosts" in resp.text
+
+
+def test_browse_error_partial_on_pve_failure(client, monkeypatch):
+    async def boom(session, volume, filepath="/"):
+        raise httpx.HTTPStatusError(
+            "x",
+            request=httpx.Request("GET", "http://x"),
+            response=httpx.Response(403, request=httpx.Request("GET", "http://x")),
+        )
+
+    monkeypatch.setattr(pve_client, "list_path", boom)
+    resp = client.get("/api/browse", params={"volume": "vol"})
+    assert resp.status_code == 200
+    assert "can't be browsed" in resp.text
+
+
+def test_tree_lists_only_directories(client, monkeypatch):
+    async def fake_list_path(session, volume, filepath="/"):
+        return [
+            {"text": "etc", "leaf": False, "filepath": "a"},
+            {"text": "file.txt", "leaf": True, "filepath": "b"},
+        ]
+
+    monkeypatch.setattr(pve_client, "list_path", fake_list_path)
+    resp = client.get("/api/tree", params={"volume": "vol", "filepath": "/", "crumbs": "[]"})
+    assert resp.status_code == 200
+    assert "etc" in resp.text
+    assert "file.txt" not in resp.text
+
+
+def test_download_streams_with_content_disposition(client, monkeypatch):
+    class FakeResponse:
+        def __init__(self):
+            self.headers = {"content-type": "application/octet-stream"}
+
+        async def aiter_bytes(self):
+            yield b"hello "
+            yield b"world"
+
+        async def aclose(self):
+            pass
+
+    class FakeClient:
+        async def aclose(self):
+            pass
+
+    async def fake_open(session, volume, filepath, tar=False):
+        return FakeClient(), FakeResponse()
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open)
+    resp = client.get("/api/download", params={"volume": "v", "filepath": "f", "name": "out.txt"})
+    assert resp.status_code == 200
+    assert resp.content == b"hello world"
+    assert 'filename="out.txt"' in resp.headers["content-disposition"]
+
+
+def test_download_bundle_rejects_unknown_format(client):
+    resp = client.get("/api/download-bundle", params={"volume": "v", "item": ["{}"], "format": "rar"})
+    assert resp.status_code == 400
+
+
+def test_download_bundle_builds_zip(client, monkeypatch):
+    async def fake_open(session, volume, filepath, tar=False):
+        class FakeResponse:
+            async def aread(self):
+                return b"file-content"
+
+            async def aclose(self):
+                pass
+
+        class FakeClient:
+            async def aclose(self):
+                pass
+
+        return FakeClient(), FakeResponse()
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open)
+    item = '{"filepath": "abc", "name": "a.txt", "leaf": true}'
+    resp = client.get(
+        "/api/download-bundle",
+        params={"volume": "v", "item": [item], "name": "bundle", "format": "zip"},
+    )
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        assert zf.namelist() == ["a.txt"]
+        assert zf.read("a.txt") == b"file-content"
+
+
+def test_login_page_renders_even_if_realms_fail(monkeypatch):
+    async def boom():
+        raise RuntimeError("pve down")
+
+    monkeypatch.setattr(auth, "list_realms", boom)
+    with TestClient(main.app) as c:
+        resp = c.get("/login")
+    assert resp.status_code == 200
+    assert "Log in" in resp.text
+
+
+def test_login_submit_invalid_credentials(monkeypatch):
+    from fastapi import HTTPException
+
+    async def bad_login(username, password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    async def realms():
+        return []
+
+    monkeypatch.setattr(auth, "login", bad_login)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.post("/login", data={"username": "x", "realm": "pam", "password": "y"})
+    assert resp.status_code == 401
+    assert "Invalid username or password" in resp.text
+
+
+def test_login_submit_success_sets_cookie(monkeypatch):
+    async def ok_login(username, password):
+        assert username == "x@pam"
+        return "session-abc"
+
+    monkeypatch.setattr(auth, "login", ok_login)
+    with TestClient(main.app) as c:
+        resp = c.post(
+            "/login",
+            data={"username": "x", "realm": "pam", "password": "y"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+    assert "session_id=session-abc" in resp.headers["set-cookie"]
+
+
+def test_logout_clears_cookie_and_session(session_data):
+    auth._sessions["session-xyz"] = session_data
+    with TestClient(main.app) as c:
+        c.cookies.set("session_id", "session-xyz")
+        resp = c.get("/logout", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login"
+    assert "session-xyz" not in auth._sessions

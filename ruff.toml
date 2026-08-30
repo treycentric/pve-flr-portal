@@ -1,0 +1,14 @@
+# Lint config for the backend + test suite. Kept lean for a single-admin
+# homelab tool: pyflakes + pycodestyle + import sorting + pyupgrade, minus
+# the opinionated plugins that would flag idiomatic FastAPI (Depends() in
+# defaults) or deliberate broad excepts.
+line-length = 120
+target-version = "py314"
+
+[lint]
+select = ["E", "F", "I", "W", "UP", "RUF"]
+
+[lint.per-file-ignores]
+# conftest.py sets required env vars, and a few test modules call
+# pytest.importorskip, before importing anything from `backend`.
+"tests/*" = ["E402"]

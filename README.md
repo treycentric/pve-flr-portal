@@ -47,6 +47,16 @@ Log in with your own PVE username/password (e.g. `admin@pam`). See
 docs/plan.md §7.1 for how to grant a user the `FileRestoreReader` role
 needed to browse/restore.
 
+## Tests
+
+```
+./run-tests.ps1     # Windows (PowerShell)
+./run-tests.sh      # Linux / macOS / Git Bash
+```
+
+Covers lint (`ruff`), Python (`pytest`), the `app.js` frontend logic
+(`node --test`), and CSS (`stylelint`). See [`tests/README.md`](tests/README.md).
+
 ## License
 
 Licensed under the [GNU Affero General Public License v3.0](LICENSE)

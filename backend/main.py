@@ -3,7 +3,7 @@ import json
 import tarfile
 import zipfile
 from compression import zstd
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
@@ -16,14 +16,13 @@ from starlette.exceptions import HTTPException
 
 from . import auth, pve_client
 from .auth import SessionData
-from .config import settings
 
 app = FastAPI(title="pve-flr-portal")
 
 _TEMPLATES_DIR = "backend/templates"
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 templates.env.filters["fromtimestamp"] = lambda ts: (
-    datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if ts is not None else ""
+    datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC") if ts is not None else ""
 )
 
 app.mount("/static", StaticFiles(directory="backend/static"), name="static")
@@ -259,7 +258,7 @@ async def tree(
         if bool(entry.get("leaf", True)):
             continue
         text = entry.get("text", "")
-        child_crumbs = parent_crumbs + [{"label": text, "filepath": entry["filepath"]}]
+        child_crumbs = [*parent_crumbs, {"label": text, "filepath": entry["filepath"]}]
         nodes.append(
             {
                 "filepath": entry["filepath"],
