@@ -66,12 +66,6 @@ body {
   letter-spacing: 0.2px;
 }
 
-.topbar h1 em {
-  font-style: italic;
-  font-weight: 400;
-  opacity: 0.85;
-}
-
 .status-title {
   display: block;
   color: rgba(255, 255, 255, 0.65);

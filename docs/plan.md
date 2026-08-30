@@ -143,7 +143,12 @@ No live response-body capture was ultimately needed — the published
 schema is authoritative for shape, and the empirical capture already
 locked down timing and encoding quirks the schema doesn't document.
 
-**Scoped token setup.** `PVE::Storage::check_volume_access` (pve-storage
+**Scoped token setup.** (Note: the currently-deployed service accounts
+predate the project rename to pve-flr-portal and are still named
+`pve-backup-portal@titan` / `pve-backup-portal@pbs` on the real PVE/PBS
+servers — the `pve-flr-portal@...` names below are the convention for
+new setups, not a claim that the live accounts were renamed.)
+`PVE::Storage::check_volume_access` (pve-storage
 source) requires, for a `backup`-type volume, *both*
 `Datastore.AllocateSpace` on `/storage/{storage}` *and* `VM.Backup` on
 `/vms/{vmid}` — `Datastore.Audit` alone is not sufficient for this
@@ -152,19 +157,19 @@ node):
 
 ```
 pveum role add FileRestoreReader -privs "Datastore.AllocateSpace,VM.Backup"
-pveum user add pve-backup-portal@pve --comment "pve-backup-portal service account"
-pveum user token add pve-backup-portal@pve portal --privsep=1
-pveum acl modify /storage/<storage-id> --tokens 'pve-backup-portal@pve!portal' --roles FileRestoreReader
-pveum acl modify /vms/<vmid> --tokens 'pve-backup-portal@pve!portal' --roles FileRestoreReader
+pveum user add pve-flr-portal@pve --comment "pve-flr-portal service account"
+pveum user token add pve-flr-portal@pve portal --privsep=1
+pveum acl modify /storage/<storage-id> --tokens 'pve-flr-portal@pve!portal' --roles FileRestoreReader
+pveum acl modify /vms/<vmid> --tokens 'pve-flr-portal@pve!portal' --roles FileRestoreReader
 ```
 
 And the PBS-side token (`DatastoreReader`, built-in role) used only for
 snapshot enumeration (run on the PBS node):
 
 ```
-proxmox-backup-manager user create pve-backup-portal@pbs --comment "pve-backup-portal service account"
-proxmox-backup-manager user generate-token pve-backup-portal@pbs portal
-proxmox-backup-manager acl update /datastore/<datastore-name> DatastoreReader --auth-id 'pve-backup-portal@pbs!portal'
+proxmox-backup-manager user create pve-flr-portal@pbs --comment "pve-flr-portal service account"
+proxmox-backup-manager user generate-token pve-flr-portal@pbs portal
+proxmox-backup-manager acl update /datastore/<datastore-name> DatastoreReader --auth-id 'pve-flr-portal@pbs!portal'
 ```
 
 Both `... token add`/`... generate-token` commands print the token
@@ -176,8 +181,8 @@ modify` lines for each additional `/vms/{vmid}`.
 API token's effective permissions are the **intersection** of the
 token's own ACL entries and the underlying user's own ACL entries — the
 user acts as a ceiling, never a source. Granting the role only to the
-token's auth-id (`pve-backup-portal@pbs!portal`) and not to the plain
-user (`pve-backup-portal@pbs`) resulted in an empty effective
+token's auth-id (`pve-flr-portal@pbs!portal`) and not to the plain
+user (`pve-flr-portal@pbs`) resulted in an empty effective
 permission set and a 403 on `admin/datastore/{store}/snapshots`, even
 though `acl list` showed the token's grant present. Fix: run the same
 `acl update ... --auth-id` command a second time against the bare
@@ -189,11 +194,11 @@ show `Datastore.Audit`/`Datastore.Read` before the API call will work.
 `--privsep=1`, a PVE API token's effective permissions are also
 intersected with the underlying user's own ACLs (not just the token's).
 Granting `FileRestoreReader` only via `--tokens
-'pve-backup-portal@pve!portal'` produced `403 Permission check failed
+'pve-flr-portal@pve!portal'` produced `403 Permission check failed
 (/storage/pbs, Datastore.AllocateSpace)` on `file-restore/list`, even
 though the token's own ACL entry was correctly in place. Fix: run the
 same `pveum acl modify` commands a second time against the bare user
-with `--users pve-backup-portal@pve` instead of `--tokens ...`. Net
+with `--users pve-flr-portal@pve` instead of `--tokens ...`. Net
 result: **both the token and its owning user need the ACL grant** on
 `/storage/<storage-id>` and `/vms/<vmid>`, on both PVE and PBS.
 
@@ -204,20 +209,20 @@ accounts entirely rather than leaving unused standing credentials
 around. On PVE:
 
 ```
-pveum acl delete /storage/<storage-id> --users pve-backup-portal@pve --roles FileRestoreReader
-pveum acl delete /storage/<storage-id> --tokens 'pve-backup-portal@pve!portal' --roles FileRestoreReader
-pveum acl delete /vms/<vmid> --users pve-backup-portal@pve --roles FileRestoreReader
-pveum acl delete /vms/<vmid> --tokens 'pve-backup-portal@pve!portal' --roles FileRestoreReader
-pveum user token remove pve-backup-portal@pve portal
-pveum user delete pve-backup-portal@pve
+pveum acl delete /storage/<storage-id> --users pve-flr-portal@pve --roles FileRestoreReader
+pveum acl delete /storage/<storage-id> --tokens 'pve-flr-portal@pve!portal' --roles FileRestoreReader
+pveum acl delete /vms/<vmid> --users pve-flr-portal@pve --roles FileRestoreReader
+pveum acl delete /vms/<vmid> --tokens 'pve-flr-portal@pve!portal' --roles FileRestoreReader
+pveum user token remove pve-flr-portal@pve portal
+pveum user delete pve-flr-portal@pve
 pveum role delete FileRestoreReader   # only if nothing else uses it
 ```
 
 On PBS:
 
 ```
-proxmox-backup-manager user delete-token pve-backup-portal@pbs portal
-proxmox-backup-manager user remove pve-backup-portal@pbs
+proxmox-backup-manager user delete-token pve-flr-portal@pbs portal
+proxmox-backup-manager user remove pve-flr-portal@pbs
 ```
 
 The PBS ACL entry for the token/user is removed implicitly when the

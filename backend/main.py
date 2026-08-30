@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from . import pbs_client, pve_client
 from .config import settings
 
-app = FastAPI(title="pve-backup-portal")
+app = FastAPI(title="pve-flr-portal")
 
 _TEMPLATES_DIR = "backend/templates"
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)

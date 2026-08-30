@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Timeline preview (synthetic data)</title>
+  <title>Proxmox File Level Restore Portal &mdash; Timeline preview (synthetic data)</title>
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
   <script src="app.js"></script>
   <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
@@ -12,9 +12,10 @@
     // Dev-only test harness: generates fake snapshots so the timeline widget
     // (clustering, day-picker, older/newer nav) can be exercised without real
     // backup history. Browsing into a snapshot will hit the real backend with
-    // a fake volume string and show the normal "not browsable" error — that's
+    // a fake volume string and show the normal "not browsable" error - that's
     // expected here, this page only exists to test the timeline itself.
-    // NOTE: keep the <footer class="timeline-panel"> markup below in sync with
+    // NOTE: keep the markup below (topbar, breadcrumb-bar, tree-pane,
+    // <footer class="timeline-panel">) in sync with
     // backend/templates/index.html if that markup changes.
     function syntheticSnapshots() {
       const out = [];
@@ -46,29 +47,48 @@
   <header class="topbar">
     <div class="topbar-brand">
       <span class="topbar-icon">&#9851;</span>
-      <h1>PVE Backup <em>Portal</em></h1>
+      <h1>Proxmox File Level Restore Portal</h1>
+    </div>
+    <div class="topbar-meta">
+      <div class="task-trigger" style="cursor: default;">
+        <span class="task-trigger-text">
+          <span class="status-title">Preview</span>
+          <span class="status-value">Synthetic data</span>
+        </span>
+      </div>
     </div>
   </header>
-  <div class="statusbar">
-    <span class="status-title">Preview</span>
-    <span class="status-value">Synthetic timeline data &mdash; not a real backend, browsing will error</span>
-  </div>
   <div class="page" x-data="portalApp(syntheticSnapshots())" x-init="init()">
     <section class="browser">
       <div id="loading" class="htmx-indicator">Loading&hellip;</div>
       <div class="breadcrumb-bar" x-show="volume" x-cloak>
-        <button type="button" class="up-btn" @click="up()" :disabled="crumbs.length <= 1">&uarr; Up</button>
+        <div class="history-nav">
+          <button type="button" class="nav-btn" @click="goBack()" :disabled="!canGoBack || loading" title="Back">&lsaquo;</button>
+          <button type="button" class="nav-btn" @click="goForward()" :disabled="!canGoForward || loading" title="Forward">&rsaquo;</button>
+        </div>
         <nav class="breadcrumb">
           <template x-for="(crumb, idx) in crumbs" :key="idx">
             <span>
-              <button type="button" class="crumb-btn" @click="goTo(idx)" x-text="crumb.label"></button>
-              <span x-show="idx < crumbs.length - 1"> / </span>
+              <button type="button" class="crumb-btn" @click="goTo(idx)" :disabled="loading" x-text="crumb.label"></button>
+              <span class="crumb-sep" x-show="idx < crumbs.length - 1">&rsaquo;</span>
             </span>
           </template>
         </nav>
+        <div class="grid-filter">
+          <svg class="grid-filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+          <input type="text" x-model="fileFilter" placeholder="Filter" class="grid-filter-input">
+        </div>
       </div>
-      <div id="file-grid">
-        <p class="empty-state">Synthetic volumes aren't real backups &mdash; expect the "not browsable" error here. This page is only for testing the timeline widget below.</p>
+      <div class="browser-body">
+        <nav class="tree-pane" x-show="volume" x-cloak :style="'flex-basis: ' + treeWidth + 'px'">
+          <div id="tree-root"></div>
+        </nav>
+        <div class="tree-resizer" x-show="volume" x-cloak @pointerdown="startTreeResize($event)"></div>
+        <div class="browse-main">
+          <div id="file-grid">
+            <p class="empty-state">Synthetic volumes aren't real backups &mdash; expect the "not browsable" error here. This page is only for testing the timeline widget below.</p>
+          </div>
+        </div>
       </div>
     </section>
 

@@ -1,4 +1,4 @@
-# pve-backup-portal — Claude Code project notes
+# Proxmox File Level Restore Portal (pve-flr-portal) — Claude Code project notes
 
 ## What this is
 A companion web app for Proxmox VE + Proxmox Backup Server that adds a
