@@ -56,7 +56,10 @@ body {
 }
 
 .topbar-icon {
-  font-size: 1.3rem;
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+  flex-shrink: 0;
 }
 
 .topbar h1 {

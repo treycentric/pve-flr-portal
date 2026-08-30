@@ -372,15 +372,185 @@ instant regardless of whether a given folder has been opened yet.
 single shared, narrowly-scoped service token held server-side (see
 Hard constraints in CLAUDE.md) — there is no per-user login at all.
 The user has asked for the portal to eventually support logging in
-with one's own PVE/PBS identity and reflecting that identity's actual
+with one's own PVE identity and reflecting that identity's actual
 permissions, rather than everyone sharing the portal's one service
-account. This is a real architecture change (session handling,
-delegating to the logged-in user's credentials per-request instead of
-one static token, mapping PVE/PBS roles to what the UI shows) and
-deliberately was *not* pulled forward — PH.1–PH.3 continue to target
-the single-token model so browse/download/timeline can be finished
-against a simple, known-working auth story first. Revisit this phase's
-design once PH.3 is done.
+account. Design pass done 2026-08-30 — see below.
+
+### 7.1 PH.4 design — PVE-only auth, no separate PBS token
+
+**Key insight: drop the direct PBS API token entirely.** PVE's `pbs`-type
+storage config already holds the PBS datastore credentials server-side
+(that's what lets `file-restore/list`/`file-restore/download` work at
+all today). PVE also exposes backup content through its own API —
+`GET /nodes/{node}/storage/{storage}/content?content=backup` — which
+returns one entry per backup archive (volid, vmid, backup-type, ctime,
+size, verification state). That's the same information
+`pbs_client.list_groups()`/`list_snapshots()` currently get by calling
+PBS directly; grouping by vmid+type is already done client-side in
+`main.py`, so switching the data source is a drop-in replacement. This
+means the app only ever needs to authenticate to **one** system (PVE),
+and a logged-in user's own PVE session is sufficient for everything:
+browsing groups/snapshots, listing files, and downloading.
+
+*Before implementing:* confirm the exact field names/shapes of the
+`storage/content` response against the real environment (Proxmox's
+published API schema first, per the CLAUDE.md hard-constraint
+precedent for file-restore; only fall back to a live traffic capture if
+the schema doesn't answer it) — specifically whether `verification`
+comes back in the same shape PBS's admin API gives, since the UI's
+"verified" badge depends on it.
+
+**Auth flow — PVE ticket auth replaces the static token:**
+- Add a login page/form (username, password, realm) that POSTs to our
+  own backend, which in turn calls PVE's `POST /access/ticket`
+  (`{username: "user@realm", password}`). Success returns a `ticket`
+  and a `CSRFPreventionToken`.
+- The backend keeps a small server-side session store (in-memory dict
+  is fine — no new service, per CLAUDE.md's "no extra services"
+  constraint) keyed by an opaque session id, holding `{username,
+  ticket, csrf_token, expires_at}`. The browser only ever gets our
+  app's own session cookie (HttpOnly), never the raw PVE ticket.
+- Every PVE API call the backend makes on that user's behalf sends
+  `Cookie: PVEAuthCookie=<ticket>` instead of
+  `Authorization: PVEAPIToken=...`; state-changing calls (none exist
+  yet, but push-to-guest in PH.5 will have some) additionally need the
+  `CSRFPreventionToken` header.
+- PVE tickets expire (2 hours by default). Handle this by re-POSTing
+  the existing ticket to `/access/ticket` to refresh it before
+  expiry, or by bouncing the user back to the login page on a 401.
+- `pve_client.py`'s functions need a `session` argument instead of
+  reading the module-level static token; `_headers()` becomes
+  `_headers(session)`.
+- 2FA/TOTP: if any target user has a second factor enabled on their PVE
+  account, `/access/ticket` requires an extra round-trip. Confirm
+  whether that applies here before committing to a single-step login
+  form.
+
+**What this simplifies vs. today:** no more `pbs_client.py`, no more
+`PBS_HOST`/`PBS_DATASTORE`/`PBS_TOKEN_*`/`PBS_VERIFY_SSL` in `.env` —
+one fewer credential to provision, scope, and eventually tear down.
+It also fixes a latent over-exposure in the current design: today every
+portal visitor sees every guest with backups in the datastore (the PBS
+token doesn't know or care who's asking); after PH.4, the Task picker
+naturally only shows what *that logged-in user's own PVE permissions*
+allow, since the data comes from a PVE call made with their session.
+
+**Admin steps to onboard a new user (no more token creation — just an
+ACL grant against their existing PVE account):**
+
+```
+# CLI, run on the PVE node. Role is the same FileRestoreReader role
+# from §3 (Datastore.AllocateSpace, VM.Backup, VM.Audit) — reused as-is,
+# no new role needed.
+pveum acl modify /storage/<storage-id> --users <user>@<realm> --roles FileRestoreReader
+pveum acl modify /vms --users <user>@<realm> --roles FileRestoreReader
+```
+
+Scope the second command to `/vms/<vmid>` instead of `/vms` if that
+user should only see specific guests rather than everything in the
+datastore. No `pveum user token add` step at all — ticket auth uses the
+user's normal PVE password, not a token/secret pair.
+
+Equivalent GUI steps (Datacenter → Permissions):
+1. **Users** — confirm the target account exists. If it's a local
+   `pve`-realm account, set/confirm its password here (`Datacenter →
+   Permissions → Users → Edit`). If it's PAM/LDAP/AD-backed, just
+   confirm the realm is already configured under `Datacenter →
+   Realms`.
+2. **Roles** — confirm `FileRestoreReader` already exists (it does,
+   from the current setup); if starting fresh, `Add` a role named
+   `FileRestoreReader` and check `Datastore.AllocateSpace`,
+   `VM.Backup`, `VM.Audit`.
+3. **Add → User Permission** — Path: `/storage/<pbs-storage-id>`,
+   User: the target account, Role: `FileRestoreReader`, Propagate:
+   checked.
+4. **Add → User Permission** (again) — Path: `/vms` (or a specific
+   `/vms/<vmid>` to limit which guests they can see), same User/Role,
+   Propagate: checked.
+
+That's the whole per-user grant — two ACL entries, no secrets to
+generate or hand off.
+
+**Session refresh pattern — borrowed from PVE's own web UI.** PVE's
+ExtJS frontend doesn't re-login on every ticket expiry; it periodically
+(every ~15 minutes) re-POSTs the *current* ticket to `/access/ticket`
+in place of a password, which returns a fresh ticket before the ~2h
+expiry — only falling back to a real login form if that refresh call
+itself fails. We reuse that pattern server-side: our backend runs the
+same "re-POST the existing ticket" refresh on a timer per active
+session, transparent to the browser, which only ever holds our app's
+own session cookie. This is a different, longer-running mechanism than
+the idle timeout below — the two interact (see 7.2).
+
+### 7.2 PH.4 design — idle timeout
+
+Independent of PVE's own ticket lifetime, the app enforces its own
+configurable idle timeout as a security control: if a logged-in
+session sees no requests for N minutes, it's force-expired and the
+user must log in again, regardless of whether the underlying PVE
+ticket could still be refreshed.
+
+- Track `last_activity_at` on each server-side session entry, updated
+  on every authenticated request.
+- New config value (`.env` + `Settings`, following the existing
+  pattern in `backend/config.py`): `SESSION_IDLE_TIMEOUT_MINUTES`,
+  admin-configurable, defaulting to something reasonable (30 min is a
+  sane starting point — open to adjustment).
+- Enforced in the same FastAPI dependency that resolves the current
+  session on each request: if `now - last_activity_at > timeout`,
+  clear the session and respond as logged-out (redirect to the login
+  page) instead of proceeding.
+- The PVE-ticket refresh loop (7.1) should skip refreshing — and let
+  lapse — any session that's already past the idle threshold, so an
+  abandoned session doesn't get artificially kept alive server-side
+  just because the refresh timer happened to fire first.
+
+### 7.3 PH.4 design — HTTPS by default, admin-replaceable cert
+
+The app itself currently serves plain HTTP (`uvicorn backend.main:app
+--reload` per the README). Once real login credentials are being
+submitted through it (7.1), that has to change — the app should serve
+HTTPS by default, using an auto-generated self-signed cert if the
+admin hasn't supplied their own.
+
+- Config additions: `TLS_CERT_FILE` / `TLS_KEY_FILE`, defaulting to
+  e.g. `certs/portal.crt` / `certs/portal.key` under the project root.
+- New small startup helper (e.g. `backend/tls.py:
+  ensure_self_signed_cert(cert_path, key_path)`) that generates a
+  self-signed cert (CN matching the configured hostname, ~2 year
+  validity) **only if both files don't already exist**. An
+  admin-supplied cert/key dropped at those same paths is used as-is
+  and is never overwritten — that's the whole "admin-replaceable"
+  story, no separate config flag needed.
+- This generation has to happen *before* uvicorn binds its SSL
+  context, which is too late to do from a FastAPI startup event —
+  needs a small entrypoint script (e.g. `python -m backend` or
+  `run.py`) that calls `ensure_self_signed_cert()` and then invokes
+  `uvicorn.run(..., ssl_certfile=..., ssl_keyfile=...)` itself, rather
+  than launching uvicorn directly from the CLI as today. README's
+  "Running it" section needs updating to match once this lands.
+- New dependency: `cryptography`, for generating the self-signed cert
+  (goes in `requirements.txt` with the usual one-line comment per
+  CLAUDE.md convention).
+- Once TLS is real (even if self-signed), the app's own session cookie
+  (7.1) should be marked `Secure` in addition to `HttpOnly` — no
+  reason not to, and it wasn't meaningful to set before this since
+  there was no HTTPS to require.
+- Worth double-checking: this is orthogonal to `PVE_VERIFY_SSL=false`,
+  which is about *this app* trusting *PVE's* self-signed cert when
+  calling out to it — don't conflate the two in docs/config naming.
+
+**Remaining open questions before implementation starts:**
+- Confirm `storage/content`'s verification field shape (7.1).
+- Confirm whether any target users have PVE 2FA enabled (7.1).
+- Decide session store persistence — in-memory means a backend restart
+  logs everyone out; acceptable for a homelab tool, but worth
+  confirming rather than assuming.
+- Decide the logout UX and where the login form lives relative to the
+  existing single-page layout.
+- Pick the actual idle-timeout default and confirm the HTTPS port
+  (reuse 8000 as `https://`, or move to a different default like
+  8443?).
 
 ## 8. Stack — and why
 
