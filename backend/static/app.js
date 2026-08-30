@@ -96,10 +96,12 @@ function portalApp(rawSnapshots) {
       this.activeDayItems = [];
       this.volume = snapshot.volume;
       this.crumbs = [{ label: 'Root', filepath: '/' }];
-      // Center the view on the selected date, under the fixed center line,
-      // preserving whatever zoom level is currently active.
+      // Center the view on the selected date's midnight (matching where its
+      // dot is actually drawn, per groupsInView) under the fixed center
+      // line, preserving whatever zoom level is currently active.
       const span = this.viewEnd - this.viewStart;
-      const target = snapshot.date.getTime();
+      const dayStart = new Date(snapshot.date.getFullYear(), snapshot.date.getMonth(), snapshot.date.getDate());
+      const target = dayStart.getTime();
       this.viewStart = new Date(target - span / 2);
       this.viewEnd = new Date(target + span / 2);
       this.load();
@@ -154,10 +156,12 @@ function portalApp(rawSnapshots) {
     },
 
     jumpToNow() {
-      const now = Date.now();
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const span = this.viewEnd - this.viewStart;
-      this.viewStart = new Date(now - span / 2);
-      this.viewEnd = new Date(now + span / 2);
+      const target = todayStart.getTime();
+      this.viewStart = new Date(target - span / 2);
+      this.viewEnd = new Date(target + span / 2);
       this.renderTimeline();
     },
 
@@ -202,23 +206,22 @@ function portalApp(rawSnapshots) {
         return rect.width ? 1000 / rect.width : 0;
       };
 
-      const endDrag = () => {
-        dragging = false;
-        svg.classList.remove('dragging');
-      };
-
-      svg.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        dragging = true;
-        this._dragMoved = false;
-        startX = e.clientX;
-        dragViewStart = this.viewStart;
-        dragViewEnd = this.viewEnd;
-        svg.setPointerCapture(e.pointerId);
-        svg.classList.add('dragging');
-      });
-
-      svg.addEventListener('pointermove', (e) => {
+      // IMPORTANT: do NOT call svg.setPointerCapture() here.
+      //
+      // Pointer capture retargets every subsequent event for that pointer --
+      // including pointerup and the compatibility mouse events -- to the
+      // capture element. The `click` event's target is then resolved against
+      // the (retargeted) pointerdown/pointerup targets, so it lands on the
+      // <svg> root itself instead of the marker shape actually under the
+      // cursor. That made every per-marker click listener dead: e.target was
+      // always the bare <svg>, regardless of hit-area size or where the user
+      // clicked. It reproduces identically in Gecko and Blink because both
+      // implement the same "click follows pointer capture" retargeting.
+      //
+      // Listening on window while a drag is in progress gives the same
+      // "keep panning even if the cursor leaves the widget" behaviour with
+      // no retargeting side effects.
+      const onMove = (e) => {
         if (!dragging) return;
         if (Math.abs(e.clientX - startX) > 3) this._dragMoved = true;
         const dxUnits = (e.clientX - startX) * unitsPerPixel();
@@ -227,11 +230,58 @@ function portalApp(rawSnapshots) {
         this.viewStart = new Date(dragViewStart.getTime() - dxMs);
         this.viewEnd = new Date(dragViewEnd.getTime() - dxMs);
         this.renderTimeline();
+      };
+
+      const endDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        svg.classList.remove('dragging');
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', endDrag);
+        window.removeEventListener('pointercancel', endDrag);
+      };
+
+      svg.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0 && e.pointerType === 'mouse') return;
+        // Suppresses native text/image drag selection. Cancelling pointerdown
+        // does not suppress the later `click`, so marker clicks still fire.
+        e.preventDefault();
+        dragging = true;
+        this._dragMoved = false;
+        startX = e.clientX;
+        dragViewStart = this.viewStart;
+        dragViewEnd = this.viewEnd;
+        svg.classList.add('dragging');
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', endDrag);
+        window.addEventListener('pointercancel', endDrag);
       });
 
-      svg.addEventListener('pointerup', endDrag);
-      svg.addEventListener('pointerleave', endDrag);
-      svg.addEventListener('pointercancel', endDrag);
+      // Safety net: if for any reason the click's target resolves to the <svg>
+      // root rather than a marker group (extension-injected overlays, future
+      // pointer-capture regressions, synthetic clicks), fall back to picking
+      // the nearest marker by horizontal distance. Per-group listeners call
+      // stopPropagation(), so this never double-fires for a normal hit.
+      svg.addEventListener('click', (e) => {
+        if (this._dragMoved) return;
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width) return;
+        const scaleX = rect.width / 1000;
+        const ux = (e.clientX - rect.left) / scaleX;
+        let best = null;
+        let bestDist = Infinity;
+        for (const group of this.groupsInView()) {
+          const dist = Math.abs(group.x - ux);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = group;
+          }
+        }
+        if (!best || bestDist * scaleX > 14) return;
+        e.stopPropagation();
+        const trackRect = this.$refs.timelineTrack.getBoundingClientRect();
+        this.toggleDay(best.key, best.items, rect.left - trackRect.left + best.x * scaleX);
+      });
     },
 
     renderTimeline() {
@@ -370,6 +420,20 @@ function portalApp(rawSnapshots) {
           text.appendChild(countSpan);
           text.appendChild(tsSpan);
           g.appendChild(text);
+
+          // Invisible click target spanning the full SVG height (from its
+          // very top down to a comfortable margin past the dot), so there is
+          // no vertical boundary near the visible shapes where a real mouse
+          // click can miss. Inserted first so it sits beneath the visible
+          // shapes but still catches clicks in the padding between them.
+          const hit = document.createElementNS(NS, 'rect');
+          hit.setAttribute('x', String(-width / 2 - 10));
+          hit.setAttribute('y', String(-AXIS_Y));
+          hit.setAttribute('width', String(width + 20));
+          hit.setAttribute('height', String(AXIS_Y + 25));
+          hit.setAttribute('fill', 'transparent');
+          hit.setAttribute('class', 'timeline-hit-area');
+          g.insertBefore(hit, g.firstChild);
         } else {
           const bubble = document.createElementNS(NS, 'rect');
           bubble.setAttribute('x', '-9');
@@ -392,9 +456,23 @@ function portalApp(rawSnapshots) {
           count.setAttribute('class', 'timeline-bubble-label');
           count.textContent = String(group.items.length);
           g.appendChild(count);
+
+          const hit = document.createElementNS(NS, 'rect');
+          hit.setAttribute('x', '-14');
+          hit.setAttribute('y', '-26');
+          hit.setAttribute('width', '28');
+          hit.setAttribute('height', '36');
+          hit.setAttribute('fill', 'transparent');
+          hit.setAttribute('class', 'timeline-hit-area');
+          g.insertBefore(hit, g.firstChild);
         }
 
-        g.addEventListener('click', () => {
+        g.addEventListener('click', (e) => {
+          // Without this, Alpine's @click.outside on the day-picker popup
+          // sees this same click (the popup isn't open yet, so the marker
+          // "is outside" it) and immediately closes what toggleDay just
+          // opened, in the same bubble phase.
+          e.stopPropagation();
           if (this._dragMoved) return;
           const screenX = offsetX + group.x * scaleX;
           this.toggleDay(group.key, group.items, screenX);

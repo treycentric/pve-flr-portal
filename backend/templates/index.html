@@ -68,13 +68,14 @@
         @click.outside="activeDayKey = null">
         <div class="timeline-daypicker-title" x-text="activeDayKey"></div>
         <ul>
-          <template x-for="s in activeDayItems" :key="s.volume">
+          <template x-for="(s, idx) in activeDayItems" :key="s.volume">
             <li>
               <button
                 type="button"
                 :class="{ 'is-selected': s.volume === selectedVolume }"
-                @click="selectSnapshot(s)"
-                x-text="s.time">
+                @click="selectSnapshot(s)">
+                <span class="timeline-daypicker-index" x-text="idx + 1"></span>
+                <span x-text="s.time"></span>
               </button>
             </li>
           </template>

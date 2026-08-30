@@ -486,6 +486,14 @@ body {
   font-weight: 700;
 }
 
+.timeline-daypicker-index {
+  display: inline-block;
+  min-width: 1.2em;
+  margin-right: 0.4em;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
 .htmx-indicator {
   opacity: 0;
   transition: opacity 200ms ease-in;
