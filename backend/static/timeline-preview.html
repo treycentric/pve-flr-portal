@@ -102,7 +102,18 @@
       </div>
       <div class="browser-body">
         <nav class="tree-pane" x-show="volume" x-cloak :style="'flex-basis: ' + treeWidth + 'px'">
-          <div id="tree-root"></div>
+          <ul class="tree-list tree-list--root">
+            <li class="tree-item">
+              <div class="tree-node">
+                <span class="tree-toggle-spacer"></span>
+                <span class="tree-label tree-root-label">
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                  Preview VM (133)
+                </span>
+              </div>
+              <ul class="tree-list tree-children" id="tree-root"></ul>
+            </li>
+          </ul>
         </nav>
         <div class="tree-resizer" x-show="volume" x-cloak @pointerdown="startTreeResize($event)"></div>
         <div class="browse-main">

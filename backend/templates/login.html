@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log in &mdash; Proxmox File Level Restore Portal</title>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v={{ static_version('style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <img class="topbar-icon" src="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}" alt="">
+      <h1>Proxmox File Level Restore Portal</h1>
+    </div>
+  </header>
+  <div class="login-wrap">
+    <form
+      class="login-box"
+      method="post"
+      action="/login"
+      x-data="{ save: false }"
+      x-init="$nextTick(() => {
+        const saved = JSON.parse(localStorage.getItem('pfr_login') || 'null');
+        if (saved) { $refs.username.value = saved.username; $refs.realm.value = saved.realm; save = true; }
+      })"
+      @submit="
+        if (save) { localStorage.setItem('pfr_login', JSON.stringify({ username: $refs.username.value, realm: $refs.realm.value })); }
+        else { localStorage.removeItem('pfr_login'); }
+      ">
+      <img class="about-logo login-logo" src="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}" alt="">
+      <h2 class="login-title">Log in</h2>
+      {% if error %}
+      <p class="login-error">{{ error }}</p>
+      {% endif %}
+      <label class="login-label" for="username">Username</label>
+      <input class="login-input" type="text" id="username" name="username" x-ref="username" placeholder="username" autocomplete="username" autofocus required>
+      <label class="login-label" for="password">Password</label>
+      <input class="login-input" type="password" id="password" name="password" autocomplete="current-password" required>
+      <label class="login-label" for="realm">Realm</label>
+      <select class="login-input" id="realm" name="realm" x-ref="realm">
+        {% for r in realms %}
+        <option value="{{ r.realm }}" {% if r.realm == 'pam' %}selected{% endif %}>{{ r.comment or r.realm }}</option>
+        {% endfor %}
+      </select>
+      <label class="login-checkbox-row">
+        <input type="checkbox" x-model="save">
+        Save username
+      </label>
+      <button type="submit" class="btn-primary login-submit">Log in</button>
+    </form>
+  </div>
+  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+</body>
+</html>

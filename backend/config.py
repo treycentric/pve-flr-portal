@@ -21,38 +21,34 @@ def _bool(name: str, default: bool) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _int(name: str, default: int) -> int:
+    val = os.environ.get(name)
+    return int(val) if val else default
+
+
 @dataclass(frozen=True)
 class Settings:
     pve_host: str
     pve_storage: str
-    pve_token_id: str
-    pve_token_secret: str
     pve_verify_ssl: bool
 
-    pbs_host: str
-    pbs_datastore: str
-    pbs_token_id: str
-    pbs_token_secret: str
-    pbs_verify_ssl: bool
+    # PH.4: per-user PVE ticket auth replaces the old shared PVE/PBS API
+    # tokens (docs/plan.md §7.1) - no PBS credentials or static PVE token
+    # exist anymore, everything goes through the logged-in user's own
+    # PVE session.
+    session_idle_timeout_minutes: int
 
-    # PH.3: guests are discovered dynamically from PBS (admin/datastore/{store}/groups).
-    # These are only a fallback for the edge case where the datastore has no
-    # backups at all yet.
-    guest_vmid: str | None
-    guest_type: str
+    port: int
+    tls_cert_file: str
+    tls_key_file: str
 
 
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
     pve_storage=_get("PVE_STORAGE", required=True),
-    pve_token_id=_get("PVE_TOKEN_ID", required=True),
-    pve_token_secret=_get("PVE_TOKEN_SECRET", required=True),
     pve_verify_ssl=_bool("PVE_VERIFY_SSL", True),
-    pbs_host=_get("PBS_HOST", required=True),
-    pbs_datastore=_get("PBS_DATASTORE", required=True),
-    pbs_token_id=_get("PBS_TOKEN_ID", required=True),
-    pbs_token_secret=_get("PBS_TOKEN_SECRET", required=True),
-    pbs_verify_ssl=_bool("PBS_VERIFY_SSL", True),
-    guest_vmid=_get("GUEST_VMID", default=None),
-    guest_type=_get("GUEST_TYPE", "vm"),
+    session_idle_timeout_minutes=_int("SESSION_IDLE_TIMEOUT_MINUTES", 30),
+    port=_int("PORT", 8008),
+    tls_cert_file=_get("TLS_CERT_FILE", "certs/portal.crt"),
+    tls_key_file=_get("TLS_KEY_FILE", "certs/portal.key"),
 )

@@ -1,6 +1,7 @@
 fastapi          # backend framework
 uvicorn[standard] # ASGI server
-httpx            # calls to the Proxmox VE / PBS REST API
+httpx            # calls to the Proxmox VE REST API
 jinja2           # server-rendered templates for the htmx frontend
-python-multipart # form/file handling for upload/download endpoints
-python-dotenv    # loads .env for PVE/PBS host+token config
+python-multipart # form/file handling for upload/download endpoints, and the login form
+python-dotenv    # loads .env for PVE host + TLS/session config
+cryptography     # generates the self-signed TLS cert on first run (docs/plan.md §7.3)

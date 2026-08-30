@@ -365,7 +365,7 @@ instant regardless of whether a given folder has been opened yet.
 | PH.1 | MVP browse & download | Backend calling the real `file-restore/list` for one hardcoded guest/volume. Flat snapshot list (no timeline yet), file grid, download. | 3–5 days |
 | PH.2 | Timeline UI | Replace the flat list with the scrubber: dots per snapshot, count badges when zoomed out, click-to-select updates the grid in place. | 3–4 days |
 | PH.3 | Caching, multi-guest, polish | Indexer job against PBS, directory-listing cache, more than one guest, filter box, loading state for cold (cache-miss) lookups. | 2–3 days |
-| PH.4 | Per-user auth | Replace the single shared service token with per-user login against PVE/PBS, so the portal reflects each logged-in user's own permissions instead of one admin-scoped credential. See note below — added 2026-08-29, deliberately sequenced after PH.3 rather than blocking it. | TBD, needs its own design pass |
+| PH.4 | Per-user auth | **Implemented 2026-08-30.** Replaced the single shared service token with per-user PVE ticket login; dropped the PBS token entirely. See §7.1-7.3. | Done |
 | PH.5 | Push-to-guest *(stretch)* | Design + build a minimal in-guest agent (Windows service for `dc2.ad.starrise.net`, Linux daemon for the rest) the backend can hand a file to for placement, with its own auth. Separate, open-ended scope. | 1–2+ weeks |
 
 **On PH.4 (per-user auth):** the plan as built through PH.3 assumes a
@@ -375,6 +375,28 @@ The user has asked for the portal to eventually support logging in
 with one's own PVE identity and reflecting that identity's actual
 permissions, rather than everyone sharing the portal's one service
 account. Design pass done 2026-08-30 — see below.
+
+**Implemented 2026-08-30.** The design below shipped essentially as
+written, with two notes:
+- `storage/content`'s real shape was confirmed against the live
+  environment before writing `pve_client.list_backup_archives()` (not
+  guessed): `verification` comes back as `{"state": "ok", "upid": ...}`
+  keyed on the archive, exactly like PBS's own admin API gave. `volid`
+  embeds the guest type as its own path segment (e.g.
+  `pbs:backup/vm/133/<iso>Z`), which turned out simpler to parse
+  directly than mapping PVE's `subtype` field ("qemu"/"lxc") back to
+  our "vm"/"ct" convention.
+- The "session refresh on a timer" idea below is implemented as a lazy
+  check instead of a literal background timer: `auth.get_session()`
+  refreshes a session's PVE ticket inline on any request once it's
+  more than 90 minutes old, rather than running a separate
+  per-session timer loop. Same effect (tickets never hit their ~2h
+  expiry for an active user), simpler code — no timer bookkeeping to
+  leak or clean up.
+- 2FA was **not** investigated further and is not handled — if a
+  target user has a second factor on their PVE account, `/access/ticket`
+  will need an extra round-trip this implementation doesn't do yet.
+  Revisit if/when that's actually needed.
 
 ### 7.1 PH.4 design — PVE-only auth, no separate PBS token
 
@@ -540,17 +562,20 @@ admin hasn't supplied their own.
   which is about *this app* trusting *PVE's* self-signed cert when
   calling out to it — don't conflate the two in docs/config naming.
 
-**Remaining open questions before implementation starts:**
-- Confirm `storage/content`'s verification field shape (7.1).
-- Confirm whether any target users have PVE 2FA enabled (7.1).
-- Decide session store persistence — in-memory means a backend restart
-  logs everyone out; acceptable for a homelab tool, but worth
-  confirming rather than assuming.
-- Decide the logout UX and where the login form lives relative to the
-  existing single-page layout.
-- Pick the actual idle-timeout default and confirm the HTTPS port
-  (reuse 8000 as `https://`, or move to a different default like
-  8443?).
+**Resolved (2026-08-30):**
+- `storage/content` verification shape confirmed (7.1 implementation
+  note above).
+- 2FA: not investigated, not handled — flagged as a known gap above.
+- Session store: in-memory, as expected — a backend restart logs
+  everyone out. Accepted tradeoff for a single-process homelab tool.
+- Logout UX: a person-icon menu at the far right of the top banner
+  (matching the ABB reference the user provided), with an About entry
+  (app logo/name/credit) alongside it. Session cookie is `HttpOnly`,
+  `SameSite=Lax`, and `Secure` whenever served over HTTPS (the default).
+- Idle timeout default: **30 minutes** (`SESSION_IDLE_TIMEOUT_MINUTES`).
+- Port: **8008** by default (follows PBS's own 8007), served over
+  HTTPS via `run.py` rather than launching uvicorn directly from the
+  CLI — see 7.3.
 
 ## 8. Stack — and why
 

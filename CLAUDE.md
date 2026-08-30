@@ -11,14 +11,15 @@ live in `docs/plan.md`. Read it before writing code — this file is just
 the operating summary Claude Code should hold in context every session.
 
 ## Current phase
-**Phase 0 — Recon, CLOSED (2026-08-29). Phase 1 — MVP browse & download,
-in progress.** The real `file-restore/list` endpoint was captured from
-live Proxmox VE GUI traffic (docs/plan.md §3): base64 filepath encoding
-quirk, ~3s cold-lookup latency. The two remaining open items (API-token
-auth, `file-restore/download` shape) were resolved by consulting
-Proxmox's own published API schema rather than a second traffic capture
-— both endpoints accept a scoped API token (`allowtoken: 1`) and need
-only volume read access. Full details in docs/plan.md §3 and §10.
+**Phases 0-4 done (as of 2026-08-30).** PH.0-PH.3 (recon, browse/download
+MVP, timeline UI, caching/multi-guest polish) are complete. PH.4
+(per-user auth) landed 2026-08-30: PVE ticket login replaces the old
+shared PVE/PBS API tokens entirely, and the PBS admin API is no longer
+called at all — group/snapshot listing now comes from PVE's own
+`storage/{storage}/content` endpoint (docs/plan.md §7.1-7.3). The app
+now serves HTTPS by default (self-signed cert, admin-replaceable) on
+port 8008 via `run.py`, with a configurable idle timeout. PH.5
+(push-to-guest) remains the only open phase, a separate later effort.
 
 ## Hard constraints
 - This is a separate companion app. Do not attempt to patch or embed into
@@ -30,12 +31,14 @@ only volume read access. Full details in docs/plan.md §3 and §10.
   the same capture-from-real-traffic approach and append the findings to
   docs/plan.md §3 rather than guessing.
 - Scope split is intentional: browse + download is phases 1–3. "Restore
-  directly into the live guest" (push-to-guest) is phase 4, a separate,
+  directly into the live guest" (push-to-guest) is phase 5, a separate,
   later, open-ended effort requiring an in-guest agent. Do not fold the
   two together.
-- The backend's PBS API token must be scoped to `DatastoreReader` on the
-  specific datastore only (not an admin token), held server-side, and
-  never sent to the browser.
+- Auth is per-user PVE ticket login (PH.4, docs/plan.md §7.1) — there is
+  no shared service token anymore, and the app never talks to PBS
+  directly (all backup listing goes through PVE's own API). A logged-in
+  user's PVE ticket/CSRF token lives server-side in the session store
+  and is never sent to the browser.
 - Prefer the simplest thing that works for a single-admin homelab tool:
   no build pipeline, no SPA framework, no extra services beyond the one
   backend process and SQLite.

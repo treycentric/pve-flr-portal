@@ -1,10 +1,22 @@
-<form method="get" action="/api/download-bundle" class="file-grid-form" x-data="fileGridState()" @change="syncAllChecked()">
-  <input type="hidden" name="volume" value="{{ volume }}">
+<form class="file-grid-form" x-ref="form" data-volume="{{ volume }}" x-data="fileGridState()" @change="syncAllChecked()">
   <div class="grid-toolbar">
     <button type="button" class="btn-outline" disabled title="Restore to guest &mdash; planned (phase 4)">Restore</button>
-    <button type="submit" class="btn-outline" :disabled="count === 0">
-      <span x-text="count ? 'Download (' + count + ')' : 'Download'"></span>
-    </button>
+
+    <button type="button" class="btn-outline" disabled x-show="count === 0">Download</button>
+
+    <a class="btn-outline" x-show="count > 0 && isSingleFile" :href="singleDownloadHref()">Download</a>
+
+    <div class="dropdown-btn" x-show="count > 0 && !isSingleFile" x-cloak @click.outside="downloadMenuOpen = false">
+      <button type="button" class="btn-outline dropdown-btn-main" @click.stop="downloadMenuOpen = !downloadMenuOpen">
+        Download as
+        <svg class="dropdown-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="dropdown-menu" x-show="downloadMenuOpen" x-cloak>
+        <a class="dropdown-item" :href="bundleHref('zip')" @click="downloadMenuOpen = false">.zip</a>
+        <a class="dropdown-item" :href="bundleHref('targz')" @click="downloadMenuOpen = false">.tar.gz</a>
+        <a class="dropdown-item" :href="bundleHref('tarzst')" @click="downloadMenuOpen = false">.tar.zst</a>
+      </div>
+    </div>
   </div>
   <div class="table-scroll">
     <table class="file-grid">

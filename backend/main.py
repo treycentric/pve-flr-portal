@@ -1,17 +1,21 @@
 import io
 import json
+import tarfile
 import zipfile
+from compression import zstd
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 import httpx
-from fastapi import FastAPI, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, Form, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException
 
-from . import pbs_client, pve_client
+from . import auth, pve_client
+from .auth import SessionData
 from .config import settings
 
 app = FastAPI(title="pve-flr-portal")
@@ -39,54 +43,135 @@ def _static_version(filename: str) -> int:
 templates.env.globals["static_version"] = _static_version
 
 
-def _iso_from_unix(ts: int) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+@app.exception_handler(HTTPException)
+async def unauthorized_handler(request: Request, exc: HTTPException):
+    """401s from the auth.get_session dependency become a redirect to
+    /login instead of a bare JSON error - htmx requests get an
+    HX-Redirect header (a plain 302 would just have htmx swap the login
+    page's HTML into whatever partial target was requested)."""
+    if exc.status_code == 401:
+        if request.headers.get("HX-Request"):
+            return Response(status_code=200, headers={"HX-Redirect": "/login"})
+        return RedirectResponse(url="/login", status_code=302)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
-def _volid_for(guest_type: str, guest_vmid: str, backup_time_iso: str) -> str:
-    return f"{settings.pve_storage}:backup/{guest_type}/{guest_vmid}/{backup_time_iso}"
+@app.get("/login")
+async def login_page(request: Request):
+    try:
+        realms = await auth.list_realms()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print("DEBUG list_realms failed:", type(e).__name__, e)
+        realms = []
+    return templates.TemplateResponse(request, "login.html", {"error": None, "realms": realms})
+
+
+@app.post("/login")
+async def login_submit(
+    request: Request, username: str = Form(...), realm: str = Form(...), password: str = Form(...)
+):
+    full_username = username if "@" in username else f"{username}@{realm}"
+    try:
+        session_id = await auth.login(full_username, password)
+    except HTTPException:
+        try:
+            realms = await auth.list_realms()
+        except httpx.HTTPStatusError:
+            realms = []
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Invalid username or password", "realms": realms},
+            status_code=401,
+        )
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        "session_id",
+        session_id,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        max_age=60 * 60 * 24,
+    )
+    return response
+
+
+@app.get("/logout")
+async def logout_route(request: Request):
+    session_id = request.cookies.get("session_id")
+    if session_id:
+        auth.logout(session_id)
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie("session_id")
+    return response
+
+
+def _parse_volid(volid: str) -> tuple[str, str, str]:
+    """"pbs:backup/vm/133/2026-08-30T02:03:57Z" -> ("vm", "133", "2026-08-30T02:03:57Z")."""
+    _, rest = volid.split(":", 1)
+    _, guest_type, vmid, iso = rest.split("/", 3)
+    return guest_type, vmid, iso
 
 
 @app.get("/")
-async def index(request: Request, task: str | None = None):
-    raw_groups = await pbs_client.list_groups()
+async def index(request: Request, task: str | None = None, session: SessionData = Depends(auth.get_session)):
+    archives = await pve_client.list_backup_archives(session)
     try:
-        guest_names = await pve_client.list_guest_names()
+        guest_names = await pve_client.list_guest_names(session)
     except httpx.HTTPStatusError:
         guest_names = {}
-    groups = sorted(
-        (
+
+    parsed = []
+    for a in archives:
+        guest_type, vmid, iso = _parse_volid(a["volid"])
+        verification = a.get("verification") or {}
+        parsed.append(
             {
-                "type": g["backup-type"],
-                "vmid": g["backup-id"],
-                "last_backup": g["last-backup"],
-                "name": guest_names.get(g["backup-id"]),
+                "type": guest_type,
+                "vmid": vmid,
+                "volume": a["volid"],
+                "time": iso,
+                "ctime": a.get("ctime", 0),
+                "size": a.get("size"),
+                "verified": verification.get("state") == "ok",
             }
-            for g in raw_groups
-        ),
-        key=lambda g: (g["type"], g["vmid"]),
-    )
+        )
+
+    groups_map: dict[tuple[str, str], dict] = {}
+    for p in parsed:
+        key = (p["type"], p["vmid"])
+        if key not in groups_map or p["ctime"] > groups_map[key]["last_backup"]:
+            groups_map[key] = {
+                "type": p["type"],
+                "vmid": p["vmid"],
+                "last_backup": p["ctime"],
+                "name": guest_names.get(p["vmid"]),
+            }
+    groups = sorted(groups_map.values(), key=lambda g: (g["type"], g["vmid"]))
 
     if task and ":" in task and any(f"{g['type']}:{g['vmid']}" == task for g in groups):
         guest_type, guest_vmid = task.split(":", 1)
     elif groups:
         guest_type, guest_vmid = groups[0]["type"], groups[0]["vmid"]
     else:
-        guest_type, guest_vmid = settings.guest_type, settings.guest_vmid
+        guest_type, guest_vmid = None, None
 
     snapshots = []
     if guest_vmid:
-        raw_snapshots = await pbs_client.list_snapshots(guest_type, guest_vmid)
-        for snap in sorted(raw_snapshots, key=lambda s: s["backup-time"], reverse=True):
-            iso = _iso_from_unix(snap["backup-time"])
-            snapshots.append(
-                {
-                    "volume": _volid_for(guest_type, guest_vmid, iso),
-                    "time": iso,
-                    "size": snap.get("size"),
-                    "verified": bool(snap.get("verification")),
-                }
-            )
+        for p in parsed:
+            if p["type"] == guest_type and p["vmid"] == guest_vmid:
+                snapshots.append(
+                    {"volume": p["volume"], "time": p["time"], "size": p["size"], "verified": p["verified"]}
+                )
+        snapshots.sort(key=lambda s: s["time"], reverse=True)
+
+    guest_name = groups_map.get((guest_type, guest_vmid), {}).get("name") if guest_vmid else None
+    if guest_vmid:
+        guest_label = f"{guest_name} ({guest_vmid})" if guest_name else f"{guest_type.upper()} {guest_vmid}"
+    else:
+        guest_label = None
 
     return templates.TemplateResponse(
         request,
@@ -96,10 +181,9 @@ async def index(request: Request, task: str | None = None):
             "snapshots_json": json.dumps(snapshots),
             "guest_vmid": guest_vmid,
             "guest_type": guest_type,
+            "guest_label": guest_label,
             "groups_json": json.dumps(groups),
-            # Stand-in until PH.4 per-user login lands: the identity behind
-            # the single shared service token currently used for everything.
-            "current_identity": settings.pve_token_id.split("!")[0],
+            "current_identity": session.username,
         },
     )
 
@@ -125,9 +209,9 @@ def _pve_error_message(exc: httpx.HTTPStatusError) -> str:
 
 
 @app.get("/api/browse")
-async def browse(request: Request, volume: str, filepath: str = "/"):
+async def browse(request: Request, volume: str, filepath: str = "/", session: SessionData = Depends(auth.get_session)):
     try:
-        entries = await pve_client.list_path(volume, filepath)
+        entries = await pve_client.list_path(session, volume, filepath)
     except httpx.HTTPStatusError as exc:
         return templates.TemplateResponse(
             request,
@@ -151,10 +235,21 @@ async def browse(request: Request, volume: str, filepath: str = "/"):
     )
 
 
+def _content_disposition(filename: str) -> str:
+    safe = filename.replace('"', "'").replace("\r", "").replace("\n", "")
+    return f"attachment; filename=\"{safe}\"; filename*=UTF-8''{quote(filename)}"
+
+
 @app.get("/api/tree")
-async def tree(request: Request, volume: str, filepath: str = "/", crumbs: str = "[]"):
+async def tree(
+    request: Request,
+    volume: str,
+    filepath: str = "/",
+    crumbs: str = "[]",
+    session: SessionData = Depends(auth.get_session),
+):
     try:
-        entries = await pve_client.list_path(volume, filepath)
+        entries = await pve_client.list_path(session, volume, filepath)
     except httpx.HTTPStatusError:
         entries = []
     at_root = filepath == "/"
@@ -180,14 +275,15 @@ async def tree(request: Request, volume: str, filepath: str = "/", crumbs: str =
     )
 
 
-def _content_disposition(filename: str) -> str:
-    safe = filename.replace('"', "'").replace("\r", "").replace("\n", "")
-    return f"attachment; filename=\"{safe}\"; filename*=UTF-8''{quote(filename)}"
-
-
 @app.get("/api/download")
-async def download(volume: str, filepath: str, tar: bool = False, name: str | None = None):
-    client, response = await pve_client.open_download(volume, filepath, tar)
+async def download(
+    volume: str,
+    filepath: str,
+    tar: bool = False,
+    name: str | None = None,
+    session: SessionData = Depends(auth.get_session),
+):
+    client, response = await pve_client.open_download(session, volume, filepath, tar)
 
     async def body():
         try:
@@ -206,26 +302,64 @@ async def download(volume: str, filepath: str, tar: bool = False, name: str | No
     return StreamingResponse(body(), media_type=media_type, headers=headers)
 
 
+_ARCHIVE_FORMATS = {
+    "zip": ("zip", "application/zip"),
+    "targz": ("tar.gz", "application/gzip"),
+    "tarzst": ("tar.zst", "application/zstd"),
+}
+
+
 @app.get("/api/download-bundle")
-async def download_bundle(volume: str, item: list[str] = Query(...)):
+async def download_bundle(
+    volume: str,
+    item: list[str] = Query(...),
+    name: str = "download",
+    format: str = "zip",
+    session: SessionData = Depends(auth.get_session),
+):
+    if format not in _ARCHIVE_FORMATS:
+        raise HTTPException(status_code=400, detail=f"Unknown archive format: {format}")
+    extension, media_type = _ARCHIVE_FORMATS[format]
+
+    entries: list[tuple[str, bytes]] = []
+    for raw in item:
+        spec = json.loads(raw)
+        filepath = spec["filepath"]
+        item_name = spec["name"]
+        is_dir = not spec.get("leaf", True)
+        client, response = await pve_client.open_download(session, volume, filepath, tar=False)
+        try:
+            content = await response.aread()
+        finally:
+            await response.aclose()
+            await client.aclose()
+        if is_dir:
+            with zipfile.ZipFile(io.BytesIO(content)) as sub:
+                for info in sub.infolist():
+                    entries.append((f"{item_name}/{info.filename}", sub.read(info.filename)))
+        else:
+            entries.append((item_name, content))
+
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        for raw in item:
-            spec = json.loads(raw)
-            filepath = spec["filepath"]
-            name = spec["name"]
-            is_dir = not spec.get("leaf", True)
-            client, response = await pve_client.open_download(volume, filepath, tar=False)
-            try:
-                content = await response.aread()
-            finally:
-                await response.aclose()
-                await client.aclose()
-            if is_dir:
-                with zipfile.ZipFile(io.BytesIO(content)) as sub:
-                    for info in sub.infolist():
-                        bundle.writestr(f"{name}/{info.filename}", sub.read(info.filename))
-            else:
-                bundle.writestr(name, content)
-    headers = {"content-disposition": _content_disposition("selected-files.zip")}
-    return StreamingResponse(iter([buffer.getvalue()]), media_type="application/zip", headers=headers)
+    if format == "zip":
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for arcname, content in entries:
+                bundle.writestr(arcname, content)
+    else:
+        # compression.zstd is Python 3.14+ stdlib - no extra dependency
+        # needed for .tar.zst (docs/plan.md); .tar.gz uses tarfile's
+        # built-in gzip support the same way.
+        tar_mode = "w:gz" if format == "targz" else "w|"
+        outer = zstd.open(buffer, mode="wb") if format == "tarzst" else buffer
+        try:
+            with tarfile.open(fileobj=outer, mode=tar_mode) as bundle:
+                for arcname, content in entries:
+                    info = tarfile.TarInfo(name=arcname)
+                    info.size = len(content)
+                    bundle.addfile(info, io.BytesIO(content))
+        finally:
+            if outer is not buffer:
+                outer.close()
+
+    headers = {"content-disposition": _content_disposition(f"{name}.{extension}")}
+    return StreamingResponse(iter([buffer.getvalue()]), media_type=media_type, headers=headers)

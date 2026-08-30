@@ -39,9 +39,7 @@ function userMenu(identity) {
     aboutOpen: false,
     logout() {
       this.open = false;
-      // Placeholder: no real session exists yet (single shared service
-      // token, see docs/plan.md PH.4). Wire this to POST /logout once
-      // per-user PVE ticket auth lands.
+      window.location = '/logout';
     },
   };
 }
@@ -50,6 +48,7 @@ function fileGridState() {
   return {
     count: 0,
     allChecked: false,
+    downloadMenuOpen: false,
     sortKey: 'name',
     sortDir: 'asc',
     init() {
@@ -66,6 +65,43 @@ function fileGridState() {
       const boxes = this.$refs.tbody.querySelectorAll('input[type=checkbox]');
       this.count = Array.from(boxes).filter((b) => b.checked).length;
       this.allChecked = boxes.length > 0 && this.count === boxes.length;
+    },
+    get selectedItems() {
+      const boxes = this.$refs.tbody.querySelectorAll('input[type=checkbox]:checked');
+      return Array.from(boxes).map((b) => JSON.parse(b.value));
+    },
+    get isSingleFile() {
+      const sel = this.selectedItems;
+      return sel.length === 1 && sel[0].leaf !== false;
+    },
+    get archiveBaseName() {
+      const sel = this.selectedItems;
+      if (sel.length === 1 && sel[0].leaf === false) return sel[0].name;
+      return this.crumbs && this.crumbs.length ? this.crumbs[this.crumbs.length - 1].label : 'download';
+    },
+    singleDownloadHref() {
+      // Reading this.count (even unused) gives Alpine's dependency tracker
+      // something reactive to subscribe to - selectedItems itself only
+      // reads raw checkbox DOM state via $refs, which Alpine can't see,
+      // so without this the href would freeze at whatever it was on the
+      // first render and never update as checkboxes are (un)checked.
+      void this.count;
+      const sel = this.selectedItems;
+      if (!sel.length) return '#';
+      const params = new URLSearchParams();
+      params.set('volume', this.$refs.form.dataset.volume);
+      params.set('filepath', sel[0].filepath);
+      params.set('name', sel[0].name);
+      return '/api/download?' + params.toString();
+    },
+    bundleHref(format) {
+      void this.count; // see singleDownloadHref
+      const params = new URLSearchParams();
+      params.set('volume', this.$refs.form.dataset.volume);
+      params.set('name', this.archiveBaseName);
+      params.set('format', format);
+      this.selectedItems.forEach((it) => params.append('item', JSON.stringify(it)));
+      return '/api/download-bundle?' + params.toString();
     },
     setSort(key) {
       if (this.sortKey === key) {
