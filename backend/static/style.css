@@ -277,6 +277,54 @@ body {
   overflow: hidden;
 }
 
+.browser-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 0.75rem;
+}
+
+.tree-pane {
+  flex: 0 0 200px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 0.5rem;
+  font-size: 13px;
+}
+
+.tree-resizer {
+  flex: 0 0 5px;
+  min-height: 0;
+  cursor: col-resize;
+  background: transparent;
+  border-radius: 2px;
+  position: relative;
+}
+
+.tree-resizer::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+
+.tree-resizer:hover,
+.tree-resizer:active {
+  background: var(--border-hover);
+}
+
+.browse-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 #file-grid {
   flex: 1;
   min-height: 0;
@@ -517,6 +565,79 @@ body {
 }
 
 .link-btn:disabled {
+  color: var(--disabled-text);
+  cursor: not-allowed;
+}
+
+.tree-list {
+  list-style: none;
+  margin: 0;
+  padding-left: 14px;
+  width: max-content;
+  min-width: 100%;
+}
+
+.tree-pane > div > .tree-list {
+  padding-left: 0;
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tree-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  transform: rotate(0deg);
+  transition: transform 0.1s ease;
+}
+
+.tree-toggle.is-open {
+  transform: rotate(90deg);
+}
+
+.tree-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tree-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.tree-label:hover:not(:disabled) {
+  background: var(--tree-hover);
+}
+
+.tree-label.is-selected {
+  background: var(--tree-selected);
+  color: #ffffff;
+}
+
+.tree-label:disabled {
   color: var(--disabled-text);
   cursor: not-allowed;
 }

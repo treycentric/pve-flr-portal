@@ -174,10 +174,12 @@ function portalApp(rawSnapshots) {
     },
 
     async selectSnapshot(snapshot) {
+      const preservedSelection = this._captureSelection();
       this.selectedVolume = snapshot.volume;
       this.activeDayKey = null;
       this.activeDayItems = [];
       this.volume = snapshot.volume;
+      await this.loadTree();
       if (this.crumbs.length === 0) {
         this.crumbs = [{ label: 'Root', filepath: '/' }];
       }
@@ -196,12 +198,14 @@ function portalApp(rawSnapshots) {
       while (this.crumbs.length > 1) {
         if (await this.load()) {
           this._pushHistory();
+          this._applySelection(preservedSelection);
           return;
         }
         this.crumbs.pop();
       }
       await this.load();
       this._pushHistory();
+      this._applySelection(preservedSelection);
     },
 
     toggleDay(key, items, screenX) {
@@ -592,6 +596,79 @@ function portalApp(rawSnapshots) {
       this._pushHistory();
       this.load();
     },
+    setPath(crumbs) {
+      if (this.loading) return;
+      this.crumbs = crumbs;
+      this._pushHistory();
+      this.load();
+    },
+    treeWidth: 200,
+    _treeResizing: false,
+    startTreeResize(e) {
+      this._treeResizing = true;
+      const startX = e.clientX;
+      const startWidth = this.treeWidth;
+      const onMove = (ev) => {
+        if (!this._treeResizing) return;
+        this.treeWidth = Math.min(500, Math.max(120, startWidth + (ev.clientX - startX)));
+      };
+      const onUp = () => {
+        this._treeResizing = false;
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    },
+    _treeVolume: null,
+    expandedTreePaths: [],
+    trackTreeToggle(filepath, isOpen) {
+      if (isOpen) {
+        if (!this.expandedTreePaths.includes(filepath)) this.expandedTreePaths.push(filepath);
+      } else {
+        this.expandedTreePaths = this.expandedTreePaths.filter((p) => p !== filepath);
+      }
+    },
+    async _restoreTreeExpansion() {
+      for (const path of this.expandedTreePaths) {
+        const btn = document.querySelector('.tree-toggle[data-filepath="' + path + '"]');
+        if (!btn) continue;
+        const node = btn.closest('.tree-node');
+        const ul = node && node.nextElementSibling;
+        if (!ul || ul.tagName !== 'UL') continue;
+        const url = btn.getAttribute('hx-get');
+        try {
+          await htmx.ajax('GET', url, { target: ul, swap: 'innerHTML' });
+        } catch (e) {
+          continue;
+        }
+        if (window.Alpine) window.Alpine.$data(node).open = true;
+      }
+    },
+    async loadTree() {
+      if (this._treeVolume === this.volume) return;
+      this._treeVolume = this.volume;
+      const rootCrumbs = encodeURIComponent(JSON.stringify([{ label: 'Root', filepath: '/' }]));
+      const url = '/api/tree?volume=' + encodeURIComponent(this.volume) + '&filepath=' + encodeURIComponent('/') + '&crumbs=' + rootCrumbs;
+      await htmx.ajax('GET', url, { target: '#tree-root', swap: 'innerHTML' });
+      await this._restoreTreeExpansion();
+    },
+    _captureSelection() {
+      const boxes = document.querySelectorAll('#file-grid input[type=checkbox][name=item]');
+      return Array.from(boxes)
+        .filter((b) => b.checked)
+        .map((b) => JSON.parse(b.value).filepath);
+    },
+    _applySelection(filepaths) {
+      if (!filepaths || !filepaths.length) return;
+      const rows = document.querySelectorAll('#file-grid tbody tr');
+      rows.forEach((row) => {
+        const box = row.querySelector('input[type=checkbox][name=item]');
+        if (box && filepaths.includes(row.dataset.filepath)) box.checked = true;
+      });
+      const grid = document.querySelector('#file-grid');
+      if (grid) grid.dispatchEvent(new Event('change', { bubbles: true }));
+    },
     _pushHistory() {
       this.history = this.history.slice(0, this.historyIndex + 1);
       this.history.push({ volume: this.volume, crumbs: this.crumbs.map((c) => ({ ...c })) });
@@ -603,19 +680,21 @@ function portalApp(rawSnapshots) {
     get canGoForward() {
       return this.historyIndex < this.history.length - 1;
     },
-    goBack() {
+    async goBack() {
       if (this.loading || !this.canGoBack) return;
       this.historyIndex--;
       const entry = this.history[this.historyIndex];
       this.volume = entry.volume;
+      await this.loadTree();
       this.crumbs = entry.crumbs.map((c) => ({ ...c }));
       this.load();
     },
-    goForward() {
+    async goForward() {
       if (this.loading || !this.canGoForward) return;
       this.historyIndex++;
       const entry = this.history[this.historyIndex];
       this.volume = entry.volume;
+      await this.loadTree();
       this.crumbs = entry.crumbs.map((c) => ({ ...c }));
       this.load();
     },
@@ -627,7 +706,33 @@ function portalApp(rawSnapshots) {
       this.loading = true;
       await htmx.ajax('GET', url, { target: '#file-grid', indicator: '#loading' });
       this.loading = false;
+      await this._syncTreeToCrumbs();
       return !document.querySelector('#file-grid .browse-error');
+    },
+    // Expands whatever ancestor tree nodes are needed so the node matching
+    // the current crumb trail is visible; highlighting itself is handled
+    // reactively by the is-selected binding in tree_nodes.html comparing
+    // against `crumbs`, since both share this same Alpine scope.
+    async _syncTreeToCrumbs() {
+      for (let i = 1; i < this.crumbs.length; i++) {
+        const c = this.crumbs[i];
+        const btn = document.querySelector('.tree-toggle[data-filepath="' + c.filepath + '"]');
+        if (!btn) break;
+        if (i === this.crumbs.length - 1) break;
+        const node = btn.closest('.tree-node');
+        const isOpen = window.Alpine ? window.Alpine.$data(node).open : false;
+        if (isOpen) continue;
+        const ul = node.nextElementSibling;
+        if (!ul || ul.tagName !== 'UL') break;
+        const fetchUrl = btn.getAttribute('hx-get');
+        try {
+          await htmx.ajax('GET', fetchUrl, { target: ul, swap: 'innerHTML' });
+        } catch (e) {
+          break;
+        }
+        if (window.Alpine) window.Alpine.$data(node).open = true;
+        this.trackTreeToggle(c.filepath, true);
+      }
     },
   };
 }

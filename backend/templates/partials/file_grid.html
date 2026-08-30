@@ -24,6 +24,7 @@
           data-size="{{ e.size if e.size is not none else -1 }}"
           data-type="{{ e.type_label | lower }}"
           data-modified="{{ e.mtime if e.mtime is not none else 0 }}"
+          data-filepath="{{ e.filepath }}"
           x-show="!fileFilter || $el.dataset.name.includes(fileFilter.toLowerCase())">
           <td><input type="checkbox" name="item" value="{{ e.item_json }}"></td>
           <td>

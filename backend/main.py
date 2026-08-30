@@ -148,6 +148,35 @@ async def browse(request: Request, volume: str, filepath: str = "/"):
     )
 
 
+@app.get("/api/tree")
+async def tree(request: Request, volume: str, filepath: str = "/", crumbs: str = "[]"):
+    try:
+        entries = await pve_client.list_path(volume, filepath)
+    except httpx.HTTPStatusError:
+        entries = []
+    at_root = filepath == "/"
+    parent_crumbs = json.loads(crumbs)
+    nodes = []
+    for entry in entries:
+        if bool(entry.get("leaf", True)):
+            continue
+        text = entry.get("text", "")
+        child_crumbs = parent_crumbs + [{"label": text, "filepath": entry["filepath"]}]
+        nodes.append(
+            {
+                "filepath": entry["filepath"],
+                "text": text,
+                "type_label": _type_label(entry, at_root),
+                "crumbs_json": json.dumps(child_crumbs),
+            }
+        )
+    return templates.TemplateResponse(
+        request,
+        "partials/tree_nodes.html",
+        {"nodes": nodes, "volume": volume},
+    )
+
+
 def _content_disposition(filename: str) -> str:
     safe = filename.replace('"', "'").replace("\r", "").replace("\n", "")
     return f"attachment; filename=\"{safe}\"; filename*=UTF-8''{quote(filename)}"

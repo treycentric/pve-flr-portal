@@ -71,10 +71,18 @@
         <input type="text" x-model="fileFilter" placeholder="Filter" class="grid-filter-input">
       </div>
     </div>
-    <div id="file-grid">
-      <p class="empty-state">
-        {% if not snapshots %}No snapshots found.{% else %}Loading latest snapshot&hellip;{% endif %}
-      </p>
+    <div class="browser-body">
+      <nav class="tree-pane" x-show="volume" x-cloak :style="'flex-basis: ' + treeWidth + 'px'">
+        <div id="tree-root"></div>
+      </nav>
+      <div class="tree-resizer" x-show="volume" x-cloak @pointerdown="startTreeResize($event)"></div>
+      <div class="browse-main">
+        <div id="file-grid">
+          <p class="empty-state">
+            {% if not snapshots %}No snapshots found.{% else %}Loading latest snapshot&hellip;{% endif %}
+          </p>
+        </div>
+      </div>
     </div>
   </section>
 
