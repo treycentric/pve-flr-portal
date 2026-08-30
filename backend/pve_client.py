@@ -12,10 +12,25 @@ import httpx
 from .config import settings
 
 _BASE = f"https://{settings.pve_host}:8006/api2/json/nodes/localhost/storage/{settings.pve_storage}/file-restore"
+_API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 
 
 def _headers() -> dict[str, str]:
     return {"Authorization": f"PVEAPIToken={settings.pve_token_id}={settings.pve_token_secret}"}
+
+
+async def list_guest_names() -> dict[str, str]:
+    """Best-effort vmid -> guest name map from /cluster/resources. This
+    endpoint has no explicit privilege gate (allowtoken, permissions:
+    user=all), but PVE field-filters what it returns based on what the
+    caller can already see, so a narrowly-scoped token (VM.Backup only,
+    no VM.Audit) may get entries back with no 'name' field. Callers should
+    treat a missing/absent name as "unknown", not an error.
+    """
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        resp = await client.get(f"{_API_ROOT}/cluster/resources", params={"type": "vm"}, headers=_headers())
+        resp.raise_for_status()
+        return {str(item["vmid"]): item["name"] for item in resp.json()["data"] if item.get("name")}
 
 
 async def list_path(volume: str, filepath: str = "/") -> list[dict]:

@@ -1,7 +1,50 @@
 {% extends "base.html" %}
 {% block topbar_meta %}
-<span class="status-title">Guest</span>
-<span class="status-value">{{ guest_vmid }}</span>
+<script id="groups-data" type="application/json">{{ groups_json | safe }}</script>
+<div x-data="taskPicker(JSON.parse(document.getElementById('groups-data').textContent), '{{ guest_type }}:{{ guest_vmid }}')">
+  <button type="button" class="task-trigger" @click="open = true">
+    <span class="task-trigger-text">
+      <span class="status-title">Task</span>
+      <span class="status-value" x-text="currentLabel"></span>
+    </span>
+    <svg class="task-trigger-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+  </button>
+
+  <div class="modal-overlay" x-show="open" x-cloak @click.self="open = false" @keydown.escape.window="open = false">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2>Change viewed task</h2>
+        <button type="button" class="modal-close" @click="open = false">&times;</button>
+      </div>
+      <div class="modal-filter">
+        <input type="text" x-model="filter" placeholder="Filter" class="modal-filter-input">
+      </div>
+      <div class="modal-table-wrap">
+        <table class="modal-table">
+          <thead>
+            <tr><th>Type</th><th>Guest</th><th>Last Backup</th></tr>
+          </thead>
+          <tbody>
+            <template x-for="g in filtered" :key="g.type + ':' + g.vmid">
+              <tr :class="{ 'is-selected': selected === g.type + ':' + g.vmid }" @click="selected = g.type + ':' + g.vmid">
+                <td x-text="g.type.toUpperCase()"></td>
+                <td x-text="g.name ? g.name + ' (' + g.vmid + ')' : g.vmid"></td>
+                <td x-text="formatLastBackup(g.last_backup)"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-footer">
+        <span class="modal-count" x-text="filtered.length + ' items'"></span>
+        <div class="modal-actions">
+          <button type="button" class="btn-primary" @click="confirm()">OK</button>
+          <button type="button" class="btn-outline" @click="open = false">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 {% block content %}
 <script id="snapshot-data" type="application/json">{{ snapshots_json | safe }}</script>
@@ -11,15 +54,22 @@
       Loading&hellip; (cold snapshot lookups can take a few seconds &mdash; this is the helper VM booting)
     </div>
     <div class="breadcrumb-bar" x-show="volume" x-cloak>
-      <button type="button" class="up-btn" @click="up()" :disabled="crumbs.length <= 1">&uarr; Up</button>
+      <div class="history-nav">
+        <button type="button" class="nav-btn" @click="goBack()" :disabled="!canGoBack || loading" title="Back">&lsaquo;</button>
+        <button type="button" class="nav-btn" @click="goForward()" :disabled="!canGoForward || loading" title="Forward">&rsaquo;</button>
+      </div>
       <nav class="breadcrumb">
         <template x-for="(crumb, idx) in crumbs" :key="idx">
           <span>
-            <button type="button" class="crumb-btn" @click="goTo(idx)" x-text="crumb.label"></button>
-            <span x-show="idx < crumbs.length - 1"> / </span>
+            <button type="button" class="crumb-btn" @click="goTo(idx)" :disabled="loading" x-text="crumb.label"></button>
+            <span class="crumb-sep" x-show="idx < crumbs.length - 1">&rsaquo;</span>
           </span>
         </template>
       </nav>
+      <div class="grid-filter">
+        <svg class="grid-filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+        <input type="text" x-model="fileFilter" placeholder="Filter" class="grid-filter-input">
+      </div>
     </div>
     <div id="file-grid">
       <p class="empty-state">

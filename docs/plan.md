@@ -275,6 +275,57 @@ actually opens that folder at that point in time.
 | Bottom timeline — dots, count badges, draggable date marker, zoom | Scrub across backup dates, jump to one | Hand-rolled: one dot per indexed snapshot, badge per day at current zoom, click sets active snapshot and re-renders the grid | The reason the project exists — most build effort here |
 | Calendar-jump / locate icons | Jump to a date, or re-center on "now" | Same two icons wired to the timeline component | Full, once the timeline exists |
 
+### PH.2 implementation status (2026-08-29)
+
+The timeline widget (hand-rolled inline SVG, `backend/static/app.js`
+`renderTimeline()`) is built and working: per-day dots with drop
+shadow, a speech-bubble count badge above each (always shown, even for
+count=1), a day-picker popup (numbered rows, styled after the real
+`.syno-ab-timeline-menu` CSS) that opens on any marker click, an
+icon toolbar (calendar date-picker, "now", jump-to-latest-snapshot,
+refresh, older/newer-snapshot stepper) matching the real ABB icon
+positions, drag-to-pan via Pointer Events, and a fixed center reference
+line (not tied to any date — selecting a snapshot pans the view so its
+day lands under it). Colors/fonts are pulled from ABB's real shipped
+CSS (`ActiveBackup-Portal/style.css`, captured via the user's own
+DevTools, not guessed): navy `#16415C` top bar, `#007CB2` accent,
+`#2C8BC7` selected-marker blue, Open Sans.
+
+A dev-only synthetic-data test harness lives at
+`backend/static/timeline-preview.html` — generates ~90 days of fake
+snapshots (with periodic multi-per-day clusters) so the timeline can be
+exercised without real backup history. Its markup must be kept in sync
+by hand with `index.html`'s timeline `<footer>` block; there's a
+comment in both files calling this out.
+
+**Confirmed quirk (2026-08-29): `Element.setPointerCapture()` silently
+kills click targeting on descendant shapes.** The drag-to-pan handler
+originally called `svg.setPointerCapture(e.pointerId)` on `pointerdown`
+to keep panning working if the cursor left the widget mid-drag. This
+retargets *every* subsequent event for that pointer — including
+`pointerup` and the browser's synthesized `click` — to the capturing
+element itself. Result: every click inside the SVG resolved its
+`event.target` to the bare `<svg>` root, never to the marker `<g>` or
+any child shape, regardless of hit-area size, z-order, or fill opacity.
+Identical in Firefox and Chrome/Edge (both implement the same
+click-follows-capture behavior per spec), which is what made it so
+confusing to chase — it looked like a hit-testing/sizing bug but was
+actually an event-retargeting one. Fix: don't call
+`setPointerCapture` — attach `pointermove`/`pointerup`/`pointercancel`
+to `window` for the drag's duration instead (same "keep panning past
+the widget edge" behavior, no retargeting side effect). Verified via a
+live A/B in DevTools: re-adding `setPointerCapture` at runtime
+reproduced the exact bug instantly at an identical click coordinate.
+If marker clicks ever go dead again, check here first before
+suspecting hit-area geometry.
+
+**Tooling note:** when driving a real browser via automation to debug
+click coordinates, the screenshot/click coordinate space can be scaled
+down from the actual CSS pixel viewport (observed here: screenshots
+~1500px wide vs. `window.innerWidth` of 2089) — always scale computed
+`getBoundingClientRect()` coordinates by the same ratio before clicking
+with the automation tool, or clicks silently land on the wrong element.
+
 ## 6. Data model
 
 ```sql

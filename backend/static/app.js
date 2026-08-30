@@ -1,3 +1,83 @@
+function taskPicker(groups, current) {
+  return {
+    groups,
+    open: false,
+    filter: '',
+    selected: current,
+    current,
+    get currentLabel() {
+      const [type, vmid] = this.current.split(':');
+      const match = this.groups.find((g) => g.type === type && g.vmid === vmid);
+      return match && match.name ? `${vmid} (${match.name})` : `${type.toUpperCase()} ${vmid}`;
+    },
+    get filtered() {
+      const f = this.filter.trim().toLowerCase();
+      if (!f) return this.groups;
+      return this.groups.filter(
+        (g) =>
+          g.vmid.toLowerCase().includes(f) ||
+          g.type.toLowerCase().includes(f) ||
+          (g.name && g.name.toLowerCase().includes(f))
+      );
+    },
+    formatLastBackup(ts) {
+      if (!ts) return '';
+      const d = new Date(ts * 1000);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    },
+    confirm() {
+      window.location = '/?task=' + encodeURIComponent(this.selected);
+    },
+  };
+}
+
+function fileGridState() {
+  return {
+    count: 0,
+    allChecked: false,
+    sortKey: 'name',
+    sortDir: 'asc',
+    init() {
+      this.applySort();
+    },
+    toggleAll() {
+      const boxes = this.$refs.tbody.querySelectorAll('input[type=checkbox]');
+      boxes.forEach((box) => {
+        box.checked = this.allChecked;
+      });
+      this.count = this.allChecked ? boxes.length : 0;
+    },
+    syncAllChecked() {
+      const boxes = this.$refs.tbody.querySelectorAll('input[type=checkbox]');
+      this.count = Array.from(boxes).filter((b) => b.checked).length;
+      this.allChecked = boxes.length > 0 && this.count === boxes.length;
+    },
+    setSort(key) {
+      if (this.sortKey === key) {
+        this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.sortKey = key;
+        this.sortDir = 'asc';
+      }
+      this.applySort();
+    },
+    applySort() {
+      const tbody = this.$refs.tbody;
+      const rows = Array.from(tbody.querySelectorAll('tr'));
+      const dir = this.sortDir === 'asc' ? 1 : -1;
+      const numeric = this.sortKey === 'size' || this.sortKey === 'modified';
+      rows.sort((a, b) => {
+        const av = a.dataset[this.sortKey];
+        const bv = b.dataset[this.sortKey];
+        if (numeric) return (Number(av) - Number(bv)) * dir;
+        return av.localeCompare(bv) * dir;
+      });
+      rows.forEach((r) => tbody.appendChild(r));
+    },
+  };
+}
+
 function portalApp(rawSnapshots) {
   const snapshots = rawSnapshots
     .map((s) => ({ ...s, date: new Date(s.time) }))
@@ -17,6 +97,9 @@ function portalApp(rawSnapshots) {
     // --- browse state ---
     volume: null,
     crumbs: [],
+    fileFilter: '',
+    history: [],
+    historyIndex: -1,
 
     init() {
       this.$nextTick(() => {
@@ -90,12 +173,14 @@ function portalApp(rawSnapshots) {
       return days;
     },
 
-    selectSnapshot(snapshot) {
+    async selectSnapshot(snapshot) {
       this.selectedVolume = snapshot.volume;
       this.activeDayKey = null;
       this.activeDayItems = [];
       this.volume = snapshot.volume;
-      this.crumbs = [{ label: 'Root', filepath: '/' }];
+      if (this.crumbs.length === 0) {
+        this.crumbs = [{ label: 'Root', filepath: '/' }];
+      }
       // Center the view on the selected date's midnight (matching where its
       // dot is actually drawn, per groupsInView) under the fixed center
       // line, preserving whatever zoom level is currently active.
@@ -104,8 +189,19 @@ function portalApp(rawSnapshots) {
       const target = dayStart.getTime();
       this.viewStart = new Date(target - span / 2);
       this.viewEnd = new Date(target + span / 2);
-      this.load();
       this.renderTimeline();
+      // Try to land on the same path in the new snapshot; if a level along
+      // the current breadcrumb trail doesn't exist there (browse_error.html
+      // came back), fall back one level at a time until one resolves.
+      while (this.crumbs.length > 1) {
+        if (await this.load()) {
+          this._pushHistory();
+          return;
+        }
+        this.crumbs.pop();
+      }
+      await this.load();
+      this._pushHistory();
     },
 
     toggleDay(key, items, screenX) {
@@ -483,26 +579,55 @@ function portalApp(rawSnapshots) {
     },
 
     // --- folder browsing (drives the file grid via htmx) ---
+    loading: false,
     goInto(filepath, label) {
+      if (this.loading) return;
       this.crumbs.push({ label, filepath });
+      this._pushHistory();
       this.load();
     },
     goTo(idx) {
+      if (this.loading) return;
       this.crumbs = this.crumbs.slice(0, idx + 1);
+      this._pushHistory();
       this.load();
     },
-    up() {
-      if (this.crumbs.length > 1) {
-        this.crumbs.pop();
-        this.load();
-      }
+    _pushHistory() {
+      this.history = this.history.slice(0, this.historyIndex + 1);
+      this.history.push({ volume: this.volume, crumbs: this.crumbs.map((c) => ({ ...c })) });
+      this.historyIndex = this.history.length - 1;
     },
-    load() {
+    get canGoBack() {
+      return this.historyIndex > 0;
+    },
+    get canGoForward() {
+      return this.historyIndex < this.history.length - 1;
+    },
+    goBack() {
+      if (this.loading || !this.canGoBack) return;
+      this.historyIndex--;
+      const entry = this.history[this.historyIndex];
+      this.volume = entry.volume;
+      this.crumbs = entry.crumbs.map((c) => ({ ...c }));
+      this.load();
+    },
+    goForward() {
+      if (this.loading || !this.canGoForward) return;
+      this.historyIndex++;
+      const entry = this.history[this.historyIndex];
+      this.volume = entry.volume;
+      this.crumbs = entry.crumbs.map((c) => ({ ...c }));
+      this.load();
+    },
+    async load() {
       const current = this.crumbs[this.crumbs.length - 1];
       const url =
         '/api/browse?volume=' + encodeURIComponent(this.volume) +
         '&filepath=' + encodeURIComponent(current.filepath);
-      htmx.ajax('GET', url, { target: '#file-grid', indicator: '#loading' });
+      this.loading = true;
+      await htmx.ajax('GET', url, { target: '#file-grid', indicator: '#loading' });
+      this.loading = false;
+      return !document.querySelector('#file-grid .browse-error');
     },
   };
 }

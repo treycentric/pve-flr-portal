@@ -22,3 +22,11 @@ async def list_snapshots(backup_type: str, backup_id: str) -> list[dict]:
         )
         resp.raise_for_status()
         return resp.json()["data"]
+
+
+async def list_groups() -> list[dict]:
+    """All backup groups (guests) present in the datastore, for the Task picker."""
+    async with httpx.AsyncClient(verify=settings.pbs_verify_ssl, timeout=15.0) as client:
+        resp = await client.get(f"{_BASE}/groups", headers=_headers())
+        resp.raise_for_status()
+        return resp.json()["data"]

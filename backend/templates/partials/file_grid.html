@@ -1,50 +1,52 @@
-<form method="get" action="/api/download-bundle" x-data="{ count: 0 }" @change="count = $el.querySelectorAll('input[type=checkbox]:checked').length">
+<form method="get" action="/api/download-bundle" class="file-grid-form" x-data="fileGridState()" @change="syncAllChecked()">
   <input type="hidden" name="volume" value="{{ volume }}">
   <div class="grid-toolbar">
     <button type="button" class="btn-outline" disabled title="Restore to guest &mdash; planned (phase 4)">Restore</button>
     <button type="submit" class="btn-outline" :disabled="count === 0">
-      Download<template x-if="count"> (<span x-text="count"></span>)</template>
+      <span x-text="count ? 'Download (' + count + ')' : 'Download'"></span>
     </button>
   </div>
-  <table class="file-grid">
-    <thead>
-      <tr>
-        <th></th>
-        <th>Name</th>
-        <th>Size</th>
-        <th>Type</th>
-        <th>Modified</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for e in entries %}
-      <tr>
-        <td><input type="checkbox" name="item" value="{{ e.item_json }}"></td>
-        <td>
-          {% if not e.leaf %}
-          <button
-            type="button"
-            class="link-btn"
-            data-filepath="{{ e.filepath }}"
-            data-label="{{ e.text }}"
-            @click="goInto($el.dataset.filepath, $el.dataset.label)">
-            &#128193; {{ e.text }}
-          </button>
-          {% else %}
-          &#128196; {{ e.text }}
-          {% endif %}
-        </td>
-        <td>{{ e.size | filesizeformat if e.size is not none else '' }}</td>
-        <td>{{ e.type_label }}</td>
-        <td>{{ e.mtime | fromtimestamp if e.mtime is not none else '' }}</td>
-        <td>
-          <a class="row-download" href="/api/download?volume={{ volume | urlencode }}&filepath={{ e.filepath | urlencode }}{% if not e.leaf %}&tar=0{% endif %}&name={{ e.download_name | urlencode }}">
-            Download
-          </a>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="table-scroll">
+    <table class="file-grid">
+      <thead>
+        <tr>
+          <th class="checkbox-col"><input type="checkbox" x-model="allChecked" @change="toggleAll()"></th>
+          <th class="sortable" @click="setSort('name')">Name<span class="sort-arrow" x-show="sortKey === 'name'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span></th>
+          <th class="sortable" @click="setSort('size')">Size<span class="sort-arrow" x-show="sortKey === 'size'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span></th>
+          <th class="sortable" @click="setSort('type')">Type<span class="sort-arrow" x-show="sortKey === 'type'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span></th>
+          <th class="sortable" @click="setSort('modified')">Modified<span class="sort-arrow" x-show="sortKey === 'modified'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span></th>
+        </tr>
+      </thead>
+      <tbody x-ref="tbody">
+        {% for e in entries %}
+        <tr
+          data-name="{{ e.text | lower }}"
+          data-size="{{ e.size if e.size is not none else -1 }}"
+          data-type="{{ e.type_label | lower }}"
+          data-modified="{{ e.mtime if e.mtime is not none else 0 }}"
+          x-show="!fileFilter || $el.dataset.name.includes(fileFilter.toLowerCase())">
+          <td><input type="checkbox" name="item" value="{{ e.item_json }}"></td>
+          <td>
+            {% if not e.leaf %}
+            <button
+              type="button"
+              class="link-btn"
+              data-filepath="{{ e.filepath }}"
+              data-label="{{ e.text }}"
+              :disabled="loading"
+              @click="goInto($el.dataset.filepath, $el.dataset.label)">
+              &#128193; {{ e.text }}
+            </button>
+            {% else %}
+            &#128196; {{ e.text }}
+            {% endif %}
+          </td>
+          <td>{{ e.size | filesizeformat if e.size is not none else '' }}</td>
+          <td>{{ e.type_label }}</td>
+          <td>{{ e.mtime | fromtimestamp if e.mtime is not none else '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </form>

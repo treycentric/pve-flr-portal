@@ -35,8 +35,10 @@ class Settings:
     pbs_token_secret: str
     pbs_verify_ssl: bool
 
-    # Phase 1 targets exactly one hardcoded guest; multi-guest support is PH.3.
-    guest_vmid: str
+    # PH.3: guests are discovered dynamically from PBS (admin/datastore/{store}/groups).
+    # These are only a fallback for the edge case where the datastore has no
+    # backups at all yet.
+    guest_vmid: str | None
     guest_type: str
 
 
@@ -51,6 +53,6 @@ settings = Settings(
     pbs_token_id=_get("PBS_TOKEN_ID", required=True),
     pbs_token_secret=_get("PBS_TOKEN_SECRET", required=True),
     pbs_verify_ssl=_bool("PBS_VERIFY_SSL", True),
-    guest_vmid=_get("GUEST_VMID", required=True),
+    guest_vmid=_get("GUEST_VMID", default=None),
     guest_type=_get("GUEST_TYPE", "vm"),
 )

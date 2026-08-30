@@ -43,31 +43,60 @@ def _iso_from_unix(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _volid_for(backup_time_iso: str) -> str:
-    return f"{settings.pve_storage}:backup/{settings.guest_type}/{settings.guest_vmid}/{backup_time_iso}"
+def _volid_for(guest_type: str, guest_vmid: str, backup_time_iso: str) -> str:
+    return f"{settings.pve_storage}:backup/{guest_type}/{guest_vmid}/{backup_time_iso}"
 
 
 @app.get("/")
-async def index(request: Request):
-    raw_snapshots = await pbs_client.list_snapshots(settings.guest_type, settings.guest_vmid)
-    snapshots = []
-    for snap in sorted(raw_snapshots, key=lambda s: s["backup-time"], reverse=True):
-        iso = _iso_from_unix(snap["backup-time"])
-        snapshots.append(
+async def index(request: Request, task: str | None = None):
+    raw_groups = await pbs_client.list_groups()
+    try:
+        guest_names = await pve_client.list_guest_names()
+    except httpx.HTTPStatusError:
+        guest_names = {}
+    groups = sorted(
+        (
             {
-                "volume": _volid_for(iso),
-                "time": iso,
-                "size": snap.get("size"),
-                "verified": bool(snap.get("verification")),
+                "type": g["backup-type"],
+                "vmid": g["backup-id"],
+                "last_backup": g["last-backup"],
+                "name": guest_names.get(g["backup-id"]),
             }
-        )
+            for g in raw_groups
+        ),
+        key=lambda g: (g["type"], g["vmid"]),
+    )
+
+    if task and ":" in task and any(f"{g['type']}:{g['vmid']}" == task for g in groups):
+        guest_type, guest_vmid = task.split(":", 1)
+    elif groups:
+        guest_type, guest_vmid = groups[0]["type"], groups[0]["vmid"]
+    else:
+        guest_type, guest_vmid = settings.guest_type, settings.guest_vmid
+
+    snapshots = []
+    if guest_vmid:
+        raw_snapshots = await pbs_client.list_snapshots(guest_type, guest_vmid)
+        for snap in sorted(raw_snapshots, key=lambda s: s["backup-time"], reverse=True):
+            iso = _iso_from_unix(snap["backup-time"])
+            snapshots.append(
+                {
+                    "volume": _volid_for(guest_type, guest_vmid, iso),
+                    "time": iso,
+                    "size": snap.get("size"),
+                    "verified": bool(snap.get("verification")),
+                }
+            )
+
     return templates.TemplateResponse(
         request,
         "index.html",
         {
             "snapshots": snapshots,
             "snapshots_json": json.dumps(snapshots),
-            "guest_vmid": settings.guest_vmid,
+            "guest_vmid": guest_vmid,
+            "guest_type": guest_type,
+            "groups_json": json.dumps(groups),
         },
     )
 

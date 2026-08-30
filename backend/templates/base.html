@@ -18,10 +18,10 @@
       <span class="topbar-icon">&#9851;</span>
       <h1>PVE Backup <em>Portal</em></h1>
     </div>
+    <div class="topbar-meta">
+      {% block topbar_meta %}{% endblock %}
+    </div>
   </header>
-  <div class="statusbar">
-    {% block topbar_meta %}{% endblock %}
-  </div>
   <main>
     {% block content %}{% endblock %}
   </main>
