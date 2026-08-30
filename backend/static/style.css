@@ -47,6 +47,7 @@ body {
 .topbar-meta {
   display: flex;
   align-items: center;
+  gap: 4px;
 }
 
 .topbar-brand {
@@ -252,6 +253,108 @@ body {
 
 .btn-primary:hover {
   background: var(--btn-blue-hover);
+}
+
+.user-menu-trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin-left: 4px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.user-menu-trigger:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.user-menu-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.user-dropdown {
+  position: absolute;
+  top: 56px;
+  right: 12px;
+  width: 220px;
+  background: var(--panel);
+  border-radius: 4px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+  z-index: 90;
+}
+
+.user-dropdown-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--link);
+  font-weight: 600;
+}
+
+.user-dropdown-header .user-menu-icon {
+  color: var(--text-muted);
+}
+
+.user-dropdown-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 16px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--link);
+  cursor: pointer;
+}
+
+.user-dropdown-item:hover {
+  background: var(--tree-hover);
+}
+
+.about-box {
+  width: 360px;
+  padding: 32px 24px 24px;
+  text-align: center;
+  position: relative;
+}
+
+.about-close {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+}
+
+.about-logo {
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
+  margin-bottom: 12px;
+}
+
+.about-title {
+  margin: 0 0 16px;
+  font-size: 1.1rem;
+  color: var(--text);
+}
+
+.about-credit {
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .page {

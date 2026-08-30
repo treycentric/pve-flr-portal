@@ -45,6 +45,30 @@
     </div>
   </div>
 </div>
+
+<div x-data="userMenu('{{ current_identity }}')">
+  <button type="button" class="user-menu-trigger" @click.stop="open = !open">
+    <svg class="user-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+  </button>
+
+  <div class="user-dropdown" x-show="open" x-cloak @click.outside="open = false">
+    <div class="user-dropdown-header">
+      <svg class="user-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+      <span x-text="identity"></span>
+    </div>
+    <button type="button" class="user-dropdown-item" @click="open = false; aboutOpen = true">About</button>
+    <button type="button" class="user-dropdown-item" @click="logout()">Logout</button>
+  </div>
+
+  <div class="modal-overlay" x-show="aboutOpen" x-cloak @click.self="aboutOpen = false" @keydown.escape.window="aboutOpen = false">
+    <div class="modal-box about-box">
+      <button type="button" class="modal-close about-close" @click="aboutOpen = false">&times;</button>
+      <img class="about-logo" src="/static/assets/logo.png" alt="">
+      <h2 class="about-title">Proxmox File Level Restore Portal</h2>
+      <p class="about-credit">Vibe coded by Trey Jones and Claude.</p>
+    </div>
+  </div>
+</div>
 {% endblock %}
 {% block content %}
 <script id="snapshot-data" type="application/json">{{ snapshots_json | safe }}</script>

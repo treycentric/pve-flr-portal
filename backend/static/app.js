@@ -32,6 +32,20 @@ function taskPicker(groups, current) {
   };
 }
 
+function userMenu(identity) {
+  return {
+    identity,
+    open: false,
+    aboutOpen: false,
+    logout() {
+      this.open = false;
+      // Placeholder: no real session exists yet (single shared service
+      // token, see docs/plan.md PH.4). Wire this to POST /logout once
+      // per-user PVE ticket auth lands.
+    },
+  };
+}
+
 function fileGridState() {
   return {
     count: 0,

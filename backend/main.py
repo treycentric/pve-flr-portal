@@ -97,6 +97,9 @@ async def index(request: Request, task: str | None = None):
             "guest_vmid": guest_vmid,
             "guest_type": guest_type,
             "groups_json": json.dumps(groups),
+            # Stand-in until PH.4 per-user login lands: the identity behind
+            # the single shared service token currently used for everything.
+            "current_identity": settings.pve_token_id.split("!")[0],
         },
     )
 
