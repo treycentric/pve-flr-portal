@@ -90,16 +90,144 @@ GET /api2/json/nodes/localhost/storage/pbs/file-restore/list
   UI built on this needs an honest loading state for that gap, and the
   caching plan below is not optional polish, it's load-bearing.
 
-**Still open before phase 1 can start with full confidence:**
-- Confirm API-token auth works for this endpoint (or fall back to a
-  ticket the backend logs in and refreshes itself).
-- Capture the equivalent `file-restore/download` (or extract) call the
-  GUI makes when you click Download, and the shape of a folder-as-zip
-  response.
-- Capture one response body (not just headers) for both the root list
-  and a deeper list, to lock down the JSON schema (`resources`/`tasks`
-  requests seen alongside these look like unrelated GUI chrome —
-  confirm they're not part of the contract).
+**Phase 0 — CLOSED, 2026-08-29.** The two remaining open items were
+resolved by consulting Proxmox's own published API schema (the data
+file behind `https://pve.proxmox.com/pve-docs/api-viewer/`, not just
+the human-readable page — it ships the full machine-readable spec for
+every endpoint, including the internal ones used by the GUI):
+
+- **API-token auth is officially supported.** Both
+  `file-restore/list` and `file-restore/download` are marked
+  `"allowtoken": 1` in the schema. No session-ticket fallback needed —
+  the backend can hold a single scoped `PVEAPIToken=user@realm!token=secret`
+  and use it for every call.
+- **Permissions are minimal.** Both endpoints require only
+  `"You need read access for the volume."` (`"user": "all"` — any
+  authenticated principal with read access to that volume, no special
+  admin role). This confirms a narrowly-scoped token is sufficient, no
+  elevated privileges needed on the PVE side.
+- **`file-restore/download` contract, from the schema:**
+  ```
+  GET /api2/json/nodes/{node}/storage/{storage}/file-restore/download
+      ?volume=<volid>
+      &filepath=<base64-path-or-/>
+      &tar=<0|1>            (optional, default 0)
+  ```
+  - `tar=1` downloads a directory as `tar.zst` instead of the default
+    `zip`.
+  - `returns: {"type": "any"}` — a raw byte stream, not JSON. This
+    also explains why clicking Download in the GUI didn't show up as
+    an XHR/fetch entry during manual traffic capture: it's most likely
+    a direct browser navigation to the URL (`window.location` or an
+    `<a>` click) rather than an ajax call, so it wouldn't appear under
+    a Fetch/XHR devtools filter. No further capture needed — the
+    schema is authoritative and matches the confirmed `list` shape
+    (same `volume`/`filepath` encoding).
+- **`file-restore/list` response schema, from the same source:**
+  array of objects: `{filepath: string (base64), leaf: boolean,
+  mtime?: integer (unix ts), size?: integer, text: string, type:
+  string}`. This matches the request/latency behavior already
+  captured empirically above.
+- **Confirmed quirk (2026-08-29, real usage):** navigability is
+  governed by **`leaf`**, not `type`. At the root listing, a virtual
+  disk (e.g. `drive-scsi0.img.fidx`) has `type: "f"` but `leaf: false`
+  — it looks like a file but is actually drillable, and drilling into
+  it is how you reach the guest's real filesystem. Any UI must branch
+  on `leaf`, not on `type == "d"`, to decide whether an entry is
+  clickable/browsable. Getting this backwards makes the root disk
+  entry look like a terminal file, which also leads users to try
+  downloading the raw disk blob directly (returns an empty/degenerate
+  response — that endpoint isn't meant for that).
+
+No live response-body capture was ultimately needed — the published
+schema is authoritative for shape, and the empirical capture already
+locked down timing and encoding quirks the schema doesn't document.
+
+**Scoped token setup.** `PVE::Storage::check_volume_access` (pve-storage
+source) requires, for a `backup`-type volume, *both*
+`Datastore.AllocateSpace` on `/storage/{storage}` *and* `VM.Backup` on
+`/vms/{vmid}` — `Datastore.Audit` alone is not sufficient for this
+content type. Commands to create the scoped PVE token (run on the PVE
+node):
+
+```
+pveum role add FileRestoreReader -privs "Datastore.AllocateSpace,VM.Backup"
+pveum user add pve-backup-portal@pve --comment "pve-backup-portal service account"
+pveum user token add pve-backup-portal@pve portal --privsep=1
+pveum acl modify /storage/<storage-id> --tokens 'pve-backup-portal@pve!portal' --roles FileRestoreReader
+pveum acl modify /vms/<vmid> --tokens 'pve-backup-portal@pve!portal' --roles FileRestoreReader
+```
+
+And the PBS-side token (`DatastoreReader`, built-in role) used only for
+snapshot enumeration (run on the PBS node):
+
+```
+proxmox-backup-manager user create pve-backup-portal@pbs --comment "pve-backup-portal service account"
+proxmox-backup-manager user generate-token pve-backup-portal@pbs portal
+proxmox-backup-manager acl update /datastore/<datastore-name> DatastoreReader --auth-id 'pve-backup-portal@pbs!portal'
+```
+
+Both `... token add`/`... generate-token` commands print the token
+secret exactly once — copy it straight into `.env`, never into chat or
+version control. When PH.3 adds more guests, repeat the two `pveum acl
+modify` lines for each additional `/vms/{vmid}`.
+
+**PBS-specific gotcha confirmed 2026-08-29:** unlike PVE tokens, a PBS
+API token's effective permissions are the **intersection** of the
+token's own ACL entries and the underlying user's own ACL entries — the
+user acts as a ceiling, never a source. Granting the role only to the
+token's auth-id (`pve-backup-portal@pbs!portal`) and not to the plain
+user (`pve-backup-portal@pbs`) resulted in an empty effective
+permission set and a 403 on `admin/datastore/{store}/snapshots`, even
+though `acl list` showed the token's grant present. Fix: run the same
+`acl update ... --auth-id` command a second time against the bare
+userid (no `!token`). Confirm with `proxmox-backup-manager user
+permissions '<user>@pbs!<token>' --path /datastore/<store>` — it must
+show `Datastore.Audit`/`Datastore.Read` before the API call will work.
+
+**Same gotcha on the PVE side, confirmed 2026-08-29.** With the default
+`--privsep=1`, a PVE API token's effective permissions are also
+intersected with the underlying user's own ACLs (not just the token's).
+Granting `FileRestoreReader` only via `--tokens
+'pve-backup-portal@pve!portal'` produced `403 Permission check failed
+(/storage/pbs, Datastore.AllocateSpace)` on `file-restore/list`, even
+though the token's own ACL entry was correctly in place. Fix: run the
+same `pveum acl modify` commands a second time against the bare user
+with `--users pve-backup-portal@pve` instead of `--tokens ...`. Net
+result: **both the token and its owning user need the ACL grant** on
+`/storage/<storage-id>` and `/vms/<vmid>`, on both PVE and PBS.
+
+**Tearing down the service-account credentials (do this when PH.4
+lands).** PH.1–PH.3 authenticate as one shared service account on each
+side. Once PH.4 replaces that with per-user login, remove the service
+accounts entirely rather than leaving unused standing credentials
+around. On PVE:
+
+```
+pveum acl delete /storage/<storage-id> --users pve-backup-portal@pve --roles FileRestoreReader
+pveum acl delete /storage/<storage-id> --tokens 'pve-backup-portal@pve!portal' --roles FileRestoreReader
+pveum acl delete /vms/<vmid> --users pve-backup-portal@pve --roles FileRestoreReader
+pveum acl delete /vms/<vmid> --tokens 'pve-backup-portal@pve!portal' --roles FileRestoreReader
+pveum user token remove pve-backup-portal@pve portal
+pveum user delete pve-backup-portal@pve
+pveum role delete FileRestoreReader   # only if nothing else uses it
+```
+
+On PBS:
+
+```
+proxmox-backup-manager user delete-token pve-backup-portal@pbs portal
+proxmox-backup-manager user remove pve-backup-portal@pbs
+```
+
+The PBS ACL entry for the token/user is removed implicitly when the
+user is deleted; if it needs removing while the user still exists, the
+same `acl update` form used to add it should have a removal flag —
+check `proxmox-backup-manager acl update --help` at the time, since
+this wasn't verified against a real removal in this session (only
+additions were exercised). Also remove the corresponding
+`PVE_TOKEN_*`/`PBS_TOKEN_*` values from `.env` once the new per-user
+auth path is live.
 
 ## 4. Architecture
 
@@ -181,7 +309,22 @@ instant regardless of whether a given folder has been opened yet.
 | PH.1 | MVP browse & download | Backend calling the real `file-restore/list` for one hardcoded guest/volume. Flat snapshot list (no timeline yet), file grid, download. | 3–5 days |
 | PH.2 | Timeline UI | Replace the flat list with the scrubber: dots per snapshot, count badges when zoomed out, click-to-select updates the grid in place. | 3–4 days |
 | PH.3 | Caching, multi-guest, polish | Indexer job against PBS, directory-listing cache, more than one guest, filter box, loading state for cold (cache-miss) lookups. | 2–3 days |
-| PH.4 | Push-to-guest *(stretch)* | Design + build a minimal in-guest agent (Windows service for `dc2.ad.starrise.net`, Linux daemon for the rest) the backend can hand a file to for placement, with its own auth. Separate, open-ended scope. | 1–2+ weeks |
+| PH.4 | Per-user auth | Replace the single shared service token with per-user login against PVE/PBS, so the portal reflects each logged-in user's own permissions instead of one admin-scoped credential. See note below — added 2026-08-29, deliberately sequenced after PH.3 rather than blocking it. | TBD, needs its own design pass |
+| PH.5 | Push-to-guest *(stretch)* | Design + build a minimal in-guest agent (Windows service for `dc2.ad.starrise.net`, Linux daemon for the rest) the backend can hand a file to for placement, with its own auth. Separate, open-ended scope. | 1–2+ weeks |
+
+**On PH.4 (per-user auth):** the plan as built through PH.3 assumes a
+single shared, narrowly-scoped service token held server-side (see
+Hard constraints in CLAUDE.md) — there is no per-user login at all.
+The user has asked for the portal to eventually support logging in
+with one's own PVE/PBS identity and reflecting that identity's actual
+permissions, rather than everyone sharing the portal's one service
+account. This is a real architecture change (session handling,
+delegating to the logged-in user's credentials per-request instead of
+one static token, mapping PVE/PBS roles to what the UI shows) and
+deliberately was *not* pulled forward — PH.1–PH.3 continue to target
+the single-token model so browse/download/timeline can be finished
+against a simple, known-working auth story first. Revisit this phase's
+design once PH.3 is done.
 
 ## 8. Stack — and why
 
@@ -215,15 +358,16 @@ architectural purity.
   filesystems (ext4, XFS, NTFS, FAT and similar). An exotic layout may
   simply not browse.
 - **Credential handling.** The backend needs read access to two
-  different servers (PVE for file-restore, PBS for snapshot listing).
-  Whichever form each takes (API token vs. session ticket — see the
-  open question in §3), it stays server-side only and is scoped as
-  narrowly as each API allows. Never sent to the browser.
+  different servers: a PVE API token (confirmed sufficient in §3, no
+  session ticket needed) for file-restore, and a separate PBS API
+  token scoped to `DatastoreReader` on the specific datastore for
+  snapshot listing. Both stay server-side only, never sent to the
+  browser.
 
 ## 10. Next step
 
-Confirm token-based auth against `file-restore/list` (or decide to have
-the backend hold and refresh a PVE ticket instead), then capture the
-Download button's real network call the same way §3's listing calls
-were captured. Once both are in hand, phase 1 can start against a
-confirmed contract instead of an assumed one.
+**Phase 0 is closed as of 2026-08-29** — see §3. Auth is a single
+scoped PVE API token; both `file-restore/list` and `file-restore/download`
+are confirmed to accept it. Phase 1 (backend calling the real
+`file-restore/list`/`download` for one hardcoded guest/volume, flat
+snapshot list, file grid, download) starts now.

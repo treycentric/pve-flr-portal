@@ -14,5 +14,26 @@ See [`docs/plan.md`](docs/plan.md) for the full plan: architecture,
 scope decisions, UI mapping against the ABB reference, data model,
 phased roadmap, and known risks.
 
-**Status:** Phase 0 (recon) — not yet implemented. See the roadmap in
-docs/plan.md before starting any code.
+**Status:** Phase 1 (MVP browse & download) in progress; Phase 2
+(timeline UI) also underway. See the roadmap in docs/plan.md.
+
+Note: PH.1–PH.3 authenticate with one shared service-account token on
+each of PVE and PBS (setup commands in docs/plan.md §3). When PH.4
+(per-user login) replaces this, tear down those service accounts —
+see "Tearing down the service-account credentials" in docs/plan.md §3.
+
+## Running it
+
+```
+python -m venv .venv
+source .venv/Scripts/activate   # .venv/bin/activate on Linux/macOS
+pip install -r requirements.txt
+
+cp .env.example .env
+# edit .env: fill in PVE_TOKEN_SECRET and PBS_TOKEN_SECRET from the
+# pveum / proxmox-backup-manager token creation commands in docs/plan.md §3
+
+uvicorn backend.main:app --reload
+```
+
+Then open http://127.0.0.1:8000/.

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PVE Backup Portal{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="/static/app.js?v={{ static_version('app.js') }}"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v={{ static_version('style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <span class="topbar-icon">&#9851;</span>
+      <h1>PVE Backup <em>Portal</em></h1>
+    </div>
+  </header>
+  <div class="statusbar">
+    {% block topbar_meta %}{% endblock %}
+  </div>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

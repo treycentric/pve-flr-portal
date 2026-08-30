@@ -11,14 +11,14 @@ live in `docs/plan.md`. Read it before writing code — this file is just
 the operating summary Claude Code should hold in context every session.
 
 ## Current phase
-**Phase 0 — Recon, mostly done.** The real `file-restore/list` endpoint
-has been captured from live Proxmox VE GUI traffic and is documented in
-docs/plan.md §3, including the base64 filepath encoding quirk and the
-confirmed ~3s cold-lookup latency. Two things remain before phase 1
-starts: confirm whether a scoped API token can call this endpoint (vs.
-needing a session ticket), and capture the Download button's real
-network call. Do not start phase 1 work until both are resolved — see
-docs/plan.md §10 "Next step".
+**Phase 0 — Recon, CLOSED (2026-08-29). Phase 1 — MVP browse & download,
+in progress.** The real `file-restore/list` endpoint was captured from
+live Proxmox VE GUI traffic (docs/plan.md §3): base64 filepath encoding
+quirk, ~3s cold-lookup latency. The two remaining open items (API-token
+auth, `file-restore/download` shape) were resolved by consulting
+Proxmox's own published API schema rather than a second traffic capture
+— both endpoints accept a scoped API token (`allowtoken: 1`) and need
+only volume read access. Full details in docs/plan.md §3 and §10.
 
 ## Hard constraints
 - This is a separate companion app. Do not attempt to patch or embed into

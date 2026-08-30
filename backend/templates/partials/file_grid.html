@@ -1,0 +1,50 @@
+<form method="get" action="/api/download-bundle" x-data="{ count: 0 }" @change="count = $el.querySelectorAll('input[type=checkbox]:checked').length">
+  <input type="hidden" name="volume" value="{{ volume }}">
+  <div class="grid-toolbar">
+    <button type="button" class="btn-outline" disabled title="Restore to guest &mdash; planned (phase 4)">Restore</button>
+    <button type="submit" class="btn-outline" :disabled="count === 0">
+      Download<template x-if="count"> (<span x-text="count"></span>)</template>
+    </button>
+  </div>
+  <table class="file-grid">
+    <thead>
+      <tr>
+        <th></th>
+        <th>Name</th>
+        <th>Size</th>
+        <th>Type</th>
+        <th>Modified</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td><input type="checkbox" name="item" value="{{ e.item_json }}"></td>
+        <td>
+          {% if not e.leaf %}
+          <button
+            type="button"
+            class="link-btn"
+            data-filepath="{{ e.filepath }}"
+            data-label="{{ e.text }}"
+            @click="goInto($el.dataset.filepath, $el.dataset.label)">
+            &#128193; {{ e.text }}
+          </button>
+          {% else %}
+          &#128196; {{ e.text }}
+          {% endif %}
+        </td>
+        <td>{{ e.size | filesizeformat if e.size is not none else '' }}</td>
+        <td>{{ e.type_label }}</td>
+        <td>{{ e.mtime | fromtimestamp if e.mtime is not none else '' }}</td>
+        <td>
+          <a class="row-download" href="/api/download?volume={{ volume | urlencode }}&filepath={{ e.filepath | urlencode }}{% if not e.leaf %}&tar=0{% endif %}&name={{ e.download_name | urlencode }}">
+            Download
+          </a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</form>
