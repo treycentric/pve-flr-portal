@@ -748,9 +748,12 @@ entry points at. Two reasons this matters, both raised in review:
 3. ~~`backend/restore_jobs.py`~~ — **done**, job manager lifecycle
    (submit, list, cancel, elapsed time), tested without any real QGA
    calls.
-4. Content-only restore end-to-end (`/api/restore`, single-call path
-   only) running through the job manager, + UI (no metadata/verify
-   checkboxes or running-jobs icon yet).
+4. ~~Content-only restore end-to-end~~ — **done**: `POST /api/restore`
+   submits a job through the job manager (`restore_runner.py`), and the
+   file grid's Restore button/confirmation modal are wired to it (no
+   metadata/verify checkboxes or running-jobs icon yet — that's steps
+   5-6). A file needing more than one chunk fails the job with a clear
+   message rather than a silent fallback, since multi-chunk isn't built.
 5. Running-jobs UI (icon/spinner/modal/cancel) wired to the job manager
    built in step 3.
 6. Multi-chunk write (scratch files + concat) and the metadata/verify

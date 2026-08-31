@@ -184,6 +184,7 @@ async def index(request: Request, task: str | None = None, session: SessionData 
             "guest_vmid": guest_vmid,
             "guest_type": guest_type,
             "guest_label": guest_label,
+            "guest_json": json.dumps({"type": guest_type, "vmid": guest_vmid, "label": guest_label}),
             "groups_json": json.dumps(groups),
             "current_identity": session.username,
             "app_version": __version__,

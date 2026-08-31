@@ -15,6 +15,77 @@ test('constructor sorts snapshots ascending by date and attaches a Date', () => 
   assert.ok(a.snapshots[0].date instanceof Date);
 });
 
+test('selectedSnapshotTime returns the matching snapshot time, else empty string', () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps);
+  assert.equal(a.selectedSnapshotTime, '');
+  a.selectedVolume = 'v2';
+  assert.equal(a.selectedSnapshotTime, '2026-02-01T00:00:00');
+});
+
+test('_loadRestoreCapabilities is a no-op without a guest vmid', async () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps, { type: 'qemu', vmid: null });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('fetch should not have been called');
+  };
+  try {
+    await a._loadRestoreCapabilities();
+    assert.equal(a.restoreCaps, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('_loadRestoreCapabilities stores the parsed response on success', async () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps, { type: 'qemu', vmid: '133' });
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = null;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ design_a: { available: true, reason: null } }) };
+  };
+  try {
+    await a._loadRestoreCapabilities();
+    assert.ok(requestedUrl.startsWith('/api/restore-capabilities?'));
+    assert.ok(requestedUrl.includes('type=qemu'));
+    assert.ok(requestedUrl.includes('vmid=133'));
+    assert.deepEqual(a.restoreCaps, { design_a: { available: true, reason: null } });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('_loadRestoreCapabilities leaves restoreCaps null on a non-ok response', async () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps, { type: 'qemu', vmid: '133' });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false });
+  try {
+    await a._loadRestoreCapabilities();
+    assert.equal(a.restoreCaps, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('_loadRestoreCapabilities swallows a network error and leaves restoreCaps null', async () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps, { type: 'qemu', vmid: '133' });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('network down');
+  };
+  try {
+    await a._loadRestoreCapabilities();
+    assert.equal(a.restoreCaps, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // _w is the measured pixel width of the SVG (renderTimeline sets it from
 // getBoundingClientRect, so one SVG unit is one pixel). Set it explicitly
 // here rather than leaning on the unmeasured default.

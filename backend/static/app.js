@@ -51,8 +51,66 @@ function fileGridState() {
     downloadMenuOpen: false,
     sortKey: 'name',
     sortDir: 'asc',
+
+    // --- PH.5 restore modal (docs/plan.md §7.5) ---
+    restoreOpen: false,
+    restoreDestDir: '',
+    restoreOverwrite: false,
+    restoreSubmitting: false,
+    restoreError: null,
+    restoreSubmitted: false,
+
     init() {
       this.applySort();
+    },
+
+    // guest/snapshotTime come from the caller's Alpine expression (see
+    // file_grid.html), which - unlike this method body itself - is
+    // evaluated in the ancestor portalApp() scope, so it can read
+    // `guest`/`selectedSnapshotTime` directly. A plain JS method here has
+    // no such scope-chaining, hence passing them in as arguments rather
+    // than trying `this.guest` from inside fileGridState().
+    openRestore(guestType, guestVmid, guestLabel, snapshotTime) {
+      this._guestType = guestType;
+      this._guestVmid = guestVmid;
+      this._guestLabel = guestLabel;
+      this._snapshotTime = snapshotTime;
+      this.restoreDestDir = '';
+      this.restoreOverwrite = false;
+      this.restoreError = null;
+      this.restoreSubmitted = false;
+      this.restoreOpen = true;
+    },
+
+    async startRestore() {
+      void this.count; // see singleDownloadHref - keeps selectedItems reactive
+      const sel = this.selectedItems;
+      if (sel.length !== 1 || !this.restoreDestDir || !this.restoreOverwrite) return;
+      this.restoreSubmitting = true;
+      this.restoreError = null;
+      try {
+        const body = new URLSearchParams();
+        body.set('volume', this.$refs.form.dataset.volume);
+        body.set('filepath', sel[0].filepath);
+        body.set('name', sel[0].name);
+        body.set('guest_type', this._guestType);
+        body.set('vmid', this._guestVmid);
+        body.set('guest_label', this._guestLabel);
+        body.set('snapshot_time', this._snapshotTime);
+        body.set('dest_dir', this.restoreDestDir);
+        body.set('overwrite', this.restoreOverwrite ? 'true' : 'false');
+        const resp = await fetch('/api/restore', { method: 'POST', body });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.restoreError = data.detail || 'Restore failed to start.';
+          return;
+        }
+        this.restoreSubmitted = true;
+      } catch (e) {
+        this.restoreError = 'Restore failed to start: ' + e;
+      } finally {
+        this.restoreSubmitting = false;
+      }
     },
     toggleAll() {
       const boxes = this.$refs.tbody.querySelectorAll('input[type=checkbox]');
@@ -128,7 +186,7 @@ function fileGridState() {
   };
 }
 
-function portalApp(rawSnapshots) {
+function portalApp(rawSnapshots, guest) {
   const snapshots = rawSnapshots
     .map((s) => ({ ...s, date: new Date(s.time) }))
     .sort((a, b) => a.date - b.date);
@@ -158,7 +216,28 @@ function portalApp(rawSnapshots) {
     history: [],
     historyIndex: -1,
 
+    // --- PH.5 restore state (docs/plan.md §7.5) ---
+    // {type, vmid, label} for the currently-viewed guest - static for the
+    // whole page load (switching guest is a full navigation, see taskPicker's
+    // confirm()), so capabilities are fetched once here rather than on every
+    // folder browse/htmx swap.
+    guest,
+    restoreCaps: null,
+
+    async _loadRestoreCapabilities() {
+      if (!this.guest || !this.guest.vmid) return;
+      try {
+        const params = new URLSearchParams({ type: this.guest.type, vmid: this.guest.vmid });
+        const resp = await fetch('/api/restore-capabilities?' + params.toString());
+        if (!resp.ok) return;
+        this.restoreCaps = await resp.json();
+      } catch (e) {
+        this.restoreCaps = null;
+      }
+    },
+
     init() {
+      this._loadRestoreCapabilities();
       this.$nextTick(() => {
         this._bindTimelineDrag();
         // The viewBox is derived from the element's measured pixel width,
@@ -172,6 +251,11 @@ function portalApp(rawSnapshots) {
           this.selectSnapshot(this.snapshots[this.snapshots.length - 1]);
         }
       });
+    },
+
+    get selectedSnapshotTime() {
+      const match = this.snapshots.find((s) => s.volume === this.selectedVolume);
+      return match ? match.time : '';
     },
 
     xFor(date) {

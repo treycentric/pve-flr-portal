@@ -74,7 +74,8 @@
 {% endblock %}
 {% block content %}
 <script id="snapshot-data" type="application/json">{{ snapshots_json | safe }}</script>
-<div class="page" x-data="portalApp(JSON.parse(document.getElementById('snapshot-data').textContent))" x-init="init()">
+<script id="guest-data" type="application/json">{{ guest_json | safe }}</script>
+<div class="page" x-data="portalApp(JSON.parse(document.getElementById('snapshot-data').textContent), JSON.parse(document.getElementById('guest-data').textContent))" x-init="init()">
   <section class="browser">
     <div id="loading" class="htmx-indicator">
       Loading&hellip; (cold snapshot lookups can take a few seconds &mdash; this is the helper VM booting)

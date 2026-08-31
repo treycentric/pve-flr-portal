@@ -1,6 +1,16 @@
 <form class="file-grid-form" x-ref="form" data-volume="{{ volume }}" x-data="fileGridState()" @change="syncAllChecked()">
   <div class="grid-toolbar">
-    <button type="button" class="btn-outline" disabled title="Restore to guest &mdash; planned (PH.5)">Restore</button>
+    <button
+      type="button"
+      class="btn-outline"
+      x-show="count > 0 && isSingleFile && restoreCaps && restoreCaps.design_a.available"
+      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime)">Restore</button>
+    <button
+      type="button"
+      class="btn-outline"
+      disabled
+      x-show="count > 0 && isSingleFile && restoreCaps && !restoreCaps.design_a.available"
+      :title="restoreCaps.design_a.reason || 'Restore is not available for this guest'">Restore</button>
 
     <button type="button" class="btn-outline" disabled x-show="count === 0">Download</button>
 
@@ -61,5 +71,42 @@
         {% endfor %}
       </tbody>
     </table>
+  </div>
+
+  <div class="modal-overlay" x-show="restoreOpen" x-cloak @click.self="restoreOpen = false" @keydown.escape.window="restoreOpen = false">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2>Restore to guest</h2>
+        <button type="button" class="modal-close" @click="restoreOpen = false">&times;</button>
+      </div>
+      <template x-if="!restoreSubmitted">
+        <div class="restore-form">
+          <p>Restores <strong x-text="selectedItems.length ? selectedItems[0].name : ''"></strong> directly into the running guest.</p>
+          <label class="restore-field">
+            Destination directory (in the guest)
+            <input type="text" x-model="restoreDestDir" placeholder="e.g. C:\Windows\Temp or /etc" class="modal-filter-input">
+          </label>
+          <p class="restore-warning">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
+          <label class="restore-checkbox">
+            <input type="checkbox" x-model="restoreOverwrite">
+            I understand this overwrites the destination file if it already exists.
+          </label>
+          <p class="restore-error" x-show="restoreError" x-text="restoreError"></p>
+        </div>
+      </template>
+      <template x-if="restoreSubmitted">
+        <p class="restore-success">Restore started. Check back shortly to confirm it landed in the guest.</p>
+      </template>
+      <div class="modal-footer">
+        <div class="modal-actions">
+          <template x-if="!restoreSubmitted">
+            <button type="button" class="btn-primary" :disabled="restoreSubmitting || !restoreDestDir || !restoreOverwrite" @click="startRestore()">
+              <span x-text="restoreSubmitting ? 'Starting…' : 'Start restore'"></span>
+            </button>
+          </template>
+          <button type="button" class="btn-outline" @click="restoreOpen = false">Close</button>
+        </div>
+      </div>
+    </div>
   </div>
 </form>
