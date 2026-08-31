@@ -3,7 +3,7 @@
 # pve-flr-portal, then runs install.sh inside it. Run this ON THE PVE
 # HOST (not inside a container/VM) as root, e.g.:
 #
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/<you>/pve-flr-portal/main/deploy/lxc-create.sh)"
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/lxc-create.sh)"
 #
 # or, from a local clone:
 #
