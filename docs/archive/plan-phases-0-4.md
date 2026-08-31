@@ -1,12 +1,18 @@
-# Restore Timeline — implementation plan
+# Archived: development history, Phases 0-4 (through v1.0.0)
 
-This is the **living** architecture/reference doc — current design
-decisions and how the system works today. For open work, see
-[`TODO.md`](../TODO.md); for what shipped in each release, see
-[`CHANGELOG.md`](../CHANGELOG.md); for the phase-by-phase development
-history (including debugging war stories worth knowing before touching
-the timeline code), see
-[`docs/archive/plan-phases-0-4.md`](archive/plan-phases-0-4.md).
+> **This is a frozen historical snapshot**, not living documentation.
+> It's `docs/plan.md` exactly as it stood when PH.0-PH.4 wrapped up and
+> versioning started at `v1.0.0` — kept for the debugging war stories
+> (the `setPointerCapture` click-retargeting bug, the SVG `viewBox`
+> distortion bug, the oversized-hit-area bug, and the "verifying with
+> `dispatchEvent` bypasses hit-testing" testing lesson are all worth
+> knowing before touching `backend/static/app.js`'s timeline code
+> again) and as a record of how the early design decisions were made.
+> For current architecture/reference docs, see `docs/plan.md`. For
+> open work, see `TODO.md`. For what shipped in each release, see
+> `CHANGELOG.md`.
+
+# Restore Timeline — implementation plan
 
 A companion web app for Proxmox VE + Proxmox Backup Server: a scrubbable
 snapshot timeline and file browser for file-level restore, in the spirit
@@ -62,8 +68,8 @@ write files and run commands in the guest, as root/SYSTEM, with **no
 guest credentials required** — the authorization is a per-user PVE
 privilege (`VM.GuestAgent.*`), not a guest password. So PH.5 does *not*
 need a bespoke listener daemon; it needs a careful design on top of QGA.
-See `TODO.md` for the mechanism, limits, and scope. It still belongs in
-PH.5, not the MVP.
+See §7.4 for the mechanism, limits, and scope. It still belongs in PH.5,
+not the MVP.
 
 ## 3. Phase 0 recon findings — CONFIRMED
 
@@ -170,27 +176,96 @@ No live response-body capture was ultimately needed — the published
 schema is authoritative for shape, and the empirical capture already
 locked down timing and encoding quirks the schema doesn't document.
 
-**Why `FileRestoreReader` needs exactly the privileges it has.**
-`PVE::Storage::check_volume_access` (pve-storage source) requires, for
-a `backup`-type volume, *both* `Datastore.AllocateSpace` on
-`/storage/{storage}` *and* `VM.Backup` on `/vms/{vmid}` —
-`Datastore.Audit` alone is not sufficient for this content type. Confirmed
-via 403s during early testing. `VM.Audit` was added later (post-launch)
-purely for guest name resolution (`/cluster/resources`), not for
-file-restore access itself. See README.md ("Provisioning access") for
-the actual commands to create/grant this role — this section is the
-design rationale, not the instructions.
+**Scoped token setup.** (Note: the currently-deployed service accounts
+predate the project rename to pve-flr-portal and are still named
+`pve-backup-portal@titan` / `pve-backup-portal@pbs` on the real PVE/PBS
+servers — the `pve-flr-portal@...` names below are the convention for
+new setups, not a claim that the live accounts were renamed.)
+`PVE::Storage::check_volume_access` (pve-storage
+source) requires, for a `backup`-type volume, *both*
+`Datastore.AllocateSpace` on `/storage/{storage}` *and* `VM.Backup` on
+`/vms/{vmid}` — `Datastore.Audit` alone is not sufficient for this
+content type. Commands to create the scoped PVE token (run on the PVE
+node):
 
-One thing worth remembering if anything here ever needs a static PVE
-API token again (unlikely — PH.4 replaced that with per-user ticket
-auth, §7.1): **PVE's ACL intersection behavior.** With the default
-`--privsep=1`, a token's effective permissions are the *intersection*
-of the token's own ACL entries and its owning user's own ACL entries —
-granting a role to only one of the two silently produces no effective
-access at all, and PBS API tokens have the identical behavior. Full
-war story (including the exact 403s hit and how they were diagnosed)
-is in `docs/archive/plan-phases-0-4.md` if this ever needs
-re-deriving.
+```
+pveum role add FileRestoreReader -privs "Datastore.AllocateSpace,VM.Backup"
+pveum user add pve-flr-portal@pve --comment "pve-flr-portal service account"
+pveum user token add pve-flr-portal@pve portal --privsep=1
+pveum acl modify /storage/<storage-id> --tokens 'pve-flr-portal@pve!portal' --roles FileRestoreReader
+pveum acl modify /vms/<vmid> --tokens 'pve-flr-portal@pve!portal' --roles FileRestoreReader
+```
+
+And the PBS-side token (`DatastoreReader`, built-in role) used only for
+snapshot enumeration (run on the PBS node):
+
+```
+proxmox-backup-manager user create pve-flr-portal@pbs --comment "pve-flr-portal service account"
+proxmox-backup-manager user generate-token pve-flr-portal@pbs portal
+proxmox-backup-manager acl update /datastore/<datastore-name> DatastoreReader --auth-id 'pve-flr-portal@pbs!portal'
+```
+
+Both `... token add`/`... generate-token` commands print the token
+secret exactly once — copy it straight into `.env`, never into chat or
+version control. When PH.3 adds more guests, repeat the two `pveum acl
+modify` lines for each additional `/vms/{vmid}`.
+
+**PBS-specific gotcha confirmed 2026-08-29:** unlike PVE tokens, a PBS
+API token's effective permissions are the **intersection** of the
+token's own ACL entries and the underlying user's own ACL entries — the
+user acts as a ceiling, never a source. Granting the role only to the
+token's auth-id (`pve-flr-portal@pbs!portal`) and not to the plain
+user (`pve-flr-portal@pbs`) resulted in an empty effective
+permission set and a 403 on `admin/datastore/{store}/snapshots`, even
+though `acl list` showed the token's grant present. Fix: run the same
+`acl update ... --auth-id` command a second time against the bare
+userid (no `!token`). Confirm with `proxmox-backup-manager user
+permissions '<user>@pbs!<token>' --path /datastore/<store>` — it must
+show `Datastore.Audit`/`Datastore.Read` before the API call will work.
+
+**Same gotcha on the PVE side, confirmed 2026-08-29.** With the default
+`--privsep=1`, a PVE API token's effective permissions are also
+intersected with the underlying user's own ACLs (not just the token's).
+Granting `FileRestoreReader` only via `--tokens
+'pve-flr-portal@pve!portal'` produced `403 Permission check failed
+(/storage/pbs, Datastore.AllocateSpace)` on `file-restore/list`, even
+though the token's own ACL entry was correctly in place. Fix: run the
+same `pveum acl modify` commands a second time against the bare user
+with `--users pve-flr-portal@pve` instead of `--tokens ...`. Net
+result: **both the token and its owning user need the ACL grant** on
+`/storage/<storage-id>` and `/vms/<vmid>`, on both PVE and PBS.
+
+**Tearing down the service-account credentials (do this when PH.4
+lands).** PH.1–PH.3 authenticate as one shared service account on each
+side. Once PH.4 replaces that with per-user login, remove the service
+accounts entirely rather than leaving unused standing credentials
+around. On PVE:
+
+```
+pveum acl delete /storage/<storage-id> --users pve-flr-portal@pve --roles FileRestoreReader
+pveum acl delete /storage/<storage-id> --tokens 'pve-flr-portal@pve!portal' --roles FileRestoreReader
+pveum acl delete /vms/<vmid> --users pve-flr-portal@pve --roles FileRestoreReader
+pveum acl delete /vms/<vmid> --tokens 'pve-flr-portal@pve!portal' --roles FileRestoreReader
+pveum user token remove pve-flr-portal@pve portal
+pveum user delete pve-flr-portal@pve
+pveum role delete FileRestoreReader   # only if nothing else uses it
+```
+
+On PBS:
+
+```
+proxmox-backup-manager user delete-token pve-flr-portal@pbs portal
+proxmox-backup-manager user remove pve-flr-portal@pbs
+```
+
+The PBS ACL entry for the token/user is removed implicitly when the
+user is deleted; if it needs removing while the user still exists, the
+same `acl update` form used to add it should have a removal flag —
+check `proxmox-backup-manager acl update --help` at the time, since
+this wasn't verified against a real removal in this session (only
+additions were exercised). Also remove the corresponding
+`PVE_TOKEN_*`/`PBS_TOKEN_*` values from `.env` once the new per-user
+auth path is live.
 
 ## 4. Architecture
 
@@ -254,18 +329,129 @@ service.
 |---|---|---|---|
 | Left tree — Disk 1 – Volume 1/3/4 | Pick which virtual disk/partition to browse | `file-restore/list` at root returns the disks; rendered as a left nav tree | Full — this is literally what the confirmed API returns |
 | File grid — Name / Size / Type / Modified time | Standard sortable file listing | Same four columns, sortable client-side once a directory's listing is cached | Full |
-| Restore / Download buttons | Restore writes back to source; Download saves locally | Download works today. Restore stays visibly disabled ("Restore to guest — planned") until PH.5 (see `TODO.md`) | Partial by design |
+| Restore / Download buttons | Restore writes back to source; Download saves locally | Download works from PH.1. Restore stays visibly disabled ("Restore to guest — planned") until PH.5 (§7.4) | Partial by design |
 | Filter box | Narrows the current folder's listing | Client-side filter over the cached listing | Full |
 | Bottom timeline — dots, count badges, draggable date marker, zoom | Scrub across backup dates, jump to one | Hand-rolled: one dot per indexed snapshot, badge per day at current zoom, click sets active snapshot and re-renders the grid | The reason the project exists — most build effort here |
 | Calendar-jump / locate icons | Jump to a date, or re-center on "now" | Same two icons wired to the timeline component | Full, once the timeline exists |
 
+### PH.2 implementation status (2026-08-29)
+
 The timeline widget (hand-rolled inline SVG, `backend/static/app.js`
-`renderTimeline()`) is built and working — see `docs/archive/plan-phases-0-4.md`
-for the implementation notes and, in particular, three confirmed bugs
-worth knowing before touching that code again: `Element.setPointerCapture()`
-silently retargeting clicks, a fixed `viewBox` + `preserveAspectRatio="none"`
-distorting every shape/glyph, and an oversized marker hit-area making a
-neighbouring snapshot unclickable.
+`renderTimeline()`) is built and working: per-day dots with drop
+shadow, a speech-bubble count badge above each (always shown, even for
+count=1), a day-picker popup (numbered rows, styled after the real
+`.syno-ab-timeline-menu` CSS) that opens on any marker click, an
+icon toolbar (calendar date-picker, "now", jump-to-latest-snapshot,
+refresh, older/newer-snapshot stepper) matching the real ABB icon
+positions, drag-to-pan via Pointer Events, and a fixed center reference
+line (not tied to any date — selecting a snapshot pans the view so its
+day lands under it). Colors/fonts are pulled from ABB's real shipped
+CSS (`ActiveBackup-Portal/style.css`, captured via the user's own
+DevTools, not guessed): navy `#16415C` top bar, `#007CB2` accent,
+`#2C8BC7` selected-marker blue, Open Sans.
+
+A dev-only synthetic-data test harness lives at
+`backend/static/timeline-preview.html` — generates ~90 days of fake
+snapshots (with periodic multi-per-day clusters) so the timeline can be
+exercised without real backup history. Its markup must be kept in sync
+by hand with `index.html`'s timeline `<footer>` block; there's a
+comment in both files calling this out.
+
+**Confirmed quirk (2026-08-29): `Element.setPointerCapture()` silently
+kills click targeting on descendant shapes.** The drag-to-pan handler
+originally called `svg.setPointerCapture(e.pointerId)` on `pointerdown`
+to keep panning working if the cursor left the widget mid-drag. This
+retargets *every* subsequent event for that pointer — including
+`pointerup` and the browser's synthesized `click` — to the capturing
+element itself. Result: every click inside the SVG resolved its
+`event.target` to the bare `<svg>` root, never to the marker `<g>` or
+any child shape, regardless of hit-area size, z-order, or fill opacity.
+Identical in Firefox and Chrome/Edge (both implement the same
+click-follows-capture behavior per spec), which is what made it so
+confusing to chase — it looked like a hit-testing/sizing bug but was
+actually an event-retargeting one. Fix: don't call
+`setPointerCapture` — attach `pointermove`/`pointerup`/`pointercancel`
+to `window` for the drag's duration instead (same "keep panning past
+the widget edge" behavior, no retargeting side effect). Verified via a
+live A/B in DevTools: re-adding `setPointerCapture` at runtime
+reproduced the exact bug instantly at an identical click coordinate.
+If marker clicks ever go dead again, check here first before
+suspecting hit-area geometry.
+
+**Tooling note:** when driving a real browser via automation to debug
+click coordinates, the screenshot/click coordinate space can be scaled
+down from the actual CSS pixel viewport (observed here: screenshots
+~1500px wide vs. `window.innerWidth` of 2089) — always scale computed
+`getBoundingClientRect()` coordinates by the same ratio before clicking
+with the automation tool, or clicks silently land on the wrong element.
+
+**Confirmed bug (2026-08-30): an oversized marker hit area makes
+neighbouring snapshots unclickable.** The selected marker used to carry
+an invisible click rect as wide as its callout (`width + 20`, ~170px)
+and the full height of the widget — originally added while chasing the
+`setPointerCapture` bug below. Marker groups paint in date order, so
+that rect sat *on top of* the older neighbour. With a guest backed up
+daily, adjacent days are only ~27px apart at the default zoom, so the
+selected marker completely covered the previous day and swallowed every
+click on it: clicking the previous day did nothing at all. Proved with
+`document.elementFromPoint(olderDotX, axisY)`, which returned a
+`rect.timeline-hit-area` belonging to the *newer* group. Fix: one small
+hit rect per marker (±12px around the dot). The callout's bubble, tail
+and label are filled shapes and remain clickable on their own, so
+nothing up there needs a hit rect.
+
+**Testing note:** this survived several rounds of "verified working"
+because the checks dispatched `new MouseEvent('click')` directly on the
+target `<g>`, which **bypasses hit-testing entirely** and therefore
+cannot see one element covering another. Verifying pointer-driven
+behaviour needs either a real click through the automation tool or an
+explicit `elementFromPoint` assertion — dispatching to the element you
+already found proves only that the listener works, not that a user can
+reach it.
+
+**Marker click semantics (2026-08-30).** Clicking any snapshot marker
+*selects* it, so its small light-blue count badge becomes the tall
+dark-blue callout at the top (always with a tail and a thin red
+connector down to its dot) and the view pans that day under the centre
+line. A day holding several snapshots behaves identically, and then
+*additionally* opens the day list so a different one of that day can be
+picked; clicking the selected callout again toggles that list. The list
+is anchored just above the callout band and grows upward
+(`translateY(-100%)`), so it never expands back down over the ruler.
+Earlier this was click-to-open-list-only, which meant multi-snapshot
+days never produced a callout at all — an inconsistency with
+single-snapshot days.
+
+**Confirmed quirk (2026-08-30): a fixed `viewBox` +
+`preserveAspectRatio="none"` silently distorts every shape and glyph.**
+The widget was originally `viewBox="0 0 1000 90"` with
+`preserveAspectRatio="none"` on an element whose real box is ~2000x114,
+so X scaled ~2x while Y scaled 1x. Symptoms looked like several
+unrelated bugs — `<circle>` elements rendered as ovals, label text
+looked "vertically squished", and the axis looked thicker than the
+ticks (only the strokes carrying `vector-effect: non-scaling-stroke`
+escaped the stretch). Tweaking the layout constants can never fix this,
+because the coordinate system itself is anisotropic. Fix: derive the
+viewBox from the element's measured pixel box on every render (and on
+`resize`) so **one SVG user unit is one CSS pixel**; shape and font
+sizes then mean what they say. Anything that hardcoded the old 1000-unit
+width (`xFor`, `ticksInView`, the drag's units-per-pixel conversion, the
+click fallback's `scaleX`) collapses to plain pixel math.
+
+**Layout constraint worth remembering:** the selected-snapshot callout
+can only sit level with the toolbar buttons if `.timeline-track` is
+taken *out of flow* (`position: absolute; inset: 0`) so the SVG spans
+the whole panel. While the toolbar and track were flow siblings the
+SVG began *below* the buttons, so no y value could put the bubble
+beside them and negative y just clipped — which is why repeated
+attempts to "raise the bubble" oscillated between chopped-off and
+detached. With the track spanning the panel, the toolbar (`z-index: 2`)
+paints over it, which is what makes a dragged callout pass behind the
+buttons. `.timeline-track` deliberately has **no** `z-index`: a
+positioned element with `z-index: auto` does not create a stacking
+context, so the day-picker inside it (`z-index: 10`) can still rise
+above the toolbar. Giving the track a `z-index` traps the popup
+underneath the buttons.
 
 ## 6. Data model
 
@@ -295,34 +481,49 @@ a (volume, path) listing never changes once cached. `fetched_at` is
 only there for an optional "evict entries older than N days" sweep to
 cap the file size.
 
-## 7. Auth & TLS — how the current system works
+## 7. Phased roadmap
 
-Per-user PVE ticket login replaced the original single shared service
-token; the app never talks to PBS directly (all backup listing goes
-through PVE's own API instead). This section documents how that works
-today, for anyone modifying `backend/auth.py`/`backend/tls.py`. It
-originated as a design doc during that work; see
-`docs/archive/plan-phases-0-4.md` for the "why we chose this over the
-alternatives" narrative if that context is ever needed.
+| Phase | Goal | Key work | Est. effort |
+|---|---|---|---|
+| PH.0 | Recon | **Done, see §3.** | — |
+| PH.1 | MVP browse & download | **Done.** Backend calling the real `file-restore/list`, file grid, download. | — |
+| PH.2 | Timeline UI | **Done.** The scrubber: dots per snapshot, count badges when zoomed out, click-to-select updates the grid in place. See the PH.2 status note below. | — |
+| PH.3 | Multi-guest, filter, polish | **Done — minus the cache.** Multiple guests (Task picker), client-side filter box, honest cold-lookup loading state, download bundles. The "indexer job against PBS" and "directory-listing cache" originally in this row were **not** built: the indexer is obsolete (§4), the dir cache is deferred to PH.6. | — |
+| PH.4 | Per-user auth | **Implemented 2026-08-30.** Replaced the single shared service token with per-user PVE ticket login; dropped the PBS token entirely. See §7.1-7.3. | Done |
+| PH.5 | Push-to-guest *(stretch)* | Restore a file into the live guest via `qemu-guest-agent` (no bespoke daemon — see §7.4). Scope: single-file / small-batch writes through `agent/file-write`, gated by a separate `VM.GuestAgent.FileWrite` grant. Large files, metadata reapplication, and `guest-exec` are non-goals of the first cut. | 3–5 days for design A; open-ended if design B |
+| PH.6 | Directory-listing cache *(optional)* | Lazily-populated SQLite `dir_cache` (§6) written on `/api/browse` cache-miss, so repeat navigation and cross-snapshot scrubbing in a known folder skip the ~3s helper-VM round trip. Pure perf; app is correct without it. | 1–2 days |
 
-`storage/content`'s real response shape (used by
-`pve_client.list_backup_archives()`) was confirmed against the live
-environment, not guessed: `verification` comes back as
-`{"state": "ok", "upid": ...}` keyed on the archive, exactly like PBS's
-own admin API gave. `volid` embeds the guest type as its own path
-segment (e.g. `pbs:backup/vm/133/<iso>Z`), which is simpler to parse
-directly than mapping PVE's `subtype` field ("qemu"/"lxc") back to this
-app's "vm"/"ct" convention.
+**On PH.4 (per-user auth):** the plan as built through PH.3 assumes a
+single shared, narrowly-scoped service token held server-side (see
+Hard constraints in CLAUDE.md) — there is no per-user login at all.
+The user has asked for the portal to eventually support logging in
+with one's own PVE identity and reflecting that identity's actual
+permissions, rather than everyone sharing the portal's one service
+account. Design pass done 2026-08-30 — see below.
 
-The "keep the session alive" idea is a lazy check rather than a
-background timer: `auth.get_session()` refreshes a session's PVE ticket
-inline on any request once it's more than 90 minutes old. Same effect
-as a timer (tickets never hit their ~2h expiry for an active user),
-simpler code — no timer bookkeeping to leak or clean up.
+**Implemented 2026-08-30.** The design below shipped essentially as
+written, with two notes:
+- `storage/content`'s real shape was confirmed against the live
+  environment before writing `pve_client.list_backup_archives()` (not
+  guessed): `verification` comes back as `{"state": "ok", "upid": ...}`
+  keyed on the archive, exactly like PBS's own admin API gave. `volid`
+  embeds the guest type as its own path segment (e.g.
+  `pbs:backup/vm/133/<iso>Z`), which turned out simpler to parse
+  directly than mapping PVE's `subtype` field ("qemu"/"lxc") back to
+  our "vm"/"ct" convention.
+- The "session refresh on a timer" idea below is implemented as a lazy
+  check instead of a literal background timer: `auth.get_session()`
+  refreshes a session's PVE ticket inline on any request once it's
+  more than 90 minutes old, rather than running a separate
+  per-session timer loop. Same effect (tickets never hit their ~2h
+  expiry for an active user), simpler code — no timer bookkeeping to
+  leak or clean up.
+- 2FA was **not** investigated further and is not handled — if a
+  target user has a second factor on their PVE account, `/access/ticket`
+  will need an extra round-trip this implementation doesn't do yet.
+  Revisit if/when that's actually needed.
 
-PVE 2FA/TOTP is **not** handled — see `TODO.md`.
-
-### 7.1 PVE-only auth, no separate PBS token
+### 7.1 PH.4 design — PVE-only auth, no separate PBS token
 
 **Key insight: drop the direct PBS API token entirely.** PVE's `pbs`-type
 storage config already holds the PBS datastore credentials server-side
@@ -381,11 +582,41 @@ token doesn't know or care who's asking); after PH.4, the Task picker
 naturally only shows what *that logged-in user's own PVE permissions*
 allow, since the data comes from a PVE call made with their session.
 
-No token creation for a new user — just two ACL grants against their
-existing PVE account, no secrets to generate or hand off. See
-README.md ("Provisioning access") for the actual `pveum`/GUI steps;
-kept there rather than duplicated here since it's admin/user-facing
-instructions, not a design decision.
+**Admin steps to onboard a new user (no more token creation — just an
+ACL grant against their existing PVE account):**
+
+```
+# CLI, run on the PVE node. Role is the same FileRestoreReader role
+# from §3 (Datastore.AllocateSpace, VM.Backup, VM.Audit) — reused as-is,
+# no new role needed.
+pveum acl modify /storage/<storage-id> --users <user>@<realm> --roles FileRestoreReader
+pveum acl modify /vms --users <user>@<realm> --roles FileRestoreReader
+```
+
+Scope the second command to `/vms/<vmid>` instead of `/vms` if that
+user should only see specific guests rather than everything in the
+datastore. No `pveum user token add` step at all — ticket auth uses the
+user's normal PVE password, not a token/secret pair.
+
+Equivalent GUI steps (Datacenter → Permissions):
+1. **Users** — confirm the target account exists. If it's a local
+   `pve`-realm account, set/confirm its password here (`Datacenter →
+   Permissions → Users → Edit`). If it's PAM/LDAP/AD-backed, just
+   confirm the realm is already configured under `Datacenter →
+   Realms`.
+2. **Roles** — confirm `FileRestoreReader` already exists (it does,
+   from the current setup); if starting fresh, `Add` a role named
+   `FileRestoreReader` and check `Datastore.AllocateSpace`,
+   `VM.Backup`, `VM.Audit`.
+3. **Add → User Permission** — Path: `/storage/<pbs-storage-id>`,
+   User: the target account, Role: `FileRestoreReader`, Propagate:
+   checked.
+4. **Add → User Permission** (again) — Path: `/vms` (or a specific
+   `/vms/<vmid>` to limit which guests they can see), same User/Role,
+   Propagate: checked.
+
+That's the whole per-user grant — two ACL entries, no secrets to
+generate or hand off.
 
 **Session refresh pattern — borrowed from PVE's own web UI.** PVE's
 ExtJS frontend doesn't re-login on every ticket expiry; it periodically
@@ -398,7 +629,7 @@ session, transparent to the browser, which only ever holds our app's
 own session cookie. This is a different, longer-running mechanism than
 the idle timeout below — the two interact (see 7.2).
 
-### 7.2 Idle timeout
+### 7.2 PH.4 design — idle timeout
 
 Independent of PVE's own ticket lifetime, the app enforces its own
 configurable idle timeout as a security control: if a logged-in
@@ -421,7 +652,7 @@ ticket could still be refreshed.
   abandoned session doesn't get artificially kept alive server-side
   just because the refresh timer happened to fire first.
 
-### 7.3 HTTPS by default, admin-replaceable cert
+### 7.3 PH.4 design — HTTPS by default, admin-replaceable cert
 
 The app itself currently serves plain HTTP (`uvicorn backend.main:app
 --reload` per the README). Once real login credentials are being
@@ -470,6 +701,95 @@ admin hasn't supplied their own.
 - Port: **8008** by default (follows PBS's own 8007), served over
   HTTPS via `run.py` rather than launching uvicorn directly from the
   CLI — see 7.3.
+
+### 7.4 PH.5 design — push-to-guest via qemu-guest-agent
+
+Investigation 2026-08-30. Supersedes the earlier "build a bespoke
+in-guest daemon" framing — that is no longer the plan.
+
+**Mechanism.** Proxmox already wraps a subset of QGA at
+`POST /nodes/{node}/qemu/{vmid}/agent/{cmd}`. The relevant commands:
+
+| Endpoint | Purpose here |
+|---|---|
+| `agent/file-write` | write a file into the guest (one-shot: open→write→close, **truncates**, no append) |
+| `agent/file-read` | read back for verification (~16 MiB cap, sets a `truncated` flag past that) |
+| `agent/exec` + `agent/exec-status` | run a command in the guest (chmod/chown/`icacls`/`restorecon`, reassemble parts, fetch a file) |
+
+QGA runs as **root (Linux) / LocalSystem (Windows)**. There are **no
+guest-OS credentials** anywhere in this — unlike ABB, which authenticates
+as a guest user through VMware Guest Tools (see §2). The only
+authorization is a PVE privilege on the calling user's ticket.
+
+**Prerequisites** (verify against the real environment before building):
+- Each target guest has `agent: 1` in its VM config and
+  `qemu-guest-agent` installed and running. Likely already true — it's
+  what backup fs-freeze uses.
+- PVE version: PVE 9+ has granular `VM.GuestAgent.*` privileges
+  (`Audit`, `FileRead`, `FileWrite`, `FileSystemMgmt`, `Unrestricted`).
+  PVE 8 only has the coarse `VM.Monitor` (all-or-nothing) — if the node
+  is still on 8, push-to-guest can't be scoped tightly and should wait.
+- On RHEL-family Linux guests, `guest-exec` and `guest-file-*` are
+  blocked by default in `/etc/sysconfig/qemu-ga`; Debian/Ubuntu and the
+  Windows virtio agent allow them. Design A (below) only needs
+  `file-write`, which is the more widely-allowed one.
+
+**Hard limits.**
+- `agent/file-write` `content` is validated at 61440 chars; the real
+  practical ceiling is ~40 KiB per call (HTTP POST size limit in
+  pveproxy sits just above it). Base64 adds 33%. → anything non-trivial
+  is **many** sequential writes.
+- The wrapper opens the file `w` (truncate), so repeated writes to one
+  path overwrite. Large files therefore need part files +
+  `guest-exec` (`cat` / `copy /b`) to reassemble — i.e. they pull in
+  the `Unrestricted` privilege.
+- Transport is the virtio-serial control channel, not a bulk data
+  path — thousands of 40 KiB round-trips for a 100 MB file is slow.
+- Files land `root:root` / SYSTEM, mode `0644`, `mtime = now`.
+  file-restore knows the original uid/gid/mode/mtime; reapplying them
+  needs `guest-exec`. SELinux contexts / NTFS ACLs are extra.
+- Live-filesystem hazard (unchanged from ABB): overwriting a file an
+  app holds open — especially AD DS / SYSVOL on the domain
+  controller — can corrupt guest state. Restore-in-place of anything
+  system-level on a running guest stays operator-judgement, not a
+  one-click action.
+
+**Design A — pure `file-write`, small restores (the first cut).**
+Single file (or a small directory, file-by-file) up to a few MB, written
+as ≤40 KiB base64 chunks. Needs only `VM.GuestAgent.FileWrite`. Works on
+every guest OS, no `guest-exec` dependency. Accepts that restored files
+are `root:root 0644` with a fresh mtime — the UI must say so. This
+covers the actual common FLR need (a clobbered config file, a deleted
+document). Effort: 3–5 days.
+
+**Design B — `file-write` bootstrap + `guest-exec` pull (later, opt-in).**
+Write a tiny script, `guest-exec` it to `curl` / `Invoke-WebRequest` the
+file from the portal over the guest's own NIC (fast, large-file
+capable), then fix ownership/mode/context. Needs
+`VM.GuestAgent.Unrestricted`, guest→portal reachability, a fetch tool in
+the guest, and `guest-exec` unblocked. Much larger blast radius
+(`Unrestricted` ≈ root on the VM). Open-ended; only if Design A proves
+too limiting.
+
+**Authorization model.** Restore-in-place is a *separate, deliberate*
+ACL grant — never folded into `FileRestoreReader`. A user who can
+browse/download a backup should not automatically be able to write into
+the running guest. The portal checks `VM.GuestAgent.FileWrite` (Design
+A) / `.Unrestricted` (Design B) on the logged-in user's ticket, the
+same way it relies on `VM.Backup` for the browse path today. The
+"Restore" button stays disabled unless that privilege is present for
+the selected guest.
+
+**Open questions for when PH.5 starts:**
+- Confirm the exact `agent/file-write` payload ceiling on the running
+  PVE version (test empirically — forum reports range 40–60 KiB).
+- Does `agent/file-write` on this version accept the newer `encode: 0`
+  parameter (pre-encoded content), or must the backend URL-encode
+  base64 into the POST body?
+- Per guest: `agent: 1` set? QGA running? `guest-exec` allowed?
+- Decide the metadata story for Design A: reapply best-effort via a
+  single follow-up `guest-exec` (breaks the "no exec" simplicity), or
+  document `root:root 0644` and stop.
 
 ## 8. Stack — and why
 
@@ -617,3 +937,11 @@ an actual Python 3.11 interpreter (not just 3.14) before considering it
 done. `ruff.toml`'s `target-version` was correspondingly changed from
 `py314` to `py311` so lint doesn't suggest syntax the deploy target
 can't run.
+
+## 11. Next step
+
+**Phase 0 is closed as of 2026-08-29** — see §3. Auth is a single
+scoped PVE API token; both `file-restore/list` and `file-restore/download`
+are confirmed to accept it. Phase 1 (backend calling the real
+`file-restore/list`/`download` for one hardcoded guest/volume, flat
+snapshot list, file grid, download) starts now.

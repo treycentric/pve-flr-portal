@@ -10,18 +10,45 @@ helper VM) — it's just missing a way to scrub across snapshots instead
 of picking one at a time from a flat list. This project adds that on
 top of Proxmox's existing API, without modifying Proxmox itself.
 
-See [`docs/plan.md`](docs/plan.md) for the full plan: architecture,
-scope decisions, UI mapping against the ABB reference, data model,
-phased roadmap, and known risks.
+![The main screen: a guest's file tree and grid on top, a scrubbable snapshot timeline along the bottom](docs/images/main-screen.png)
 
-**Status:** Phases 1-4 (browse, download, timeline, per-user auth) are
-in place. See the roadmap in docs/plan.md; PH.5 (push-to-guest) is the
-remaining stretch phase.
+See [`docs/plan.md`](docs/plan.md) for the full architecture/reference
+doc, [`TODO.md`](TODO.md) for open work, and
+[`CHANGELOG.md`](CHANGELOG.md) for what's shipped in each release.
 
-Auth is per-user PVE ticket login (docs/plan.md §7.1) — there's no
-shared service token anymore. To grant a user access, see the
-`pveum`/GUI steps in docs/plan.md §7.1 ("Admin steps to onboard a new
-user").
+**Status: v1.0.0.** Browse and download files out of PBS backups
+(single file, or a `.zip`/`.tar.gz`/`.tar.zst` bundle), scrub across
+snapshots on a timeline, per-user PVE login. See `TODO.md` for what's
+still open — push-to-guest (restoring straight into a running VM) is
+the main one.
+
+Auth is per-user PVE ticket login — there's no shared service token.
+See "Provisioning access" below for how to grant a user access.
+
+## Using it
+
+1. **Log in** with your own PVE username/password (realm dropdown,
+   optional "save username").
+2. **Task** (top right) picks which guest you're browsing — a
+   filterable list of every guest with backups on the configured PBS
+   datastore.
+3. **The timeline** (bottom) is the point of the app: each dot is a
+   snapshot; click one to select it (the callout jumps to it), drag to
+   pan, use the zoom controls or a day with multiple snapshots to pick
+   between them. The center line marks whatever snapshot is currently
+   selected.
+4. **Browse** the selected snapshot via the folder tree on the left or
+   the breadcrumb bar above the file grid — both stay in sync with each
+   other and with the timeline (switching snapshots keeps you in the
+   same folder if it still exists there).
+5. **Download** — select one file for a direct download, or select
+   multiple files/folders (or a single folder) to get a "Download as"
+   dropdown offering `.zip`, `.tar.gz`, or `.tar.zst`.
+6. **About** (user menu, top right) shows the running version and a
+   link back to this repo.
+
+"Restore" (writing a file straight back into the *running* guest,
+rather than downloading it) isn't built yet — see `TODO.md`.
 
 ## Running it
 
@@ -46,9 +73,54 @@ your browser will warn about the self-signed cert the first time; that's
 expected for a homelab self-signed setup. Drop a CA-issued cert/key at
 the same paths to replace it.
 
-Log in with your own PVE username/password (e.g. `admin@pam`). See
-docs/plan.md §7.1 for how to grant a user the `FileRestoreReader` role
-needed to browse/restore.
+See "Provisioning access" below for how to grant a user the
+`FileRestoreReader` role needed to browse/restore.
+
+## Provisioning access
+
+The portal never gets its own PVE credentials — every user logs in
+with their own PVE username/password, and PVE's own permission system
+decides what they can see. Onboarding a user is two ACL grants against
+their existing account; no tokens or secrets to generate or hand off.
+
+**1. Create the role** (once, on the PVE node — skip if it already
+exists):
+
+```
+pveum role add FileRestoreReader -privs "Datastore.AllocateSpace,VM.Backup,VM.Audit"
+```
+
+`Datastore.AllocateSpace` + `VM.Backup` are what PVE's file-restore API
+actually requires to read a backup volume (`Datastore.Audit` alone is
+not enough); `VM.Audit` lets the portal resolve guest names for
+display. See `docs/plan.md` §3 if you want the full "why" behind that
+specific privilege set.
+
+**2. Grant it to each user:**
+
+```
+pveum acl modify /storage/<storage-id> --users <user>@<realm> --roles FileRestoreReader
+pveum acl modify /vms --users <user>@<realm> --roles FileRestoreReader
+```
+
+Replace `<storage-id>` with your PBS storage ID (matches `PVE_STORAGE`
+in `.env`) and `<user>@<realm>` with the account (e.g. `alice@pam`,
+`bob@ad`). Scope the second command to `/vms/<vmid>` instead of `/vms`
+to limit which guests that user can see, rather than everything on the
+datastore.
+
+**Equivalent GUI steps** (Datacenter → Permissions):
+1. **Users** — confirm the account exists. Local `pve`-realm accounts
+   need a password set here (`Datacenter → Permissions → Users → Edit`);
+   PAM/LDAP/AD accounts just need their realm configured under
+   `Datacenter → Realms`.
+2. **Roles** — `Add` a role named `FileRestoreReader` and check
+   `Datastore.AllocateSpace`, `VM.Backup`, `VM.Audit` (skip if the role
+   already exists).
+3. **Add → User Permission** — Path: `/storage/<storage-id>`, User: the
+   account, Role: `FileRestoreReader`, Propagate: checked.
+4. **Add → User Permission** (again) — Path: `/vms` (or a specific
+   `/vms/<vmid>`), same User/Role, Propagate: checked.
 
 ## Deployment
 
