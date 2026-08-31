@@ -639,6 +639,20 @@ root.
 | Caller's own privilege | `GET /access/permissions?path=/vms/{vmid}` | Which of the five `VM.GuestAgent.*` grants the logged-in user's ticket carries |
 | PVE version | `GET /version` | PVE 8 only has coarse `VM.Monitor` — no granular `VM.GuestAgent.*` at all, so restore is unavailable regardless of the other checks |
 
+**Real-world finding (2026-09-01):** `agent/info` is on the critical
+path for every restore path's availability, and `qemu-guest-agent` is
+known to answer its first query slowly after being idle — an in-guest
+QGA quirk, not a bug in this app, but one that showed up directly:
+"still enabled" moments earlier, then "not enabled or not responding"
+on the very next check (the browse endpoint always re-verifies
+server-side rather than trusting the earlier capabilities response).
+Two fixes: `_get_agent_json()` now catches `httpx.HTTPError` (the
+common base for both a bad status *and* a timeout/connection error —
+only `HTTPStatusError` was caught before, so a raw timeout used to
+escape uncaught) and gives `agent/info` specifically one short retry
+before giving up; `get-osinfo` (display-only, not gating anything)
+stays single-attempt.
+
 Response shape:
 ```json
 {

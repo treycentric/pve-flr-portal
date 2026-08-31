@@ -23,6 +23,7 @@ metadata restore, checksum verify) needs Unrestricted. Reading
 agent/info itself needs Audit, so a caller with none of the five
 grants gets a clean "unavailable", not a bubbled-up 403.
 """
+import asyncio
 from dataclasses import dataclass
 
 import httpx
@@ -34,6 +35,12 @@ from .pve_client import api_node_type
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 
 _MIN_GUESTAGENT_PRIVS_PVE_VERSION = 9
+
+# qemu-guest-agent is known to answer its first query slowly after being
+# idle - one short retry on agent/info (the call that gates every restore
+# path) avoids a false "not running" from that alone, confirmed as a real
+# symptom in practice (docs/plan.md §7.5).
+_AGENT_INFO_RETRY_DELAY_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -138,6 +145,27 @@ def parse_capabilities(
     )
 
 
+async def _get_agent_json(client: httpx.AsyncClient, url: str, headers: dict, *, retry: bool) -> dict | None:
+    """Fetches one agent/* endpoint, tolerating *any* failure - a bad
+    status, a timeout, a connection error - as "no info available" rather
+    than propagating (httpx.HTTPError is the common base for both
+    HTTPStatusError and the request-level exceptions like
+    ReadTimeout/ConnectError; catching only HTTPStatusError here used to
+    let a raw timeout escape uncaught). When `retry` is set, one short
+    retry covers qemu-guest-agent's known slow-first-response-after-idle
+    quirk before giving up."""
+    attempts = 2 if retry else 1
+    for attempt in range(attempts):
+        try:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return resp.json()["data"]
+        except httpx.HTTPError:
+            if attempt + 1 < attempts:
+                await asyncio.sleep(_AGENT_INFO_RETRY_DELAY_SECONDS)
+    return None
+
+
 async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: str) -> RestoreCapabilities:
     """Live orchestration: fetches the four raw facts, then hands them to
     parse_capabilities(). agent/info and get-osinfo failures (guest agent
@@ -179,22 +207,13 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
         agent_info = None
         osinfo = None
         if node_type == "qemu":
-            try:
-                info_resp = await client.get(
-                    f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/info", headers=headers
-                )
-                info_resp.raise_for_status()
-                agent_info = info_resp.json()["data"]
-            except httpx.HTTPStatusError:
-                agent_info = None
-            try:
-                osinfo_resp = await client.get(
-                    f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/get-osinfo", headers=headers
-                )
-                osinfo_resp.raise_for_status()
-                osinfo = osinfo_resp.json()["data"].get("result")
-            except httpx.HTTPStatusError:
-                osinfo = None
+            agent_info = await _get_agent_json(
+                client, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/info", headers, retry=True
+            )
+            osinfo_data = await _get_agent_json(
+                client, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/get-osinfo", headers, retry=False
+            )
+            osinfo = osinfo_data.get("result") if osinfo_data else None
 
     return parse_capabilities(
         vm_config=vm_config,
