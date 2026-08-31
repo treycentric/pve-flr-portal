@@ -26,6 +26,9 @@ user").
 ## Running it
 
 ```
+git clone https://github.com/treycentric/pve-flr-portal.git
+cd pve-flr-portal
+
 python -m venv .venv
 source .venv/Scripts/activate   # .venv/bin/activate on Linux/macOS
 pip install -r requirements.txt
