@@ -102,3 +102,5 @@ scope (`docs/plan.md` §2).
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, etc.) —
   `scripts/release.py` derives version bumps and `CHANGELOG.md` entries
   from them. See `docs/dev/versioning.md`.
+- Every commit cites the GitHub issue it addresses — `(#N)` at the end
+  of the subject line. See `docs/dev/versioning.md`.

@@ -70,6 +70,24 @@ A commit that doesn't match this format (or uses an excluded type) still
 gets recorded in git history as normal — it just doesn't show up in
 `CHANGELOG.md` or influence the recommended bump.
 
+### Cite the issue
+
+Every commit must cite the GitHub issue it addresses — put `(#N)` at
+the end of the subject line, so it stays inside the description
+`scripts/release.py` copies into `CHANGELOG.md` and GitHub auto-links
+it on the repo:
+
+```
+fix(auth): handle expired ticket refresh (#15)
+feat(timeline): add drag-to-pan on the ruler (#13)
+```
+
+For a commit that closes the issue outright, add a `Closes #N` footer
+too (GitHub closes the issue on merge; the subject-line `(#N)` alone
+only links it). A commit with no corresponding issue (a typo fix, a
+one-line doc tweak) is the rare exception — open an issue first for
+anything more than that.
+
 ### Bump precedence
 
 Exactly one rule applies, in this order, across *all* commits since the
