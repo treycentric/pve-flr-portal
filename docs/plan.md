@@ -26,17 +26,36 @@ This ships as a **separate companion app**, not a patch to the Proxmox
 web UI — Proxmox's GUI has no plugin system, so there's no clean seam to
 inject a new panel into the existing Backups tab.
 
+**Proxmox Backup Server is a hard requirement.** The whole app is built
+on Proxmox's "File Restore" feature (`file-restore/list` / `download`,
+§3), and per Proxmox's own docs that feature *"is only available for
+backups on a Proxmox Backup Server."* Plain `vzdump` backups on
+directory / NFS / CIFS storage cannot be browsed file-by-file through
+any API — recovering a file from those is a manual `vma extract` +
+loop-mount on the CLI, which this app does not and cannot wrap. If a
+site has no PBS, this tool has nothing to show. (Secondary point: PBS
+also keeps many retained recovery points per guest cheaply via dedup,
+which is what makes a *timeline* worth scrubbing; a handful of rotated
+vzdump files would barely fill one.)
+
 On feature parity with ABB: **build browse-and-download first, matched
 closely to the ABB layout. Treat "restore directly into the original,
-running VM" as a distinct later phase (phase 4) with its own design.**
-ABB can write a restored file straight back onto the source machine
-because Synology already runs its own agent inside that machine.
-Proxmox's file-restore API stops one step earlier — it hands you bytes,
-full stop. Getting those bytes back into a *live* guest's filesystem
-needs something Proxmox doesn't ship: a small listener running inside
-each guest OS. That's a separate project (its own auth, a Windows
-service *and* a Linux daemon since guests here are mixed OSes) and
-belongs in phase 4, not the MVP.
+running VM" as a distinct later phase (PH.5) with its own design.**
+ABB can write a restored file straight back onto the source machine by
+connecting to it through **VMware Guest Tools** (already installed for
+normal VM management) and authenticating **as a guest OS user** with
+credentials the operator supplies to the restore tool — it is not a
+Synology-specific agent. Proxmox's file-restore API stops one step
+earlier: it hands you bytes, full stop. Getting those bytes back into a
+*live* guest's filesystem needs an in-guest channel — and Proxmox
+already ships the equivalent of VMware Guest Tools: **`qemu-guest-agent`
+(QGA)**, the same agent the backup path uses for fs-freeze. QGA can
+write files and run commands in the guest, as root/SYSTEM, with **no
+guest credentials required** — the authorization is a per-user PVE
+privilege (`VM.GuestAgent.*`), not a guest password. So PH.5 does *not*
+need a bespoke listener daemon; it needs a careful design on top of QGA.
+See §7.4 for the mechanism, limits, and scope. It still belongs in PH.5,
+not the MVP.
 
 ## 3. Phase 0 recon findings — CONFIRMED
 
@@ -236,38 +255,59 @@ auth path is live.
 
 ## 4. Architecture
 
-Nothing here modifies Proxmox. The new pieces are an indexer, a small
-backend that owns one scoped credential, a local cache, and the
-browser-facing UI.
+Nothing here modifies Proxmox. The pieces are a small backend that
+carries the logged-in user's PVE session, an (unbuilt) local cache, and
+the browser-facing UI.
 
 ```mermaid
 flowchart LR
     Browser -->|browse / download| Backend[Backend<br/>FastAPI]
-    Backend <-->|cache read/write| Cache[(Cache DB<br/>SQLite)]
-    Backend -->|cache miss ->list/extract| PVE[PVE API<br/>file-restore/list]
+    Backend -->|snapshot list, live per request| PVEc[PVE API<br/>storage content]
+    Backend -->|dir listing, live per request| PVE[PVE API<br/>file-restore/list]
+    Backend -.->|not built: dir-listing cache| Cache[(Cache DB<br/>SQLite)]
     PVE -->|boots to read guest FS| Helper[Ephemeral helper VM<br/>existing, unmodified]
-    Indexer[Indexer<br/>scheduled poll] -->|poll new verified snapshots| PBS[PBS API<br/>admin/datastore/snapshots]
-    Indexer -->|write metadata| Cache
-    Backend -.->|phase 4, not built: push file| Agent[In-guest agent]
+    Backend -.->|PH.5, not built: push file via QGA| QGA[qemu-guest-agent<br/>in guest, existing]
 ```
 
-Note the split confirmed in §3: **listing/reading files** inside a
-snapshot goes through the **PVE** API (`file-restore/list`), while
-**enumerating which snapshots exist** for a guest is a **PBS**-side
-datastore operation. The indexer talks to PBS; the live browse/download
-path talks to PVE. Two different servers, two different credentials to
-scope.
+**Status (2026-08-30): the app has no persistent storage at all.** Both
+the snapshot list and every directory listing are fetched live from the
+PVE API on each request; there is no SQLite file, no indexer, and no
+scheduled poll. See the callout below and §6 for what changed and what
+(if anything) is still worth building.
 
-### Why an indexer and a cache, specifically
+### The indexer / scheduled PBS poll — obsolete, not pending
 
-The timeline only feels like ABB's if dragging across it is instant.
-Per §3, an uncached directory listing costs a multi-second round trip
-through the helper VM. Scrub across ten snapshots without caching and
-you're waiting ten times. So the indexer's job is narrow: poll PBS for
-newly verified snapshots and record just their metadata (timestamp,
-size, verified flag) — it does **not** eagerly walk every file in every
-snapshot. Directory listings are cached lazily, the first time someone
-actually opens that folder at that point in time.
+The original design had a background job polling **PBS's** admin API for
+newly verified snapshots and writing their metadata into a `snapshots`
+table, so the timeline could render from local data. **PH.4 removed the
+reason for it:**
+
+- The app no longer talks to PBS at all. Snapshot enumeration is now a
+  single live PVE call — `GET /nodes/{node}/storage/{storage}/content?content=backup`
+  (§7.1) — made with the logged-in user's own ticket. It returns every
+  archive in one response and is fast (no helper VM involved).
+- The timeline scrubs over data already serialized into the page as JSON
+  at load time (`snapshots_json` in `index.html`), so the scrub itself
+  is instant regardless — a `snapshots` cache table would buy nothing.
+
+So there is **nothing to implement here** — the scheduled poll is
+dropped from the plan, not outstanding work.
+
+### The directory-listing cache — real, still unbuilt, optional
+
+The part of the old "cache" idea that would still help is different and
+narrower: per §3, an uncached `file-restore/list` costs ~3s (cold, via
+the helper VM). Today `/api/browse` pays that **every** time — scrub
+across ten snapshots in the same folder and you wait ten times; revisit
+a folder and you wait again. A lazily-populated `dir_cache` keyed by
+(volid, path) holding the raw list response would make repeat
+navigation and cross-snapshot scrubbing in a known folder instant.
+
+This is a **performance optimization, not a correctness gap** — the app
+works without it. It's carved out as its own optional phase (see the
+roadmap). If built, it can stay a single SQLite file written on
+cache-miss from the request path — still no background job, no extra
+service.
 
 ## 5. UI mapping — ABB screenshot → this build
 
@@ -275,7 +315,7 @@ actually opens that folder at that point in time.
 |---|---|---|---|
 | Left tree — Disk 1 – Volume 1/3/4 | Pick which virtual disk/partition to browse | `file-restore/list` at root returns the disks; rendered as a left nav tree | Full — this is literally what the confirmed API returns |
 | File grid — Name / Size / Type / Modified time | Standard sortable file listing | Same four columns, sortable client-side once a directory's listing is cached | Full |
-| Restore / Download buttons | Restore writes back to source; Download saves locally | Download works from phase 1. Restore stays visibly disabled ("Restore to guest — planned") until phase 4 | Partial by design |
+| Restore / Download buttons | Restore writes back to source; Download saves locally | Download works from PH.1. Restore stays visibly disabled ("Restore to guest — planned") until PH.5 (§7.4) | Partial by design |
 | Filter box | Narrows the current folder's listing | Client-side filter over the cached listing | Full |
 | Bottom timeline — dots, count badges, draggable date marker, zoom | Scrub across backup dates, jump to one | Hand-rolled: one dot per indexed snapshot, badge per day at current zoom, click sets active snapshot and re-renders the grid | The reason the project exists — most build effort here |
 | Calendar-jump / locate icons | Jump to a date, or re-center on "now" | Same two icons wired to the timeline component | Full, once the timeline exists |
@@ -333,40 +373,43 @@ with the automation tool, or clicks silently land on the wrong element.
 
 ## 6. Data model
 
-```sql
-CREATE TABLE snapshots (
-  id            INTEGER PRIMARY KEY,
-  guest         TEXT NOT NULL,        -- e.g. 'dc2.ad.starrise.net' or vmid 132
-  volume        TEXT NOT NULL,        -- full volid, e.g. 'pbs:backup/vm/132/2026-08-29T14:48:06Z'
-  backup_time   TEXT NOT NULL,        -- ISO 8601, from PBS
-  verified      BOOLEAN,
-  size_bytes    INTEGER,
-  UNIQUE(guest, backup_time)
-);
+**Not implemented. As of PH.4 the app has no database.** This section is
+kept as the design for the *directory-listing cache* if that optional
+phase is ever taken (see §4 and the roadmap).
 
+The original `snapshots` table is **dropped** — snapshot enumeration is
+a live PVE `storage/{id}/content` call and the timeline renders from
+JSON embedded in the page (§4). Only `dir_cache` remains as a candidate,
+and without a `snapshots` table it keys directly off the volid:
+
+```sql
+-- CANDIDATE, not built. Written on cache-miss from the request path;
+-- no background job populates it.
 CREATE TABLE dir_cache (
-  snapshot_id   INTEGER REFERENCES snapshots(id),
-  path          TEXT NOT NULL,        -- decoded path, e.g. '/' or '/drive-scsi0.img.fidx'
-  listing_json  TEXT NOT NULL,        -- cached file-restore/list response
+  volume        TEXT NOT NULL,        -- full volid, e.g. 'pbs:backup/vm/132/2026-08-29T14:48:06Z'
+  path          TEXT NOT NULL,        -- the opaque filepath token from file-restore/list ('/' for root)
+  listing_json  TEXT NOT NULL,        -- verbatim file-restore/list response
   fetched_at    TEXT NOT NULL,
-  PRIMARY KEY (snapshot_id, path)
+  PRIMARY KEY (volume, path)
 );
 ```
 
-The timeline widget only ever queries `snapshots`, grouped by day at
-whatever zoom level is active — that's what makes the scrub itself
-instant regardless of whether a given folder has been opened yet.
+Invalidation is trivial in practice: a backup snapshot is immutable, so
+a (volume, path) listing never changes once cached. `fetched_at` is
+only there for an optional "evict entries older than N days" sweep to
+cap the file size.
 
 ## 7. Phased roadmap
 
 | Phase | Goal | Key work | Est. effort |
 |---|---|---|---|
-| PH.0 | Recon | **Mostly done, see §3.** Remaining: confirm token auth, capture the download/extract call and a real response body. | 0.5–1 day total (partial) |
-| PH.1 | MVP browse & download | Backend calling the real `file-restore/list` for one hardcoded guest/volume. Flat snapshot list (no timeline yet), file grid, download. | 3–5 days |
-| PH.2 | Timeline UI | Replace the flat list with the scrubber: dots per snapshot, count badges when zoomed out, click-to-select updates the grid in place. | 3–4 days |
-| PH.3 | Caching, multi-guest, polish | Indexer job against PBS, directory-listing cache, more than one guest, filter box, loading state for cold (cache-miss) lookups. | 2–3 days |
+| PH.0 | Recon | **Done, see §3.** | — |
+| PH.1 | MVP browse & download | **Done.** Backend calling the real `file-restore/list`, file grid, download. | — |
+| PH.2 | Timeline UI | **Done.** The scrubber: dots per snapshot, count badges when zoomed out, click-to-select updates the grid in place. See the PH.2 status note below. | — |
+| PH.3 | Multi-guest, filter, polish | **Done — minus the cache.** Multiple guests (Task picker), client-side filter box, honest cold-lookup loading state, download bundles. The "indexer job against PBS" and "directory-listing cache" originally in this row were **not** built: the indexer is obsolete (§4), the dir cache is deferred to PH.6. | — |
 | PH.4 | Per-user auth | **Implemented 2026-08-30.** Replaced the single shared service token with per-user PVE ticket login; dropped the PBS token entirely. See §7.1-7.3. | Done |
-| PH.5 | Push-to-guest *(stretch)* | Design + build a minimal in-guest agent (Windows service for `dc2.ad.starrise.net`, Linux daemon for the rest) the backend can hand a file to for placement, with its own auth. Separate, open-ended scope. | 1–2+ weeks |
+| PH.5 | Push-to-guest *(stretch)* | Restore a file into the live guest via `qemu-guest-agent` (no bespoke daemon — see §7.4). Scope: single-file / small-batch writes through `agent/file-write`, gated by a separate `VM.GuestAgent.FileWrite` grant. Large files, metadata reapplication, and `guest-exec` are non-goals of the first cut. | 3–5 days for design A; open-ended if design B |
+| PH.6 | Directory-listing cache *(optional)* | Lazily-populated SQLite `dir_cache` (§6) written on `/api/browse` cache-miss, so repeat navigation and cross-snapshot scrubbing in a known folder skip the ~3s helper-VM round trip. Pure perf; app is correct without it. | 1–2 days |
 
 **On PH.4 (per-user auth):** the plan as built through PH.3 assumes a
 single shared, narrowly-scoped service token held server-side (see
@@ -577,13 +620,106 @@ admin hasn't supplied their own.
   HTTPS via `run.py` rather than launching uvicorn directly from the
   CLI — see 7.3.
 
+### 7.4 PH.5 design — push-to-guest via qemu-guest-agent
+
+Investigation 2026-08-30. Supersedes the earlier "build a bespoke
+in-guest daemon" framing — that is no longer the plan.
+
+**Mechanism.** Proxmox already wraps a subset of QGA at
+`POST /nodes/{node}/qemu/{vmid}/agent/{cmd}`. The relevant commands:
+
+| Endpoint | Purpose here |
+|---|---|
+| `agent/file-write` | write a file into the guest (one-shot: open→write→close, **truncates**, no append) |
+| `agent/file-read` | read back for verification (~16 MiB cap, sets a `truncated` flag past that) |
+| `agent/exec` + `agent/exec-status` | run a command in the guest (chmod/chown/`icacls`/`restorecon`, reassemble parts, fetch a file) |
+
+QGA runs as **root (Linux) / LocalSystem (Windows)**. There are **no
+guest-OS credentials** anywhere in this — unlike ABB, which authenticates
+as a guest user through VMware Guest Tools (see §2). The only
+authorization is a PVE privilege on the calling user's ticket.
+
+**Prerequisites** (verify against the real environment before building):
+- Each target guest has `agent: 1` in its VM config and
+  `qemu-guest-agent` installed and running. Likely already true — it's
+  what backup fs-freeze uses.
+- PVE version: PVE 9+ has granular `VM.GuestAgent.*` privileges
+  (`Audit`, `FileRead`, `FileWrite`, `FileSystemMgmt`, `Unrestricted`).
+  PVE 8 only has the coarse `VM.Monitor` (all-or-nothing) — if the node
+  is still on 8, push-to-guest can't be scoped tightly and should wait.
+- On RHEL-family Linux guests, `guest-exec` and `guest-file-*` are
+  blocked by default in `/etc/sysconfig/qemu-ga`; Debian/Ubuntu and the
+  Windows virtio agent allow them. Design A (below) only needs
+  `file-write`, which is the more widely-allowed one.
+
+**Hard limits.**
+- `agent/file-write` `content` is validated at 61440 chars; the real
+  practical ceiling is ~40 KiB per call (HTTP POST size limit in
+  pveproxy sits just above it). Base64 adds 33%. → anything non-trivial
+  is **many** sequential writes.
+- The wrapper opens the file `w` (truncate), so repeated writes to one
+  path overwrite. Large files therefore need part files +
+  `guest-exec` (`cat` / `copy /b`) to reassemble — i.e. they pull in
+  the `Unrestricted` privilege.
+- Transport is the virtio-serial control channel, not a bulk data
+  path — thousands of 40 KiB round-trips for a 100 MB file is slow.
+- Files land `root:root` / SYSTEM, mode `0644`, `mtime = now`.
+  file-restore knows the original uid/gid/mode/mtime; reapplying them
+  needs `guest-exec`. SELinux contexts / NTFS ACLs are extra.
+- Live-filesystem hazard (unchanged from ABB): overwriting a file an
+  app holds open — especially AD DS / SYSVOL on the domain
+  controller — can corrupt guest state. Restore-in-place of anything
+  system-level on a running guest stays operator-judgement, not a
+  one-click action.
+
+**Design A — pure `file-write`, small restores (the first cut).**
+Single file (or a small directory, file-by-file) up to a few MB, written
+as ≤40 KiB base64 chunks. Needs only `VM.GuestAgent.FileWrite`. Works on
+every guest OS, no `guest-exec` dependency. Accepts that restored files
+are `root:root 0644` with a fresh mtime — the UI must say so. This
+covers the actual common FLR need (a clobbered config file, a deleted
+document). Effort: 3–5 days.
+
+**Design B — `file-write` bootstrap + `guest-exec` pull (later, opt-in).**
+Write a tiny script, `guest-exec` it to `curl` / `Invoke-WebRequest` the
+file from the portal over the guest's own NIC (fast, large-file
+capable), then fix ownership/mode/context. Needs
+`VM.GuestAgent.Unrestricted`, guest→portal reachability, a fetch tool in
+the guest, and `guest-exec` unblocked. Much larger blast radius
+(`Unrestricted` ≈ root on the VM). Open-ended; only if Design A proves
+too limiting.
+
+**Authorization model.** Restore-in-place is a *separate, deliberate*
+ACL grant — never folded into `FileRestoreReader`. A user who can
+browse/download a backup should not automatically be able to write into
+the running guest. The portal checks `VM.GuestAgent.FileWrite` (Design
+A) / `.Unrestricted` (Design B) on the logged-in user's ticket, the
+same way it relies on `VM.Backup` for the browse path today. The
+"Restore" button stays disabled unless that privilege is present for
+the selected guest.
+
+**Open questions for when PH.5 starts:**
+- Confirm the exact `agent/file-write` payload ceiling on the running
+  PVE version (test empirically — forum reports range 40–60 KiB).
+- Does `agent/file-write` on this version accept the newer `encode: 0`
+  parameter (pre-encoded content), or must the backend URL-encode
+  base64 into the POST body?
+- Per guest: `agent: 1` set? QGA running? `guest-exec` allowed?
+- Decide the metadata story for Design A: reapply best-effort via a
+  single follow-up `guest-exec` (breaks the "no exec" simplicity), or
+  document `root:root 0644` and stop.
+
 ## 8. Stack — and why
 
 - **Backend:** Python, FastAPI — one small process, typed surface for a
   handful of endpoints (list snapshots, list a path, download, later
   push-to-guest).
-- **Storage:** SQLite — a metadata cache, not a system of record; the
-  real data of record stays in PBS.
+- **Storage:** none currently — the app is stateless and reads
+  everything live from the PVE API each request. SQLite is held in
+  reserve for one optional thing only: a lazily-populated
+  directory-listing cache (§6, PH.6). If added it stays a single file
+  written from the request path — never a system of record, never a
+  background job.
 - **Frontend:** server-rendered HTML + htmx + Alpine.js — the timeline
   is a few dozen DOM nodes reacting to small JSON payloads; this needs
   no build pipeline, no `node_modules`, no bundler to keep patched.
@@ -608,12 +744,19 @@ architectural purity.
 - **Filesystem coverage.** file-restore only understands common
   filesystems (ext4, XFS, NTFS, FAT and similar). An exotic layout may
   simply not browse.
-- **Credential handling.** The backend needs read access to two
-  different servers: a PVE API token (confirmed sufficient in §3, no
-  session ticket needed) for file-restore, and a separate PBS API
-  token scoped to `DatastoreReader` on the specific datastore for
-  snapshot listing. Both stay server-side only, never sent to the
-  browser.
+- **Credential handling.** *(Superseded by PH.4.)* There is no service
+  token any more — the backend acts as the logged-in user via their PVE
+  ticket, held server-side only, never sent to the browser (§7.1). The
+  app never contacts PBS directly.
+- **PBS dependency.** No PBS → nothing works (see §2). A site that
+  switches away from PBS, or a datastore that goes offline, takes the
+  whole app's data source with it. There is no vzdump fallback and
+  can't cheaply be one.
+- **`localhost` node segment.** `file-restore/list` is called with the
+  literal node name `localhost` (§3, confirmed). Fine for the current
+  single-node target; a multi-node cluster where backups/guests live on
+  a named node other than the one serving the API would need the real
+  node name resolved per guest.
 
 ## 10. Next step
 

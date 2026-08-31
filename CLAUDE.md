@@ -12,14 +12,30 @@ the operating summary Claude Code should hold in context every session.
 
 ## Current phase
 **Phases 0-4 done (as of 2026-08-30).** PH.0-PH.3 (recon, browse/download
-MVP, timeline UI, caching/multi-guest polish) are complete. PH.4
+MVP, timeline UI, multi-guest + filter + polish — *not* the originally
+planned cache/indexer, see below) are complete. PH.4
 (per-user auth) landed 2026-08-30: PVE ticket login replaces the old
 shared PVE/PBS API tokens entirely, and the PBS admin API is no longer
 called at all — group/snapshot listing now comes from PVE's own
 `storage/{storage}/content` endpoint (docs/plan.md §7.1-7.3). The app
 now serves HTTPS by default (self-signed cert, admin-replaceable) on
-port 8008 via `run.py`, with a configurable idle timeout. PH.5
-(push-to-guest) remains the only open phase, a separate later effort.
+port 8008 via `run.py`, with a configurable idle timeout.
+
+**No database.** The app is stateless — snapshot list and every
+directory listing are read live from the PVE API per request. The
+`snapshots` table / scheduled PBS poll from the original plan is
+obsolete (PH.4 removed all PBS access; docs/plan.md §4). A
+directory-listing cache (SQLite, docs/plan.md §6) is the one piece of
+persistence still on the table, deferred to the optional **PH.6**.
+
+**PBS is required.** Everything hangs off Proxmox's File Restore
+feature, which per Proxmox is PBS-only — plain `vzdump` backups on
+dir/NFS/CIFS storage cannot be browsed via any API and are out of
+scope (docs/plan.md §2).
+
+Open phases: **PH.5** (push-to-guest, via `qemu-guest-agent` — no
+bespoke daemon; docs/plan.md §7.4) and the optional **PH.6**
+(directory-listing cache). Both are separate later efforts.
 
 ## Hard constraints
 - This is a separate companion app. Do not attempt to patch or embed into
@@ -41,12 +57,14 @@ port 8008 via `run.py`, with a configurable idle timeout. PH.5
   and is never sent to the browser.
 - Prefer the simplest thing that works for a single-admin homelab tool:
   no build pipeline, no SPA framework, no extra services beyond the one
-  backend process and SQLite.
+  backend process (and, only if PH.6 lands, a single SQLite cache file
+  written from the request path — never a background job).
 
 ## Stack (decided, see docs/plan.md §Stack rationale for why)
 - Backend: Python, FastAPI
-- Storage: SQLite — snapshot metadata + a lazily-populated directory
-  listing cache (schema in docs/plan.md §Data model)
+- Storage: none today (stateless). Reserved for a lazily-populated
+  directory-listing cache only, if PH.6 is taken (schema in
+  docs/plan.md §6)
 - Frontend: server-rendered HTML + htmx + Alpine.js
 - Timeline widget: hand-rolled inline SVG (no charting library — nothing
   off the shelf fits "date axis, one dot per discrete event, drag to
