@@ -758,6 +758,63 @@ architectural purity.
   a named node other than the one serving the API would need the real
   node name resolved per guest.
 
+### 9.1 Scaling & limits
+
+The app is deliberately single-process, single-worker, in-memory (§8,
+CLAUDE.md). It scales to its stated target — one admin, a handful of
+guests, occasional file recovery, one or a few concurrent users — and
+hits walls outside that. These are design consequences, not defects;
+recorded here so the ceiling is known before anyone leans on it.
+
+**Hard ceilings (need real work to lift):**
+
+- **`/api/download-bundle` memory + event-loop block.** `main.py` reads
+  every selected file fully into RAM (`await response.aread()`), builds
+  the whole `.zip`/`.tar` in a `BytesIO`, and returns
+  `iter([buffer.getvalue()])` — the archive is resident twice. A
+  multi-GB selection OOMs the worker. Compression also runs
+  *synchronously on the event loop*, so a large bundle stalls every
+  other request (auth included) until it finishes. Single-file
+  `/api/download` is unaffected — it streams. *Fix: stream the archive
+  as it's built; move compression to a thread (`run_in_executor`).*
+- **No directory-listing cache.** Every `/api/browse` / `/api/tree` is a
+  live `file-restore/list` = the ~3s cold helper-VM round trip (§3).
+  Scrubbing N snapshots in one folder pays it N times; revisiting pays
+  again. This is the main day-to-day limit. *Fix: PH.6.*
+- **Helper-VM stampede.** Proxmox boots an ephemeral helper VM per
+  snapshot browsed. The timeline makes it trivial to fire many cold
+  lookups fast (drag-scrub), and there is no server-side throttle or
+  request coalescing — a fast scrub, or two users on different guests,
+  can pile helper VMs onto the PVE node and pressure its RAM. *Fix:
+  cap in-flight `file-restore/list` calls, dedupe identical ones.*
+- **No pagination.** A directory with tens of thousands of entries
+  (Maildir, `node_modules`, WinSxS) returns the full list, renders every
+  row into the HTML partial, and the client sorts/filters all of it in
+  JS. Big directories bloat the partial and make the grid sluggish.
+
+**Softer limits:**
+
+- **In-memory sessions + `reload=True`, one worker** (`run.py`): can't
+  run multiple uvicorn workers or scale horizontally — each worker would
+  have its own `auth._sessions`. `reload=True` is a dev setting. One
+  core for all Python work. *Fix: drop `reload`, add a systemd unit;
+  stay single-worker or move sessions to the SQLite file if PH.6 lands.*
+- **`httpx.AsyncClient` per call.** Every `pve_client` function opens a
+  fresh client — new TLS handshake, no connection pooling. Wasteful
+  under load, negligible at homelab volume. *Fix: one shared client.*
+- **`index()` is O(all archives on the datastore)** per page load:
+  `list_backup_archives` pulls every backup, then `index()` parses and
+  groups the whole list each time. Thousands of entries on a busy
+  datastore, reprocessed on every `/` hit, uncached.
+- **Client timeline redraw.** `renderTimeline()` tears down and rebuilds
+  all SVG nodes every pan frame and `groupsInView()` walks all
+  snapshots each frame. Smooth at a few hundred dots; multi-year
+  retention (thousands) drops frames while dragging.
+
+**Fine as-is:** streaming single-file download, the auth/session path,
+the live snapshot-list call (one PVE request, no helper VM), the
+timeline at realistic homelab retention.
+
 ## 10. Next step
 
 **Phase 0 is closed as of 2026-08-29** — see §3. Auth is a single
