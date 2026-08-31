@@ -12,9 +12,9 @@ def manager():
     m.clear()
 
 
-def _make(manager, **overrides):
+def _make(manager, session_data, **overrides):
     defaults = dict(
-        requested_by="alice@pam",
+        session=session_data,
         guest_type="qemu",
         vmid="133",
         guest_label="web (133)",
@@ -22,23 +22,38 @@ def _make(manager, **overrides):
         snapshot_time="2026-08-30T14:48:06Z",
         source="/etc/hosts",
         destination="/etc",
-        strategy="quick",
     )
     defaults.update(overrides)
     return manager.create(**defaults)
 
 
-def test_create_assigns_id_and_queued_status(manager):
-    job = _make(manager)
+def test_create_assigns_id_and_queued_status(manager, session_data):
+    job = _make(manager, session_data)
     assert job.id
     assert job.status == RestoreStatus.QUEUED
     assert job.is_active
 
 
-def test_list_jobs_returns_newest_first(manager):
-    job1 = _make(manager, task_name="first")
+def test_create_snapshots_the_session_independently(manager, session_data):
+    # The job must not share the same SessionData object the interactive
+    # session store points at - see restore_jobs.py's module docstring:
+    # a job outlives its browser session and refreshes its own ticket.
+    job = _make(manager, session_data)
+    assert job.session is not session_data
+    assert job.session.ticket == session_data.ticket  # same initial values...
+    job.session.ticket = "PVE:alice@pam:JOB-REFRESHED"
+    assert session_data.ticket != job.session.ticket  # ...but independent after
+
+
+def test_requested_by_reflects_session_username(manager, session_data):
+    job = _make(manager, session_data)
+    assert job.requested_by == session_data.username
+
+
+def test_list_jobs_returns_newest_first(manager, session_data):
+    job1 = _make(manager, session_data, task_name="first")
     job1.started_at -= 10  # force job1 to be older
-    job2 = _make(manager, task_name="second")
+    job2 = _make(manager, session_data, task_name="second")
     jobs = manager.list_jobs()
     assert [j.id for j in jobs] == [job2.id, job1.id]
 
@@ -47,10 +62,10 @@ def test_get_returns_none_for_unknown_id(manager):
     assert manager.get("does-not-exist") is None
 
 
-def test_mark_done_sets_status_and_stops_elapsed_clock(manager, monkeypatch):
+def test_mark_done_sets_status_and_stops_elapsed_clock(manager, session_data, monkeypatch):
     import backend.restore_jobs as restore_jobs_module
 
-    job = _make(manager)
+    job = _make(manager, session_data)
     manager.mark_done(job.id)
     assert job.status == RestoreStatus.DONE
     assert not job.is_active
@@ -62,16 +77,16 @@ def test_mark_done_sets_status_and_stops_elapsed_clock(manager, monkeypatch):
     assert job.elapsed_seconds == pytest.approx(elapsed_at_finish)
 
 
-def test_mark_failed_records_error(manager):
-    job = _make(manager)
+def test_mark_failed_records_error(manager, session_data):
+    job = _make(manager, session_data)
     manager.mark_failed(job.id, "guest agent not responding")
     assert job.status == RestoreStatus.FAILED
     assert job.error == "guest agent not responding"
     assert not job.is_active
 
 
-async def test_cancel_active_job_sets_flag_and_returns_true(manager):
-    job = _make(manager)
+async def test_cancel_active_job_sets_flag_and_returns_true(manager, session_data):
+    job = _make(manager, session_data)
 
     async def never_finishes(j):
         await asyncio.sleep(3600)
@@ -90,21 +105,21 @@ def test_cancel_nonexistent_job_returns_false(manager):
     assert manager.cancel("nope") is False
 
 
-def test_cancel_already_finished_job_returns_false(manager):
-    job = _make(manager)
+def test_cancel_already_finished_job_returns_false(manager, session_data):
+    job = _make(manager, session_data)
     manager.mark_done(job.id)
     assert manager.cancel(job.id) is False
 
 
-def test_mark_cancelled_sets_status(manager):
-    job = _make(manager)
+def test_mark_cancelled_sets_status(manager, session_data):
+    job = _make(manager, session_data)
     manager.mark_cancelled(job.id)
     assert job.status == RestoreStatus.CANCELLED
     assert not job.is_active
 
 
-def test_to_dict_shape_matches_ui_columns(manager):
-    job = _make(manager)
+def test_to_dict_shape_matches_ui_columns(manager, session_data):
+    job = _make(manager, session_data)
     d = job.to_dict()
     assert set(d) == {
         "id",
@@ -122,8 +137,16 @@ def test_to_dict_shape_matches_ui_columns(manager):
     assert d["cancellable"] is True
 
 
-async def test_submitted_job_actually_runs(manager):
-    job = _make(manager)
+def test_restore_metadata_and_verify_are_independent_opt_ins(manager, session_data):
+    # Not a "quick vs full" choice - a job can restore metadata without
+    # verifying, verify without restoring metadata, or neither.
+    job = _make(manager, session_data, restore_metadata=True, verify=False)
+    assert job.restore_metadata is True
+    assert job.verify is False
+
+
+async def test_submitted_job_actually_runs(manager, session_data):
+    job = _make(manager, session_data)
     ran = asyncio.Event()
 
     async def do_work(j):

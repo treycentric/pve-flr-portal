@@ -9,12 +9,27 @@ services): single-process, in-memory, lost on a backend restart. Jobs
 are visible to any logged-in user rather than scoped per-requester -
 this is a single-admin homelab tool with one shared task list, the same
 way Synology ABB's own restore-task list works.
+
+**Session handling.** A job holds its own SessionData *snapshot*
+(`dataclasses.replace(session)` at submission time), never the same
+object the interactive `auth._sessions` entry points at. Two reasons:
+a restore can outlive the browser session that started it (the whole
+point of a fire-and-forget background job), and a PVE ticket isn't
+revoked by our app's own logout/idle-eviction - it's a PVE-issued
+credential valid on its own ~2h clock regardless of what our session
+store does with it. The job's run loop calls
+`auth.ensure_fresh_ticket()` on its own copy before each guest-agent
+call, using the same staleness policy `get_session()` applies to
+interactive requests, so a long-running job keeps its ticket current
+without depending on the user making another browser request.
 """
 import asyncio
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+
+from .auth import SessionData
 
 
 class RestoreStatus(StrEnum):
@@ -32,7 +47,8 @@ ACTIVE_STATUSES = (RestoreStatus.QUEUED, RestoreStatus.RUNNING, RestoreStatus.VE
 @dataclass
 class RestoreJob:
     id: str
-    requested_by: str
+    session: SessionData  # job's own snapshot - see module docstring
+    requested_by: str  # display-only; session.username is the credential
     guest_type: str
     vmid: str
     guest_label: str
@@ -40,7 +56,11 @@ class RestoreJob:
     snapshot_time: str  # "restore ver." - the backup snapshot this restores from
     source: str  # display path within the backup
     destination: str  # dest_dir (+ filename for a single file)
-    strategy: str  # "quick" | "full"
+    # Independent opt-ins, not a "quick vs full" choice - the content
+    # write path (single call vs chunk+concat) is decided automatically
+    # from size; whether guest-exec ends up needed follows from that PLUS
+    # either of these being requested, whenever the guest/privileges
+    # support it (docs/plan.md §7.5).
     restore_metadata: bool = False
     verify: bool = False
     status: RestoreStatus = RestoreStatus.QUEUED
@@ -84,7 +104,7 @@ class RestoreJobManager:
     def create(
         self,
         *,
-        requested_by: str,
+        session: SessionData,
         guest_type: str,
         vmid: str,
         guest_label: str,
@@ -92,13 +112,17 @@ class RestoreJobManager:
         snapshot_time: str,
         source: str,
         destination: str,
-        strategy: str,
         restore_metadata: bool = False,
         verify: bool = False,
     ) -> RestoreJob:
+        # A distinct copy, not the same object the interactive session
+        # store points at - see module docstring. Done here, not left to
+        # the caller, so this decoupling can't be forgotten at a call site.
+        job_session = replace(session)
         job = RestoreJob(
             id=str(uuid.uuid4()),
-            requested_by=requested_by,
+            session=job_session,
+            requested_by=session.username,
             guest_type=guest_type,
             vmid=vmid,
             guest_label=guest_label,
@@ -106,7 +130,6 @@ class RestoreJobManager:
             snapshot_time=snapshot_time,
             source=source,
             destination=destination,
-            strategy=strategy,
             restore_metadata=restore_metadata,
             verify=verify,
         )

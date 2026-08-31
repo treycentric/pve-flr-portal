@@ -545,37 +545,42 @@ arbitrary feature line):
   (the concatenation step alone forces this, independent of whether
   metadata restore is also requested).
 
-  Design B further splits into two independently-toggleable
-  sub-options, both still exec-gated so both live under the same
-  `Unrestricted` requirement:
-  - **Restore metadata** (mtime/owner/mode) — a follow-up `guest-exec`
-    (`touch -d`/`chown`/`chmod`, or `icacls` on Windows) applying what
-    the file-restore listing already returned. Optional even when
-    Design B is otherwise a single chunk that technically didn't need
-    concatenation — this is the answer to "doesn't Design A still need
-    guest-exec for mtime/owner/permissions:" yes, and it's offered as
-    an explicit upgrade toggle from quick restore rather than folded
-    into A silently, so a user who only has `FileWrite` still gets the
-    content-only fast path.
-  - **Verify** — sha256 preferred over a full read-back, per your
-    point. The backend computes sha256 over the source bytes while
-    streaming them from `file-restore/download` (already has the
-    bytes in hand, no extra guest round-trip for this half). After the
-    write (and optional concat), when exec is available, one
-    `guest-exec` runs the guest's native hasher (`sha256sum` on
-    Linux/BSD, `Get-FileHash -Algorithm SHA256` on Windows, `shasum
-    -a 256` fallback on macOS-family) and the backend compares stdout
-    against the precomputed digest — no full file read-back over the
-    slow virtio-serial channel. When exec isn't available (Design A,
-    `FileWrite` only), verification is skipped by default; a narrower
-    fallback via `agent/file-read` (gated by the separate
-    `VM.GuestAgent.FileRead` privilege) is a possible later addition
-    for the single-chunk case only, not required for the first cut.
+**Metadata restore and verification are independent opt-ins, not tied
+to which write mechanism ends up used.** Design A/B above is an
+internal implementation detail (which mechanism moves the bytes), not
+a user-facing choice — there's no "pick quick or full" step. Instead,
+whenever `VM.GuestAgent.Unrestricted` is available (regardless of
+whether the content itself needed more than one chunk), the restore
+confirmation offers two independent checkboxes, both defaulting **off**:
+- **Restore metadata** (mtime/owner/mode) — a follow-up `guest-exec`
+  (`touch -d`/`chown`/`chmod`, or `icacls` on Windows) applying what
+  the file-restore listing already returned. This directly answers
+  "doesn't the single-call write path still need guest-exec for
+  mtime/owner/permissions:" — yes, and it's available as an upgrade on
+  top of a single-chunk restore too, not gated behind also needing
+  chunk concatenation. A user with only `FileWrite` (no
+  `Unrestricted`) doesn't see this checkbox at all and gets the
+  content-only fast path.
+- **Verify** — sha256 preferred over a full read-back, per your point.
+  The backend computes sha256 over the source bytes while streaming
+  them from `file-restore/download` (already has the bytes in hand, no
+  extra guest round-trip for this half). After the write (and any
+  concat), one `guest-exec` runs the guest's native hasher
+  (`sha256sum` on Linux/BSD, `Get-FileHash -Algorithm SHA256` on
+  Windows, `shasum -a 256` fallback on macOS-family) and the backend
+  compares stdout against the precomputed digest — no full file
+  read-back over the slow virtio-serial channel. Same `Unrestricted`
+  gate as metadata restore, same independent-checkbox treatment. When
+  exec isn't available at all, verification is simply not offered; a
+  narrower fallback via `agent/file-read` (gated by the separate
+  `VM.GuestAgent.FileRead` privilege) is a possible later addition for
+  the single-chunk case only, not required for the first cut.
 
-  Both sub-options default **off** — Design B's baseline is still just
-  "restore this content, possibly in multiple pieces," not
-  automatically metadata+verify; the UI presents them as their own
-  checkboxes once Design B is the active choice.
+The backend decides the actual mechanism from these three independent
+facts at write time: content needing >1 chunk, "restore metadata"
+checked, or "verify" checked — any one of the three means this restore
+uses `guest-exec` and therefore requires `Unrestricted`; none of them
+means it never leaves the single-call `FileWrite`-only path.
 
 **Destination is a directory, not a file path.** Both designs take a
 `dest_dir` (an existing directory inside the guest, chosen by the
@@ -629,10 +634,11 @@ single-process/in-memory tradeoff already accepted for
 `auth._sessions` (CLAUDE.md's "no extra services" — lost on a backend
 restart, acceptable for a homelab tool):
 
-- `RestoreJob`: id, requested_by, guest type/vmid/name, task name
-  (auto-generated, e.g. "Restore 2026-08-30 14:48 → /etc"), source
-  (volume + filepath), destination (`dest_dir` [+ filename]), strategy
-  (`quick`/`full`), metadata/verify flags, status
+- `RestoreJob`: id, a **snapshot** of the requesting session (see
+  below), guest type/vmid/name, task name (auto-generated, e.g.
+  "Restore 2026-08-30 14:48 → /etc"), source (volume + filepath),
+  destination (`dest_dir` [+ filename]), independent metadata/verify
+  flags (no `strategy` field — see above), status
   (`queued`/`running`/`verifying`/`done`/`failed`/`cancelled`),
   started_at, an `elapsed_seconds` property, and a cooperative
   `cancel_requested` flag checked between chunks/steps.
@@ -649,20 +655,45 @@ restart, acceptable for a homelab tool):
 - New endpoints: `GET /api/restore-jobs` (list, polled by the UI),
   `POST /api/restore-jobs/{id}/cancel`.
 
+**Session handling for background jobs.** A job holds its *own copy*
+of the requester's `SessionData` (`dataclasses.replace(session)` at
+submission time inside `RestoreJobManager.create()`, not left to the
+call site) — never the same object the interactive `auth._sessions`
+entry points at. Two reasons this matters, both raised in review:
+- A restore is meant to keep running even if the browser session that
+  started it logs out or idle-times-out — that's the point of it being
+  a background job rather than tying up the request. If the job shared
+  the interactive session object, `auth.logout()` popping it from
+  `_sessions` wouldn't stop the job (it still holds a Python reference
+  to the object), but conceptually the job's credential shouldn't be
+  entangled with the interactive session's lifecycle either way — it
+  should have its own copy from the start.
+- A PVE ticket is a ~2h credential that needs periodic refreshing.
+  `auth.get_session()` already refreshes the interactive session's
+  ticket, but only when the next browser request comes in — a
+  long-running job can't depend on that happening. `auth.py` now
+  exposes a public `ensure_fresh_ticket(session)` (the same staleness
+  check `get_session()` uses internally, extracted so it's callable
+  outside the request cycle), and the job's run loop calls it on its
+  own copy before each guest-agent call, keeping the job's credential
+  current independent of any browser activity.
+
 **UI.**
 - `file_grid.html`'s "Restore" button reflects
   `/api/restore-capabilities` for the currently-selected guest (fetched
-  once per guest switch). Click opens a confirmation modal offering
-  `dest_dir` entry, and:
-  - **Neither available:** button stays disabled, tooltip shows the
-    `reason`.
-  - **Only Design A:** goes straight to quick-restore confirmation
-    (`dest_dir`, overwrite warning, "lands as root:root 0644" notice).
-  - **Both available:** choice between "Quick restore" (default) and
-    "Full restore" — the latter reveals the "restore metadata" and
-    "verify" checkboxes (both off by default), each individually
-    disabled with its own reason if the guest/privilege state doesn't
-    support it. Never auto-picks Full.
+  once per guest switch). One confirmation modal, no "quick vs. full"
+  choice:
+  - **Nothing available** (`design_a.available` false): button stays
+    disabled, tooltip shows the `reason`.
+  - **Only content restore available** (`FileWrite`, no
+    `Unrestricted`): `dest_dir` entry, overwrite warning, "lands as
+    root:root 0644" notice — no metadata/verify checkboxes shown at
+    all, since there's no exec to run them with.
+  - **`Unrestricted` also available:** same modal additionally shows
+    "Restore metadata" and "Verify" checkboxes (both off by default) —
+    checking either (or the content simply being too large for one
+    call) is what pulls this particular restore onto the exec-based
+    path; the user never has to know that distinction exists.
 - **Running-jobs indicator** — a new icon in the top bar between the
   guest/task picker and the user menu (matching the reference
   screenshot's placement), showing a small spinning ring around it
@@ -685,13 +716,14 @@ restart, acceptable for a homelab tool):
    responses.
 3. `backend/restore_jobs.py` — job manager lifecycle (submit, list,
    cancel, elapsed time), testable without any real QGA calls.
-4. Design A end-to-end (`/api/restore`, quick strategy) running through
-   the job manager, + UI (single-choice modal, no running-jobs icon
-   yet).
+4. Content-only restore end-to-end (`/api/restore`, single-call path
+   only) running through the job manager, + UI (no metadata/verify
+   checkboxes or running-jobs icon yet).
 5. Running-jobs UI (icon/spinner/modal/cancel) wired to the job manager
    built in step 3.
-6. Design B (chunk+concat, metadata, verify) added to the same
-   endpoint/modal once A and the job infrastructure are solid.
+6. Multi-chunk write (scratch files + concat) and the metadata/verify
+   checkboxes added to the same endpoint/modal once the content-only
+   path and the job infrastructure are solid.
 
 Each step gets its own pytest coverage (chunking/base64 math,
 capability-object construction from fake responses, job lifecycle

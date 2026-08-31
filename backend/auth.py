@@ -90,6 +90,18 @@ async def _refresh_ticket(session: SessionData) -> None:
     session.ticket_issued_at = time.time()
 
 
+async def ensure_fresh_ticket(session: SessionData) -> None:
+    """Public wrapper around the same staleness check get_session() applies
+    to interactive requests, exposed for callers that hold a SessionData
+    outside the request/response cycle - namely PH.5's background restore
+    jobs (docs/plan.md §7.5). A restore can run long past any single HTTP
+    request, so a job needs to refresh its own ticket on this same policy
+    rather than only ever refreshing on the next browser request (which
+    may not come for a while, or ever, if the job was fire-and-forget)."""
+    if time.time() - session.ticket_issued_at > _TICKET_REFRESH_AGE_SECONDS:
+        await _refresh_ticket(session)
+
+
 def logout(session_id: str) -> None:
     _sessions.pop(session_id, None)
 
@@ -107,6 +119,5 @@ async def get_session(request: Request) -> SessionData:
         raise HTTPException(status_code=401, detail="Session expired (idle timeout)")
 
     session.last_activity_at = now
-    if now - session.ticket_issued_at > _TICKET_REFRESH_AGE_SECONDS:
-        await _refresh_ticket(session)
+    await ensure_fresh_ticket(session)
     return session

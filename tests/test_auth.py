@@ -102,6 +102,37 @@ async def test_get_session_refreshes_activity(session_data):
 
 
 @respx.mock
+async def test_ensure_fresh_ticket_refreshes_when_stale(session_data):
+    """The standalone helper background restore jobs use (docs/plan.md
+    §7.5) - same policy as get_session()'s inline check, callable without
+    a request/session-store round trip."""
+    route = respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "PVE:alice@pam:FRESH2",
+                    "CSRFPreventionToken": "csrf-fresh2",
+                }
+            },
+        )
+    )
+    session_data.ticket_issued_at = time.time() - (auth._TICKET_REFRESH_AGE_SECONDS + 60)
+    await auth.ensure_fresh_ticket(session_data)
+    assert route.called
+    assert session_data.ticket == "PVE:alice@pam:FRESH2"
+
+
+@respx.mock
+async def test_ensure_fresh_ticket_no_ops_when_fresh(session_data):
+    session_data.ticket_issued_at = time.time()
+    original_ticket = session_data.ticket
+    await auth.ensure_fresh_ticket(session_data)
+    assert session_data.ticket == original_ticket  # no HTTP call was even mocked/needed
+
+
+@respx.mock
 async def test_get_session_refreshes_stale_ticket(session_data):
     route = respx.post(f"{API}/access/ticket").mock(
         return_value=httpx.Response(
