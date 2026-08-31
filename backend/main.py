@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException
 
-from . import auth, guest_agent, pve_client, restore_jobs, restore_runner
+from . import auth, guest_agent, guest_browse, pve_client, restore_jobs, restore_runner
 from .auth import SessionData
 from .version import REPO_URL, __version__
 
@@ -362,6 +362,35 @@ async def restore(
     )
     restore_jobs.manager.submit(job, lambda j: restore_runner.run_content_only_restore(j, restore_jobs.manager))
     return JSONResponse(job.to_dict())
+
+
+@app.get("/api/restore-browse")
+async def restore_browse(
+    type: str,
+    vmid: str,
+    path: str = "",
+    session: SessionData = Depends(auth.get_session),
+):
+    """PH.5 (docs/plan.md §7.5): lists subdirectories inside the guest via
+    guest-exec, so the restore destination can be browsed rather than
+    typed blind. Needs VM.GuestAgent.Unrestricted - there's no dedicated
+    QGA directory-listing command - so this is gated on design_b, same as
+    metadata restore/verify, and re-checked here regardless of what the
+    capabilities response already showed."""
+    if type not in ("vm", "ct"):
+        raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
+    caps = await guest_agent.get_restore_capabilities(session, type, vmid)
+    if not caps.design_b.available:
+        raise HTTPException(
+            status_code=403, detail=caps.design_b.reason or "Browsing this guest's filesystem is not available"
+        )
+    try:
+        result = await guest_browse.list_directories(session, type, vmid, caps.guest_os_family, path or None)
+    except guest_browse.UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except (httpx.HTTPStatusError, guest_browse.ListingError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    return JSONResponse(result)
 
 
 @app.get("/api/download")

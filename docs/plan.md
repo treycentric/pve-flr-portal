@@ -598,9 +598,13 @@ confirmation offers two independent checkboxes, both defaulting **off**:
   them from `file-restore/download` (already has the bytes in hand, no
   extra guest round-trip for this half). After the write (and any
   concat), one `guest-exec` runs the guest's native hasher
-  (`sha256sum` on Linux/BSD, `Get-FileHash -Algorithm SHA256` on
-  Windows, `shasum -a 256` fallback on macOS-family) and the backend
-  compares stdout against the precomputed digest — no full file
+  (`sha256sum` on Linux/BSD, `certutil -hashfile <path> SHA256` on
+  Windows — a `cmd`-only tool, no PowerShell dependency, matching
+  `guest_browse.py`'s `cmd`/`wmic`/`dir` approach rather than
+  introducing a second invocation style; `Get-FileHash -Algorithm
+  SHA256` remains a fine fallback if `certutil` is ever missing —
+  `shasum -a 256` fallback on macOS-family) and the backend compares
+  the parsed digest against the precomputed one — no full file
   read-back over the slow virtio-serial channel. Same `Unrestricted`
   gate as metadata restore, same independent-checkbox treatment. When
   exec isn't available at all, verification is simply not offered; a

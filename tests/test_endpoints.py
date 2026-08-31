@@ -280,6 +280,79 @@ def test_restore_capabilities_requires_auth():
     assert resp.status_code in (302, 401)
 
 
+def test_restore_browse_rejects_unknown_guest_type(client):
+    resp = client.get("/api/restore-browse", params={"type": "bogus", "vmid": "133"})
+    assert resp.status_code == 400
+
+
+def test_restore_browse_blocked_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        reason = "missing VM.GuestAgent.Unrestricted privilege"
+        return _available_caps(design_b=guest_agent.PathAvailability(False, reason))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133"})
+    assert resp.status_code == 403
+    assert "Unrestricted" in resp.json()["detail"]
+
+
+def test_restore_browse_returns_listing(client, monkeypatch):
+    from backend import guest_agent, guest_browse
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True), guest_os_family="linux")
+
+    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+        assert guest_os_family == "linux"
+        assert path == "/etc"
+        return {"path": "/etc", "parent": "/", "separator": "/", "entries": [{"name": "nginx", "path": "/etc/nginx"}]}
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_browse, "list_directories", fake_list)
+    resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133", "path": "/etc"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["entries"] == [{"name": "nginx", "path": "/etc/nginx"}]
+
+
+def test_restore_browse_unsafe_path_returns_400(client, monkeypatch):
+    from backend import guest_agent, guest_browse
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+        raise guest_browse.UnsafePathError("nope")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_browse, "list_directories", fake_list)
+    resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133", "path": "/tmp/;rm"})
+    assert resp.status_code == 400
+
+
+def test_restore_browse_listing_error_returns_502(client, monkeypatch):
+    from backend import guest_agent, guest_browse
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+        raise guest_browse.ListingError("No such file or directory")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_browse, "list_directories", fake_list)
+    resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133"})
+    assert resp.status_code == 502
+
+
+def test_restore_browse_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-browse", params={"type": "vm", "vmid": "133"}, follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
 def test_download_streams_with_content_disposition(client, monkeypatch):
     class FakeResponse:
         def __init__(self):
