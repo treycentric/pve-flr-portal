@@ -476,114 +476,230 @@ admin hasn't supplied their own.
 Active design as of PH.5 start (issue #5, branch
 `feat/ph5-push-to-guest`). Builds on the mechanism/limits captured in
 `docs/archive/plan-phases-0-4.md` §7.4 (still the reference for the raw
-QGA facts — payload ceilings, privilege names, live-filesystem hazard);
-this section is the living design on top of it. Both Design A (quick,
-`file-write` only) and Design B (full, `file-write` + `guest-exec`)
-ship — not one now and one later — with the portal detecting per-guest
-which are actually usable rather than guessing from OS family.
+QGA facts — live-filesystem hazard, etc.); this section is the living
+design on top of it and supersedes §7.4's Design A/B split with a
+revised one below (2026-08-31 research + user design review).
+
+**Confirmed from official sources (2026-08-31), resolving the open
+question from the first draft of this section:**
+- `agent/file-write` is a genuine one-shot wrapper — the only
+  parameters are `file` and `content` (no `handle`/`offset`), confirmed
+  both by the shape of every real `pvesh create
+  .../agent/file-write --content ... --file ...` example found and by
+  there being no separate `agent/file-open` API node to hold a handle
+  across calls. **No append across HTTP calls exists.** A second call
+  to the same guest path truncates and overwrites the first — this
+  closes the open question outright, no live test needed to establish
+  it (though the exact per-call payload ceiling below still does).
+  Sources: [forum: Proxmox API /agent/file-write](https://forum.proxmox.com/threads/proxmox-api-agent-file-write.67447/),
+  [forum: how to create/edit a file with qm guest agent](https://forum.proxmox.com/threads/how-to-create-or-edit-file-with-qm-guest-agent.89759/).
+- Two *different* size figures show up in community reports and likely
+  describe two different layers, still to be told apart empirically
+  against the real environment: a ~40–60 KiB practical ceiling per
+  `agent/file-write` call (probably `pveproxy`'s own HTTP POST body
+  cap, since the base64 content rides in the request body) versus a
+  48 MB figure mentioned around `qemu-guest-agent` file operations
+  generally (probably QGA's own internal limit for a single QMP
+  message, not a per-portal-call number). Until measured directly,
+  treat the smaller, more specific figure as the operative per-call
+  ceiling.
+- The five `VM.GuestAgent.*` privileges, straight from the Proxmox
+  access-control patch that introduced them: `Audit` ("issue
+  informational QEMU guest agent commands"), `FileRead` ("read files
+  from the guest"), `FileWrite` ("write files in the guest"),
+  `FileSystemMgmt` ("freeze/thaw/trim file systems"), `Unrestricted`
+  ("issue arbitrary QEMU guest agent commands"). Source:
+  [pve-devel patch series, "replace ambiguously named VM.Monitor privilege"](https://lore.proxmox.com/pve-devel/20250717133711.84715-9-f.ebner@proxmox.com/).
+  Critically, **`guest-exec`/`guest-exec-status` are not named under
+  any specific privilege** — only `Unrestricted` covers "arbitrary"
+  commands, so *any* use of `guest-exec` for *any* reason (chunk
+  reassembly, metadata restore, checksum verification) requires the
+  broad grant. There is no narrower "exec" privilege to ask for.
+  `agent/info` (wraps QMP `guest-info`, used for capability detection
+  below) is itself an informational command, so reading it needs
+  `VM.GuestAgent.Audit` — the capability-detection call itself is
+  privilege-gated, and a user with none of the five grants should get
+  a clean "no info available, assume unavailable" rather than a 403
+  bubbling up as an error.
+
+**Revised Design A / B split**, given the confirmed one-shot/no-append
+behavior above (the write mechanics decide the split now, not an
+arbitrary feature line):
+
+- **Design A — quick restore.** A single file whose content fits in
+  one `agent/file-write` call. No `guest-exec` anywhere in the path —
+  works even where exec is blocked (RHEL-family guests). Needs only
+  `VM.GuestAgent.FileWrite`. Lands `root:root`/SYSTEM, mode `0644`,
+  fresh mtime — stated plainly in the UI, not hidden in a tooltip.
+- **Design B — full restore.** Anything Design A can't do in one call:
+  larger files, directories, or a request to preserve metadata.
+  Mechanism (per your assumption, confirmed as the right shape given
+  the no-append finding above): write each chunk to its own
+  uniquely-named file in a per-restore scratch directory inside the
+  guest — discovered per OS from `agent/info`'s reported guest OS
+  (`%TEMP%`/`C:\Windows\Temp` on Windows via `get-osinfo`, `/tmp` or
+  `$TMPDIR` on Linux/BSD) — then one `guest-exec` concatenates them in
+  order into the destination (`cat part.* > dest` / PowerShell
+  `Get-Content -Raw` + `Set-Content`/`cmd /c copy /b`), then the
+  scratch directory is removed. Needs `VM.GuestAgent.Unrestricted`
+  (the concatenation step alone forces this, independent of whether
+  metadata restore is also requested).
+
+  Design B further splits into two independently-toggleable
+  sub-options, both still exec-gated so both live under the same
+  `Unrestricted` requirement:
+  - **Restore metadata** (mtime/owner/mode) — a follow-up `guest-exec`
+    (`touch -d`/`chown`/`chmod`, or `icacls` on Windows) applying what
+    the file-restore listing already returned. Optional even when
+    Design B is otherwise a single chunk that technically didn't need
+    concatenation — this is the answer to "doesn't Design A still need
+    guest-exec for mtime/owner/permissions:" yes, and it's offered as
+    an explicit upgrade toggle from quick restore rather than folded
+    into A silently, so a user who only has `FileWrite` still gets the
+    content-only fast path.
+  - **Verify** — sha256 preferred over a full read-back, per your
+    point. The backend computes sha256 over the source bytes while
+    streaming them from `file-restore/download` (already has the
+    bytes in hand, no extra guest round-trip for this half). After the
+    write (and optional concat), when exec is available, one
+    `guest-exec` runs the guest's native hasher (`sha256sum` on
+    Linux/BSD, `Get-FileHash -Algorithm SHA256` on Windows, `shasum
+    -a 256` fallback on macOS-family) and the backend compares stdout
+    against the precomputed digest — no full file read-back over the
+    slow virtio-serial channel. When exec isn't available (Design A,
+    `FileWrite` only), verification is skipped by default; a narrower
+    fallback via `agent/file-read` (gated by the separate
+    `VM.GuestAgent.FileRead` privilege) is a possible later addition
+    for the single-chunk case only, not required for the first cut.
+
+  Both sub-options default **off** — Design B's baseline is still just
+  "restore this content, possibly in multiple pieces," not
+  automatically metadata+verify; the UI presents them as their own
+  checkboxes once Design B is the active choice.
+
+**Destination is a directory, not a file path.** Both designs take a
+`dest_dir` (an existing directory inside the guest, chosen by the
+user) as the restore root, not a full target file path — matches how
+the source side already works (a folder or a multi-file selection).
+For a single-file restore, the file lands at `dest_dir/<original
+filename>`; for a directory/multi-file selection, the relative
+structure under the browsed folder is preserved under `dest_dir`. No
+path is invented on the guest side beyond what the user picked as the
+root.
 
 **Capability detection.** New `backend/guest_agent.py`, backing
-`GET /api/restore-capabilities?type=<qemu|lxc>&vmid=<id>`, gathers four
-independent, empirically-checked facts (no OS-family guessing):
+`GET /api/restore-capabilities?type=<qemu|lxc>&vmid=<id>`, gathers:
 
 | Check | How | Tells us |
 |---|---|---|
 | Agent enabled in VM config | `GET /nodes/localhost/qemu/{vmid}/config` → `agent` field | Is QGA wired up at all |
-| What the guest agent itself allows | `POST /nodes/localhost/qemu/{vmid}/agent/info` (wraps QMP `guest-info`, returns `supported_commands[]` with per-command `enabled` flags) | Ground truth for whether `guest-file-write`/`guest-exec`/`guest-file-read` are allowed on *this* guest |
-| Caller's own privilege | `GET /access/permissions?path=/vms/{vmid}` | Does the logged-in user's ticket carry `VM.GuestAgent.FileWrite` / `.Unrestricted` |
-| PVE version | `GET /version` | PVE 8 only has coarse `VM.Monitor` — no granular `VM.GuestAgent.*`, so restore is unavailable regardless of the other three checks |
+| What the guest agent itself allows | `POST /nodes/localhost/qemu/{vmid}/agent/info` (wraps QMP `guest-info`, returns `supported_commands[]` with per-command `enabled` flags) | Ground truth for whether `guest-file-write`/`guest-exec`/`guest-file-read` are allowed on *this* guest — gated by `VM.GuestAgent.Audit`, see above |
+| Guest OS (for the scratch-dir path and hasher choice) | Same `agent/info` call, or `get-osinfo` | Windows vs. Linux/BSD/macOS-family conventions |
+| Caller's own privilege | `GET /access/permissions?path=/vms/{vmid}` | Which of the five `VM.GuestAgent.*` grants the logged-in user's ticket carries |
+| PVE version | `GET /version` | PVE 8 only has coarse `VM.Monitor` — no granular `VM.GuestAgent.*` at all, so restore is unavailable regardless of the other checks |
 
 Response shape:
 ```json
 {
   "agent_running": true,
   "pve_version_ok": true,
+  "guest_os_family": "linux",
   "design_a": {"available": true, "reason": null},
-  "design_b": {"available": false, "reason": "guest-exec not enabled in qemu-guest-agent config"}
+  "design_b": {"available": false, "reason": "guest-exec not enabled in qemu-guest-agent config"},
+  "verify_supported": false
 }
 ```
 `reason` is always populated when `available: false` so the UI can
-explain *why* a path is greyed out (agent not running, PVE 8, missing
-privilege, guest-exec blocked) rather than just hiding it.
+explain *why* a path is greyed out rather than just hiding it.
 
-**Authorization**, unchanged from the archived design: a restore grant
-is separate from and never folded into `FileRestoreReader`/`VM.Backup`.
-Design A gate: `VM.GuestAgent.FileWrite`. Design B gate:
-`VM.GuestAgent.Unrestricted`. The backend re-checks the privilege
-server-side on every restore call — the capability response is a UI
-convenience, never trusted for the actual write.
+**Authorization**, unchanged in spirit from the archived design: a
+restore grant is separate from and never folded into
+`FileRestoreReader`/`VM.Backup`. The backend re-checks every privilege
+server-side on every restore step — the capability response is a UI
+convenience, never trusted for the actual write, concat, metadata, or
+verify calls.
 
-**Open technical question to resolve first, before any restore code is
-written:** the archive doc says `agent/file-write` is "one-shot:
-open→write→close, truncates, no append," but also describes Design A
-as chunking a file "up to a few MB" — those are in tension, since
-repeated calls to the same path would each overwrite the previous
-chunk rather than assemble a bigger file. Confirm against a real guest
-whether `file-write` supports an offset/append mode:
-- **No append** → Design A's real per-file ceiling is one chunk
-  (~40–60 KiB, itself to be confirmed), or a directory of such small
-  files, each restored via its own single call. Anything bigger gets a
-  clear "too large for quick restore, use full restore" message.
-- **Append exists** → Design A can chunk up to a sane cap (proposed:
-  5 MB) before the same redirect message kicks in.
+**Background jobs — restore runs out-of-band, not on the request.**
+A restore (especially Design B: source stream → N chunk writes →
+concat → optional metadata → optional verify) can run well past a
+reasonable HTTP request lifetime. `POST /api/restore` submits a job
+and returns its id immediately; the actual work runs as a tracked
+asyncio background task. New `backend/restore_jobs.py`, same
+single-process/in-memory tradeoff already accepted for
+`auth._sessions` (CLAUDE.md's "no extra services" — lost on a backend
+restart, acceptable for a homelab tool):
 
-Do this alongside the other open items already listed in the archive
-doc's §7.4 (exact payload ceiling, `encode: 0` support, per-guest
-`agent: 1`/exec status) — one sitting against a real guest, before any
-UI work.
+- `RestoreJob`: id, requested_by, guest type/vmid/name, task name
+  (auto-generated, e.g. "Restore 2026-08-30 14:48 → /etc"), source
+  (volume + filepath), destination (`dest_dir` [+ filename]), strategy
+  (`quick`/`full`), metadata/verify flags, status
+  (`queued`/`running`/`verifying`/`done`/`failed`/`cancelled`),
+  started_at, an `elapsed_seconds` property, and a cooperative
+  `cancel_requested` flag checked between chunks/steps.
+- Manager: `submit()` creates a job and launches
+  `asyncio.create_task`; `list_jobs()` for the running-jobs modal;
+  `cancel(job_id)` sets the flag (the loop notices at the next chunk
+  boundary and marks `cancelled`, cleaning up any scratch dir already
+  written).
+- Jobs are visible to any logged-in user, not scoped per-requester —
+  matches this being a single-admin homelab tool with one shared task
+  list (Synology ABB's own restore-task list works the same way), and
+  keeps the UI simple. Revisit if this ever becomes genuinely
+  multi-admin.
+- New endpoints: `GET /api/restore-jobs` (list, polled by the UI),
+  `POST /api/restore-jobs/{id}/cancel`.
 
-**Design A — quick restore (`file-write` only).**
-`POST /api/restore` with `{volume, filepath, guest_type, vmid,
-target_path, overwrite}`. Streams the source file from the existing
-`open_download()` file-restore path, splits into base64 chunks sized
-per the open question above, calls `agent/file-write`. Requires
-`VM.GuestAgent.FileWrite` only. Result lands `root:root`/SYSTEM, mode
-`0644`, fresh mtime — surfaced plainly in the confirmation UI and the
-result message, not just a tooltip. No `guest-exec` dependency, so it
-works even on RHEL-family guests with exec blocked.
-
-**Design B — full restore (`file-write` bootstrap + `guest-exec`
-pull).** Same endpoint, `strategy: "full"`. Backend writes a small
-fetch script into the guest via one `file-write` call, `guest-exec`'s
-it to pull the real file from the portal over the guest's own network
-(a short-lived, single-use signed download URL, reusing the existing
-download-streaming code), then a follow-up `guest-exec` fixes
-ownership/mode using metadata the file-restore listing already
-returns. Requires `VM.GuestAgent.Unrestricted` — the larger-blast-radius
-path, so the UI never silently prefers it over Design A. The first
-`guest-exec` step includes a reachability preflight (curl a portal
-health endpoint) before touching the target file, so a
-network-unreachable guest fails fast instead of leaving a half-written
-fetch script behind.
-
-**UI flow.** `file_grid.html`'s "Restore" button reflects
-`/api/restore-capabilities` for the currently-selected guest (fetched
-once per guest switch). Click opens a confirmation modal:
-- **Neither available:** button stays disabled, tooltip shows the
-  `reason` from the capability check.
-- **Only Design A:** modal goes straight to the quick-restore
-  confirmation (target path, overwrite warning, "will land as
-  root:root 0644" notice).
-- **Both available:** modal offers a choice — "Quick restore" (Design
-  A, default-selected) vs. "Full restore, preserves ownership &
-  permissions" (Design B, requires an explicit extra click past a
-  warning callout about the broader privilege/blast radius). Never
-  auto-picks B.
+**UI.**
+- `file_grid.html`'s "Restore" button reflects
+  `/api/restore-capabilities` for the currently-selected guest (fetched
+  once per guest switch). Click opens a confirmation modal offering
+  `dest_dir` entry, and:
+  - **Neither available:** button stays disabled, tooltip shows the
+    `reason`.
+  - **Only Design A:** goes straight to quick-restore confirmation
+    (`dest_dir`, overwrite warning, "lands as root:root 0644" notice).
+  - **Both available:** choice between "Quick restore" (default) and
+    "Full restore" — the latter reveals the "restore metadata" and
+    "verify" checkboxes (both off by default), each individually
+    disabled with its own reason if the guest/privilege state doesn't
+    support it. Never auto-picks Full.
+- **Running-jobs indicator** — a new icon in the top bar between the
+  guest/task picker and the user menu (matching the reference
+  screenshot's placement), showing a small spinning ring around it
+  whenever `GET /api/restore-jobs` (polled every few seconds while any
+  job is `queued`/`running`/`verifying`) reports at least one active
+  job. Click opens a "Restore Task" modal: a table (Device, Task Name,
+  Restore ver., Source, Destination, Status, Elapsed Time, an actions
+  column) with row selection and a "Cancel" button wired to
+  `POST /api/restore-jobs/{id}/cancel`, an empty "No data" state, and
+  a Close button — matching the reference screenshot's layout.
 
 **Sequencing:**
-1. Empirical verification (the open question above) — no code yet.
+1. Empirical verification against a real guest: the per-call payload
+   ceiling (40–60 KiB vs. 48 MB question above), `encode: 0` support,
+   and per-guest `agent: 1`/exec/OS-family facts — the append/truncate
+   question itself is already settled by research, no live test needed
+   for that part.
 2. `backend/guest_agent.py` + `/api/restore-capabilities` alone,
-   testable in isolation.
-3. Design A end-to-end (`/api/restore`, quick strategy) + UI, single-
-   choice modal only.
-4. Design B added to the same endpoint/modal once A is solid.
+   testable in isolation from fake `agent/info`/config/permissions
+   responses.
+3. `backend/restore_jobs.py` — job manager lifecycle (submit, list,
+   cancel, elapsed time), testable without any real QGA calls.
+4. Design A end-to-end (`/api/restore`, quick strategy) running through
+   the job manager, + UI (single-choice modal, no running-jobs icon
+   yet).
+5. Running-jobs UI (icon/spinner/modal/cancel) wired to the job manager
+   built in step 3.
+6. Design B (chunk+concat, metadata, verify) added to the same
+   endpoint/modal once A and the job infrastructure are solid.
 
 Each step gets its own pytest coverage (chunking/base64 math,
-capability-object construction from a fake `/agent/info` response,
-privilege-string parsing) per `CLAUDE.md`'s "new functionality needs a
-test in the same change" rule — the real QGA calls aren't mockable
-end-to-end without a live guest, so tests target the pure logic the
-same way `pve_client`/`auth` are unit-tested today. Commits cite #5.
+capability-object construction from fake responses, job lifecycle
+state transitions, privilege-string parsing) per `CLAUDE.md`'s "new
+functionality needs a test in the same change" rule — the real QGA
+calls aren't mockable end-to-end without a live guest, so tests target
+the pure logic the same way `pve_client`/`auth` are unit-tested today.
+Commits cite #5.
 
 ## 8. Stack — and why
 

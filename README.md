@@ -122,6 +122,46 @@ datastore.
 4. **Add → User Permission** (again) — Path: `/vms` (or a specific
    `/vms/<vmid>`), same User/Role, Propagate: checked.
 
+### Restore-to-guest (PH.5, in progress)
+
+Browsing and downloading only needs `FileRestoreReader` above.
+Restoring a file directly back into a *running* guest via
+`qemu-guest-agent` (still being built — see `docs/plan.md` §7.5 and
+[issue #5](https://github.com/treycentric/pve-flr-portal/issues/5)) is
+a **separate, deliberate** grant — a user who can browse a backup
+should not automatically be able to write into the live guest. It's
+never folded into `FileRestoreReader`.
+
+**Requires PVE 9+.** These are granular `VM.GuestAgent.*` privileges;
+PVE 8 only has the coarse, all-or-nothing `VM.Monitor` and can't scope
+this feature tightly, so it stays unavailable on PVE 8 regardless of
+any role/ACL setup.
+
+```
+pveum role add FileRestoreOperator -privs "VM.GuestAgent.Audit,VM.GuestAgent.FileWrite"
+pveum acl modify /vms/<vmid> --users <user>@<realm> --roles FileRestoreOperator
+```
+
+- `VM.GuestAgent.Audit` lets the portal ask the guest agent what it
+  supports (capability detection) — grant it alongside either of the
+  other two below, not on its own.
+- `VM.GuestAgent.FileWrite` enables **quick restore**: small files
+  written straight into the guest, landing `root:root`/SYSTEM, mode
+  `0644`, fresh mtime — no further guest access needed.
+- `VM.GuestAgent.Unrestricted` enables **full restore**: larger files,
+  directories, and the optional "restore metadata" / "verify"
+  upgrades. This is a much larger grant — Proxmox doesn't expose a
+  narrower privilege for `guest-exec`, so anything that needs to run a
+  command inside the guest needs this one. Add it only for guests
+  where that broader access is acceptable:
+  ```
+  pveum role modify FileRestoreOperator -privs "VM.GuestAgent.Audit,VM.GuestAgent.FileWrite,VM.GuestAgent.Unrestricted"
+  ```
+
+The portal detects per-guest which of these the calling user actually
+holds (plus what the guest agent itself allows) and only offers the
+restore options that check out — see `docs/plan.md` §7.5.
+
 ## Deployment
 
 **LXC on your PVE host (recommended).** Run on the PVE host itself:
