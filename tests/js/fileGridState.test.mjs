@@ -230,3 +230,144 @@ test('startRestore surfaces a message when the fetch itself throws', async () =>
   assert.ok(s.restoreError.includes('offline'));
   assert.equal(s.restoreSubmitted, false);
 });
+
+test('openRestore kicks off an initial browseInto(null) when browsing is available', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  let requestedUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ path: null, parent: null, entries: [{ name: 'C:', path: 'C:\\' }] }) };
+  };
+  try {
+    s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z', true);
+    await new Promise((r) => setTimeout(r, 0)); // let the fire-and-forget browseInto() settle
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowsing, true);
+  assert.ok(requestedUrl.startsWith('/api/restore-browse?'));
+  assert.ok(!requestedUrl.includes('path='));
+  assert.deepEqual(s.restoreBrowseEntries, [{ name: 'C:', path: 'C:\\' }]);
+});
+
+test('openRestore does not browse when browsing is unavailable', () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('should not be called');
+  };
+  try {
+    s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z', false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowsing, false);
+});
+
+test('browseInto updates path/parent/entries and mirrors destDir', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s._guestType = 'qemu';
+  s._guestVmid = '133';
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = null;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return {
+      ok: true,
+      json: async () => ({
+        path: '/etc',
+        parent: '/',
+        separator: '/',
+        entries: [{ name: 'nginx', path: '/etc/nginx' }],
+      }),
+    };
+  };
+  try {
+    await s.browseInto('/etc');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requestedUrl.includes('path=%2Fetc'));
+  assert.equal(s.restoreBrowsePath, '/etc');
+  assert.equal(s.restoreBrowseParent, '/');
+  assert.deepEqual(s.restoreBrowseEntries, [{ name: 'nginx', path: '/etc/nginx' }]);
+  assert.equal(s.restoreDestDir, '/etc');
+  assert.equal(s.restoreBrowseLoading, false);
+});
+
+test('browseInto(null) does not overwrite restoreDestDir (drive-list has no path)', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreDestDir = 'should-stay';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({ path: null, parent: null, entries: [] }),
+  });
+  try {
+    await s.browseInto(null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreDestDir, 'should-stay');
+  assert.equal(s.restoreBrowsePath, null);
+});
+
+test('browseInto surfaces the server error detail', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, json: async () => ({ detail: 'guest-exec disabled' }) });
+  try {
+    await s.browseInto('/etc');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowseError, 'guest-exec disabled');
+});
+
+test('browseUp browses into the current parent, including null (top level)', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreBrowseParent = '/etc';
+  let requestedUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ path: '/etc', parent: '/', entries: [] }) };
+  };
+  try {
+    await s.browseUp();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requestedUrl.includes('path=%2Fetc'));
+});
+
+test('toggleManualDestEntry flips to manual entry, then back re-browses the current path', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreBrowsing = true;
+  s.restoreBrowsePath = '/etc';
+  s.toggleManualDestEntry();
+  assert.equal(s.restoreBrowsing, false);
+
+  let requestedUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ path: '/etc', parent: '/', entries: [] }) };
+  };
+  try {
+    s.toggleManualDestEntry();
+    await new Promise((r) => setTimeout(r, 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowsing, true);
+  assert.ok(requestedUrl.includes('path=%2Fetc'));
+});

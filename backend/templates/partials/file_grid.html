@@ -22,7 +22,7 @@
       type="button"
       class="btn-outline"
       x-show="count > 0 && isSingleFile && restoreCaps && restoreCaps.design_a.available"
-      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime)">Restore</button>
+      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime, restoreCaps.design_b.available)">Restore</button>
 
     <button type="button" class="btn-outline" disabled x-show="count === 0">Download</button>
 
@@ -94,10 +94,37 @@
       <template x-if="!restoreSubmitted">
         <div class="restore-form">
           <p>Restores <strong x-text="selectedItems.length ? selectedItems[0].name : ''"></strong> directly into the running guest.</p>
-          <label class="restore-field">
-            Destination directory (in the guest)
-            <input type="text" x-model="restoreDestDir" placeholder="e.g. C:\Windows\Temp or /etc" class="modal-filter-input">
-          </label>
+
+          <template x-if="restoreBrowseAvailable && restoreBrowsing">
+            <div class="restore-browser">
+              <div class="restore-browse-toolbar">
+                <button type="button" class="btn-outline restore-browse-nav" :disabled="restoreBrowseParent === null || restoreBrowseLoading" @click="browseUp()">&uarr; Up</button>
+                <button type="button" class="btn-outline restore-browse-nav" x-show="restoreCaps.guest_os_family === 'windows'" :disabled="restoreBrowseLoading" @click="browseInto(null)">Drives</button>
+                <span class="restore-browse-path" x-text="restoreBrowsePath || 'Select a drive'"></span>
+              </div>
+              <div class="restore-browse-list">
+                <p x-show="restoreBrowseLoading" class="restore-browse-status">Loading&hellip;</p>
+                <p x-show="!restoreBrowseLoading && restoreBrowseError" class="restore-error" x-text="restoreBrowseError"></p>
+                <p x-show="!restoreBrowseLoading && !restoreBrowseError && restoreBrowseEntries.length === 0" class="restore-browse-status">No subfolders here.</p>
+                <template x-for="entry in restoreBrowseEntries" :key="entry.path">
+                  <button type="button" class="restore-browse-entry" @click="browseInto(entry.path)">
+                    &#128193; <span x-text="entry.name"></span>
+                  </button>
+                </template>
+              </div>
+              <p class="restore-browse-selected">Restoring into: <strong x-text="restoreDestDir || '(select a folder)'"></strong></p>
+              <button type="button" class="link-btn restore-browse-toggle" @click="toggleManualDestEntry()">Enter path manually instead</button>
+            </div>
+          </template>
+
+          <template x-if="!restoreBrowseAvailable || !restoreBrowsing">
+            <label class="restore-field">
+              Destination directory (in the guest)
+              <input type="text" x-model="restoreDestDir" placeholder="e.g. C:\Windows\Temp or /etc" class="modal-filter-input">
+            </label>
+          </template>
+          <button type="button" class="link-btn restore-browse-toggle" x-show="restoreBrowseAvailable && !restoreBrowsing" @click="toggleManualDestEntry()">Browse the guest instead</button>
+
           <p class="restore-warning">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
           <label class="restore-checkbox">
             <input type="checkbox" x-model="restoreOverwrite">

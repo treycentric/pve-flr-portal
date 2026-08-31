@@ -59,18 +59,29 @@ function fileGridState() {
     restoreSubmitting: false,
     restoreError: null,
     restoreSubmitted: false,
+    // Browsing the guest filesystem needs VM.GuestAgent.Unrestricted
+    // (guest-exec, no dedicated QGA listing command - docs/plan.md §7.5),
+    // so it's only offered when that's available; otherwise restoreDestDir
+    // stays a plain typed field.
+    restoreBrowseAvailable: false,
+    restoreBrowsing: false,
+    restoreBrowsePath: null,
+    restoreBrowseParent: null,
+    restoreBrowseEntries: [],
+    restoreBrowseLoading: false,
+    restoreBrowseError: null,
 
     init() {
       this.applySort();
     },
 
-    // guest/snapshotTime come from the caller's Alpine expression (see
-    // file_grid.html), which - unlike this method body itself - is
-    // evaluated in the ancestor portalApp() scope, so it can read
-    // `guest`/`selectedSnapshotTime` directly. A plain JS method here has
-    // no such scope-chaining, hence passing them in as arguments rather
-    // than trying `this.guest` from inside fileGridState().
-    openRestore(guestType, guestVmid, guestLabel, snapshotTime) {
+    // guest/snapshotTime/browseAvailable come from the caller's Alpine
+    // expression (see file_grid.html), which - unlike this method body
+    // itself - is evaluated in the ancestor portalApp() scope, so it can
+    // read `guest`/`selectedSnapshotTime`/`restoreCaps` directly. A plain
+    // JS method here has no such scope-chaining, hence passing them in as
+    // arguments rather than trying `this.guest` from inside fileGridState().
+    openRestore(guestType, guestVmid, guestLabel, snapshotTime, browseAvailable) {
       this._guestType = guestType;
       this._guestVmid = guestVmid;
       this._guestLabel = guestLabel;
@@ -79,7 +90,51 @@ function fileGridState() {
       this.restoreOverwrite = false;
       this.restoreError = null;
       this.restoreSubmitted = false;
+      this.restoreBrowseAvailable = browseAvailable;
+      this.restoreBrowsing = browseAvailable;
+      this.restoreBrowsePath = null;
+      this.restoreBrowseParent = null;
+      this.restoreBrowseEntries = [];
+      this.restoreBrowseError = null;
       this.restoreOpen = true;
+      if (browseAvailable) this.browseInto(null);
+    },
+
+    toggleManualDestEntry() {
+      this.restoreBrowsing = !this.restoreBrowsing;
+      if (this.restoreBrowsing) this.browseInto(this.restoreBrowsePath);
+    },
+
+    async browseInto(path) {
+      this.restoreBrowseLoading = true;
+      this.restoreBrowseError = null;
+      try {
+        const params = new URLSearchParams({ type: this._guestType, vmid: this._guestVmid });
+        if (path) params.set('path', path);
+        const resp = await fetch('/api/restore-browse?' + params.toString());
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.restoreBrowseError = data.detail || 'Could not list that folder.';
+          return;
+        }
+        this.restoreBrowsePath = data.path;
+        this.restoreBrowseParent = data.parent;
+        this.restoreBrowseEntries = data.entries || [];
+        if (data.path) this.restoreDestDir = data.path;
+      } catch (e) {
+        this.restoreBrowseError = 'Could not list that folder: ' + e;
+      } finally {
+        this.restoreBrowseLoading = false;
+      }
+    },
+
+    browseUp() {
+      // restoreBrowseParent is null both at an actual filesystem root
+      // (POSIX "/") and at a Windows drive root - the template disables
+      // the Up button in both cases; a separate "Drives" shortcut
+      // (browseInto(null)) is what gets a Windows user from a drive root
+      // back to the drive list, rather than overloading this button.
+      this.browseInto(this.restoreBrowseParent);
     },
 
     async startRestore() {

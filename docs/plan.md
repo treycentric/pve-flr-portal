@@ -722,14 +722,23 @@ entry points at. Two reasons this matters, both raised in review:
   - **Nothing available** (`design_a.available` false): button stays
     disabled, tooltip shows the `reason`.
   - **Only content restore available** (`FileWrite`, no
-    `Unrestricted`): `dest_dir` entry, overwrite warning, "lands as
-    root:root 0644" notice — no metadata/verify checkboxes shown at
-    all, since there's no exec to run them with.
+    `Unrestricted`): a plain typed `dest_dir` field (no directory
+    browser — that needs `guest-exec` too, see below), overwrite
+    warning, "lands as root:root 0644" notice — no metadata/verify
+    checkboxes shown at all, since there's no exec to run them with.
   - **`Unrestricted` also available:** same modal additionally shows
     "Restore metadata" and "Verify" checkboxes (both off by default) —
     checking either (or the content simply being too large for one
     call) is what pulls this particular restore onto the exec-based
-    path; the user never has to know that distinction exists.
+    path; the user never has to know that distinction exists. The
+    destination field is replaced by a small in-modal directory
+    browser (`GET /api/restore-browse`, `backend/guest_browse.py`) —
+    Up/Drives navigation, click a folder to descend, destination
+    mirrors the current position — with a "Enter path manually
+    instead" toggle back to plain typing for anyone who prefers it.
+    Browsing itself needs the same `Unrestricted` grant (no dedicated
+    QGA listing command), so it's simply absent, not merely disabled,
+    when only `FileWrite` is held.
 - **Running-jobs indicator** — a new icon in the top bar between the
   guest/task picker and the user menu (matching the reference
   screenshot's placement), showing a small spinning ring around it
