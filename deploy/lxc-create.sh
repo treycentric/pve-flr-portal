@@ -22,7 +22,7 @@ MEMORY_MB="${MEMORY_MB:-512}"
 CORES="${CORES:-1}"
 BRIDGE="${BRIDGE:-vmbr0}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"   # or e.g. "10.0.0.50/24,gw=10.0.0.1"
-REPO_URL="${REPO_URL:-https://github.com/<you>/pve-flr-portal.git}"
+REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
 
 TEMPLATE="debian-12-standard_12.7-1_amd64.tar.zst"
 
