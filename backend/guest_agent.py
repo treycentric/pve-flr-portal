@@ -159,7 +159,12 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
             f"{_API_ROOT}/access/permissions", params={"path": f"/vms/{vmid}"}, headers=headers
         )
         perms_resp.raise_for_status()
-        permissions = perms_resp.json()["data"]
+        # Confirmed live (docs/plan.md §7.5): the response nests the
+        # privilege dict under the path key itself, even with a single
+        # `path` filter given - e.g. {"/vms/202": {"VM.GuestAgent...": 1}},
+        # not a flat {"VM.GuestAgent...": 1}. Unwrap it here so
+        # parse_capabilities() can stay a simple flat-dict lookup.
+        permissions = perms_resp.json()["data"].get(f"/vms/{vmid}", {})
 
         version_resp = await client.get(f"{_API_ROOT}/version", headers=headers)
         version_resp.raise_for_status()

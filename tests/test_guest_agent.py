@@ -141,7 +141,7 @@ async def test_get_restore_capabilities_degrades_cleanly_when_agent_info_403s(se
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
     respx.get(f"{API}/access/permissions").mock(
-        return_value=httpx.Response(200, json={"data": {"VM.GuestAgent.FileWrite": 1}})
+        return_value=httpx.Response(200, json={"data": {"/vms/133": {"VM.GuestAgent.FileWrite": 1}}})
     )
     respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
     respx.get(f"{API}/nodes/localhost/qemu/133/agent/info").mock(return_value=httpx.Response(403, text="no Audit"))
@@ -161,7 +161,8 @@ async def test_get_restore_capabilities_happy_path(session_data):
     )
     respx.get(f"{API}/access/permissions").mock(
         return_value=httpx.Response(
-            200, json={"data": {"VM.GuestAgent.FileWrite": 1, "VM.GuestAgent.Unrestricted": 1}}
+            200,
+            json={"data": {"/vms/133": {"VM.GuestAgent.FileWrite": 1, "VM.GuestAgent.Unrestricted": 1}}},
         )
     )
     respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
@@ -201,3 +202,56 @@ async def test_get_restore_capabilities_lxc_skips_agent_calls(session_data):
     caps = await get_restore_capabilities(session_data, "ct", "133")
     assert not caps.agent_running
     assert not caps.design_a.available
+
+
+@respx.mock
+async def test_get_restore_capabilities_unwraps_permissions_nested_under_path(session_data):
+    # Regression test: /access/permissions?path=/vms/{vmid} nests the
+    # privilege dict under the path key itself - confirmed live against a
+    # real guest (docs/plan.md §7.5) - not a flat {"VM.GuestAgent...": 1}.
+    # A response that also carries an unrelated path must not leak its
+    # privileges onto this guest either.
+    respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
+        return_value=httpx.Response(200, json={"data": {"agent": "1"}})
+    )
+    respx.get(f"{API}/access/permissions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "/vms/999": {"VM.GuestAgent.Unrestricted": 1},  # a different guest - must not leak in
+                    "/vms/133": {"VM.GuestAgent.FileWrite": 1},
+                }
+            },
+        )
+    )
+    respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/info").mock(
+        return_value=httpx.Response(200, json={"data": {"supported_commands": []}})
+    )
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/get-osinfo").mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+
+    caps = await get_restore_capabilities(session_data, "vm", "133")
+    assert caps.design_a.available  # has FileWrite on /vms/133
+    assert not caps.design_b.available  # Unrestricted was only granted on /vms/999
+
+
+@respx.mock
+async def test_get_restore_capabilities_missing_path_key_means_no_privileges(session_data):
+    respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
+        return_value=httpx.Response(200, json={"data": {"agent": "1"}})
+    )
+    respx.get(f"{API}/access/permissions").mock(return_value=httpx.Response(200, json={"data": {}}))
+    respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/info").mock(
+        return_value=httpx.Response(200, json={"data": {"supported_commands": []}})
+    )
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/get-osinfo").mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+
+    caps = await get_restore_capabilities(session_data, "vm", "133")
+    assert not caps.design_a.available
+    assert not caps.design_b.available
