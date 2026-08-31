@@ -3,14 +3,26 @@
     <button
       type="button"
       class="btn-outline"
-      x-show="count > 0 && isSingleFile && restoreCaps && restoreCaps.design_a.available"
-      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime)">Restore</button>
+      disabled
+      x-show="!(count > 0 && isSingleFile)"
+      title="Select a single file to restore">Restore</button>
+    <button
+      type="button"
+      class="btn-outline"
+      disabled
+      x-show="count > 0 && isSingleFile && !restoreCaps"
+      title="Checking restore availability…">Restore</button>
     <button
       type="button"
       class="btn-outline"
       disabled
       x-show="count > 0 && isSingleFile && restoreCaps && !restoreCaps.design_a.available"
       :title="restoreCaps.design_a.reason || 'Restore is not available for this guest'">Restore</button>
+    <button
+      type="button"
+      class="btn-outline"
+      x-show="count > 0 && isSingleFile && restoreCaps && restoreCaps.design_a.available"
+      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime)">Restore</button>
 
     <button type="button" class="btn-outline" disabled x-show="count === 0">Download</button>
 
