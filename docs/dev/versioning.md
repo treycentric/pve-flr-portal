@@ -154,3 +154,30 @@ python scripts/release.py release
   release cannot publish if tests fail), then runs
   `python scripts/release.py release --tag <the pushed tag>` to publish
   the GitHub release from `CHANGELOG.md`.
+
+## Dependabot
+
+`.github/dependabot.yml` sets `commit-message.prefix: "chore"` (and
+`prefix-development: "chore"` for npm's devDependencies) with
+`include: "scope"`, so every Dependabot PR/commit already looks like
+`chore(deps): bump fastapi from 0.141.0 to 0.141.1` — valid Conventional
+Commits syntax, no manual retitling needed for the common case. Without
+this config Dependabot's default messages (`Bump fastapi from ...`,
+no type prefix) don't match `CONVENTIONAL_COMMIT_RE` at all, so
+`scripts/release.py` would silently drop every dependency bump instead
+of filing it under `chore` on purpose.
+
+`chore` is one of the intentionally-excluded types (see the table
+above) — routine dependency bumps don't show up in `CHANGELOG.md` and
+don't influence the recommended bump. That's deliberate, not a gap: if
+a specific bump actually matters to users (patches a real
+vulnerability, for instance), retitle the PR before merging — e.g.
+`fix(deps): bump fastapi to 0.141.1 (CVE-2026-xxxxx)` — so it lands
+under "Fixed" and recommends a patch bump like any other fix. Dependabot
+can't know which bumps are user-relevant on its own; a human still
+makes that call at merge time.
+
+This works with either merge strategy: squash-merge uses the PR title
+(generated from the same `commit-message` config) as the commit on
+`main`; a regular merge/rebase preserves Dependabot's own commits,
+which already carry the prefix.

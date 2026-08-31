@@ -75,6 +75,17 @@ def test_commit_ignored_type_is_not_breaking_by_default():
     assert commit.breaking_description is None
 
 
+def test_commit_parses_dependabot_style_message():
+    # .github/dependabot.yml sets commit-message.prefix/include so
+    # Dependabot's own messages land in this shape - without that config
+    # Dependabot's default ("Bump fastapi from 0.141.0 to 0.141.1", no
+    # type prefix) wouldn't match at all and c.type would be None.
+    commit = c("chore(deps): bump fastapi from 0.141.0 to 0.141.1")
+    assert commit.type == "chore"
+    assert commit.scope == "deps"
+    assert commit.description == "bump fastapi from 0.141.0 to 0.141.1"
+
+
 # --- recommend_bump -------------------------------------------------------
 
 
