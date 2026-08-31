@@ -371,6 +371,43 @@ down from the actual CSS pixel viewport (observed here: screenshots
 `getBoundingClientRect()` coordinates by the same ratio before clicking
 with the automation tool, or clicks silently land on the wrong element.
 
+**Confirmed bug (2026-08-30): an oversized marker hit area makes
+neighbouring snapshots unclickable.** The selected marker used to carry
+an invisible click rect as wide as its callout (`width + 20`, ~170px)
+and the full height of the widget — originally added while chasing the
+`setPointerCapture` bug below. Marker groups paint in date order, so
+that rect sat *on top of* the older neighbour. With a guest backed up
+daily, adjacent days are only ~27px apart at the default zoom, so the
+selected marker completely covered the previous day and swallowed every
+click on it: clicking the previous day did nothing at all. Proved with
+`document.elementFromPoint(olderDotX, axisY)`, which returned a
+`rect.timeline-hit-area` belonging to the *newer* group. Fix: one small
+hit rect per marker (±12px around the dot). The callout's bubble, tail
+and label are filled shapes and remain clickable on their own, so
+nothing up there needs a hit rect.
+
+**Testing note:** this survived several rounds of "verified working"
+because the checks dispatched `new MouseEvent('click')` directly on the
+target `<g>`, which **bypasses hit-testing entirely** and therefore
+cannot see one element covering another. Verifying pointer-driven
+behaviour needs either a real click through the automation tool or an
+explicit `elementFromPoint` assertion — dispatching to the element you
+already found proves only that the listener works, not that a user can
+reach it.
+
+**Marker click semantics (2026-08-30).** Clicking any snapshot marker
+*selects* it, so its small light-blue count badge becomes the tall
+dark-blue callout at the top (always with a tail and a thin red
+connector down to its dot) and the view pans that day under the centre
+line. A day holding several snapshots behaves identically, and then
+*additionally* opens the day list so a different one of that day can be
+picked; clicking the selected callout again toggles that list. The list
+is anchored just above the callout band and grows upward
+(`translateY(-100%)`), so it never expands back down over the ruler.
+Earlier this was click-to-open-list-only, which meant multi-snapshot
+days never produced a callout at all — an inconsistency with
+single-snapshot days.
+
 **Confirmed quirk (2026-08-30): a fixed `viewBox` +
 `preserveAspectRatio="none"` silently distorts every shape and glyph.**
 The widget was originally `viewBox="0 0 1000 90"` with

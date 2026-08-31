@@ -149,6 +149,7 @@ function portalApp(rawSnapshots) {
     // viewBox width and the element's pixel width.
     _w: 1000,
     _axisY: 60,
+    _bubbleY: 12,
 
     // --- browse state ---
     volume: null,
@@ -238,19 +239,32 @@ function portalApp(rawSnapshots) {
       this.activeDayKey = null;
       this.activeDayItems = [];
       this.volume = snapshot.volume;
-      await this.loadTree();
       if (this.crumbs.length === 0) {
         this.crumbs = [{ label: 'Root', filepath: '/' }];
       }
       // Center the view on the selected date's midnight (matching where its
       // dot is actually drawn, per groupsInView) under the fixed center
       // line, preserving whatever zoom level is currently active.
+      //
+      // This pan + repaint happens BEFORE any of the awaits below, so the
+      // callout moves to the clicked snapshot the instant it is clicked.
+      // The loads that follow hit the PVE file-restore API against a
+      // possibly-cold snapshot and can take many seconds (and loadTree()
+      // issues one request per expanded tree node); doing them first made
+      // a click look like it had simply done nothing.
       const span = this.viewEnd - this.viewStart;
       const dayStart = new Date(snapshot.date.getFullYear(), snapshot.date.getMonth(), snapshot.date.getDate());
       const target = dayStart.getTime();
       this.viewStart = new Date(target - span / 2);
       this.viewEnd = new Date(target + span / 2);
       this.renderTimeline();
+
+      // A tree failure must not abort the browse below.
+      try {
+        await this.loadTree();
+      } catch (e) {
+        this._treeVolume = null; // let the next selection retry it
+      }
       // Try to land on the same path in the new snapshot; if a level along
       // the current breadcrumb trail doesn't exist there (browse_error.html
       // came back), fall back one level at a time until one resolves.
@@ -267,6 +281,25 @@ function portalApp(rawSnapshots) {
       this._applySelection(preservedSelection);
     },
 
+    // What a click on a marker does. Clicking ANY snapshot selects it, so
+    // its small count badge always turns into the full dark-blue callout
+    // (with tail + red connector) at the top -- a day holding several
+    // behaves the same as a day holding one. A multi-snapshot day then
+    // also opens the list so a different one of that day can be picked;
+    // clicking the dark callout again toggles that list.
+    async activateGroup(group) {
+      const alreadySelected = group.items.some((s) => s.volume === this.selectedVolume);
+      if (!alreadySelected) {
+        // Pans the clicked day under the fixed centre line.
+        await this.selectSnapshot(group.items[group.items.length - 1]);
+      }
+      if (group.items.length > 1) {
+        // The marker is at the centre after the pan, so anchor there
+        // rather than at the pre-pan click position.
+        this.toggleDay(group.key, group.items, this._w / 2);
+      }
+    },
+
     toggleDay(key, items, screenX) {
       if (this.activeDayKey === key) {
         this.activeDayKey = null;
@@ -275,10 +308,11 @@ function portalApp(rawSnapshots) {
         this.activeDayKey = key;
         this.activeDayItems = items;
         this.activeDayX = screenX;
-        // The track spans the whole panel now, so the popup can't just sit
-        // at top:0 -- anchor its bottom edge just above the axis (it grows
-        // upward via translateY(-100%)).
-        this.activeDayTop = this._axisY - 8;
+        // Anchor the popup's BOTTOM edge just above the callout band, near
+        // the top of the panel; it grows upward from there (translateY(-100%)
+        // in CSS). Anchoring it near the axis instead would make it expand
+        // back down over the ruler as the list gets longer.
+        this.activeDayTop = this._bubbleY - 4;
       }
     },
 
@@ -384,7 +418,11 @@ function portalApp(rawSnapshots) {
       // no retargeting side effects.
       const onMove = (e) => {
         if (!dragging) return;
-        if (Math.abs(e.clientX - startX) > 3) this._dragMoved = true;
+        // Movement past this many pixels counts as a pan, which suppresses
+        // the click so panning doesn't also select. Keep it forgiving: a
+        // real mouse drifts a few pixels during a deliberate click on a
+        // 10px dot, and too tight a threshold silently swallows the click.
+        if (Math.abs(e.clientX - startX) > 5) this._dragMoved = true;
         const width = svg.getBoundingClientRect().width;
         if (!width) return;
         const totalMs = dragViewEnd - dragViewStart;
@@ -441,8 +479,7 @@ function portalApp(rawSnapshots) {
         }
         if (!best || bestDist > 14) return;
         e.stopPropagation();
-        const trackRect = this.$refs.timelineTrack.getBoundingClientRect();
-        this.toggleDay(best.key, best.items, rect.left - trackRect.left + best.x);
+        this.activateGroup(best);
       });
     },
 
@@ -502,6 +539,7 @@ function portalApp(rawSnapshots) {
       // a group are axis-relative.
       const BUBBLE_TOP = BUBBLE_Y - AXIS_Y;
       this._axisY = AXIS_Y;
+      this._bubbleY = BUBBLE_Y;
 
       const axis = document.createElementNS(NS, 'line');
       axis.setAttribute('x1', '0');
@@ -557,8 +595,6 @@ function portalApp(rawSnapshots) {
         svg.appendChild(g);
       }
 
-      const trackRect = this.$refs.timelineTrack.getBoundingClientRect();
-      const offsetX = rect.left - trackRect.left;
 
       for (const group of this.groupsInView()) {
         const g = document.createElementNS(NS, 'g');
@@ -567,6 +603,25 @@ function portalApp(rawSnapshots) {
         // Appended up front so getBBox() below can measure the label text
         // (an element must be in the document to have a box).
         svg.appendChild(g);
+
+        // Click target around the dot, kept deliberately narrow and added
+        // first so it sits beneath the visible shapes.
+        //
+        // It must NOT be widened to cover the callout: adjacent days can be
+        // ~27px apart at the default zoom (e.g. a guest with two daily
+        // snapshots), and marker groups are painted in date order, so an
+        // oversized rect on the newer/selected marker lands on top of its
+        // older neighbour and swallows every click on it. The callout's own
+        // bubble/tail/label are filled shapes and stay clickable on their
+        // own, so no extra hit area is needed up there.
+        const hit = document.createElementNS(NS, 'rect');
+        hit.setAttribute('x', '-12');
+        hit.setAttribute('y', '-26');
+        hit.setAttribute('width', '24');
+        hit.setAttribute('height', '36');
+        hit.setAttribute('fill', 'transparent');
+        hit.setAttribute('class', 'timeline-hit-area');
+        g.appendChild(hit);
 
         const isSelected = group.items.some((s) => s.volume === this.selectedVolume);
 
@@ -624,19 +679,6 @@ function portalApp(rawSnapshots) {
           tail.setAttribute('class', 'timeline-bubble timeline-bubble--selected');
           g.insertBefore(tail, text);
 
-          // Invisible click target spanning the full SVG height (from its
-          // very top down to a comfortable margin past the dot), so there is
-          // no vertical boundary near the visible shapes where a real mouse
-          // click can miss. Inserted first so it sits beneath the visible
-          // shapes but still catches clicks in the padding between them.
-          const hit = document.createElementNS(NS, 'rect');
-          hit.setAttribute('x', String(-width / 2 - 10));
-          hit.setAttribute('y', String(-AXIS_Y));
-          hit.setAttribute('width', String(width + 20));
-          hit.setAttribute('height', String(AXIS_Y + 25));
-          hit.setAttribute('fill', 'transparent');
-          hit.setAttribute('class', 'timeline-hit-area');
-          g.insertBefore(hit, g.firstChild);
         } else {
           const bubble = document.createElementNS(NS, 'rect');
           bubble.setAttribute('x', '-9');
@@ -659,15 +701,6 @@ function portalApp(rawSnapshots) {
           count.setAttribute('class', 'timeline-bubble-label timeline-bubble-label--count');
           count.textContent = String(group.items.length);
           g.appendChild(count);
-
-          const hit = document.createElementNS(NS, 'rect');
-          hit.setAttribute('x', '-14');
-          hit.setAttribute('y', '-26');
-          hit.setAttribute('width', '28');
-          hit.setAttribute('height', '36');
-          hit.setAttribute('fill', 'transparent');
-          hit.setAttribute('class', 'timeline-hit-area');
-          g.insertBefore(hit, g.firstChild);
         }
 
         g.addEventListener('click', (e) => {
@@ -677,7 +710,7 @@ function portalApp(rawSnapshots) {
           // opened, in the same bubble phase.
           e.stopPropagation();
           if (this._dragMoved) return;
-          this.toggleDay(group.key, group.items, offsetX + group.x);
+          this.activateGroup(group);
         });
       }
     },
