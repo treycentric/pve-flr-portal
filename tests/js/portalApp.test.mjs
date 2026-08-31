@@ -15,14 +15,18 @@ test('constructor sorts snapshots ascending by date and attaches a Date', () => 
   assert.ok(a.snapshots[0].date instanceof Date);
 });
 
-test('xFor maps viewStart to 0, viewEnd to 1000, midpoint to 500', () => {
+// _w is the measured pixel width of the SVG (renderTimeline sets it from
+// getBoundingClientRect, so one SVG unit is one pixel). Set it explicitly
+// here rather than leaning on the unmeasured default.
+test('xFor maps viewStart to 0, viewEnd to _w, midpoint to half _w', () => {
   const { portalApp } = loadApp();
   const a = portalApp(snaps);
+  a._w = 800;
   a.viewStart = new Date(2026, 0, 1);
   a.viewEnd = new Date(2026, 0, 31);
   assert.equal(a.xFor(new Date(2026, 0, 1)), 0);
-  assert.equal(a.xFor(new Date(2026, 0, 31)), 1000);
-  assert.equal(a.xFor(new Date(2026, 0, 16)), 500);
+  assert.equal(a.xFor(new Date(2026, 0, 31)), 800);
+  assert.equal(a.xFor(new Date(2026, 0, 16)), 400);
 });
 
 test('xFor returns 0 for a non-positive view range', () => {
@@ -51,12 +55,13 @@ test('groupsInView groups by calendar day and excludes out-of-window snapshots',
 test('ticksInView returns 7 evenly spaced points when zoomed past 120 days', () => {
   const { portalApp } = loadApp();
   const a = portalApp(snaps);
+  a._w = 800;
   a.viewStart = new Date(2026, 0, 1);
   a.viewEnd = new Date(2026, 11, 31);
   const ticks = a.ticksInView();
   assert.equal(ticks.length, 7);
   assert.equal(ticks[0].x, 0);
-  assert.equal(ticks[6].x, 1000);
+  assert.equal(ticks[6].x, 800);
 });
 
 test('ticksInView marks month starts inside a day-resolution window', () => {

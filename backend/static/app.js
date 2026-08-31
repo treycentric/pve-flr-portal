@@ -142,7 +142,13 @@ function portalApp(rawSnapshots) {
     activeDayKey: null,
     activeDayItems: [],
     activeDayX: 0,
+    activeDayTop: 0,
     _dragMoved: false,
+    // Live SVG geometry, refreshed by renderTimeline(). One SVG user unit
+    // is one CSS pixel (see renderTimeline), so _w doubles as both the
+    // viewBox width and the element's pixel width.
+    _w: 1000,
+    _axisY: 60,
 
     // --- browse state ---
     volume: null,
@@ -154,6 +160,9 @@ function portalApp(rawSnapshots) {
     init() {
       this.$nextTick(() => {
         this._bindTimelineDrag();
+        // The viewBox is derived from the element's measured pixel width,
+        // so a window resize invalidates the whole drawing.
+        window.addEventListener('resize', () => this.renderTimeline());
         if (this.snapshots.length) {
           const span = 1000 * 60 * 60 * 24 * 75; // ~2.5 months, default zoom level
           const last = this.snapshots[this.snapshots.length - 1].date.getTime();
@@ -167,7 +176,7 @@ function portalApp(rawSnapshots) {
     xFor(date) {
       const total = this.viewEnd - this.viewStart;
       if (total <= 0) return 0;
-      return ((date - this.viewStart) / total) * 1000;
+      return ((date - this.viewStart) / total) * this._w;
     },
 
     groupsInView() {
@@ -200,7 +209,7 @@ function portalApp(rawSnapshots) {
         const total = this.viewEnd - this.viewStart;
         for (let i = 0; i <= count; i++) {
           const d = new Date(this.viewStart.getTime() + (total * i) / count);
-          days.push({ x: (i / count) * 1000, label: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }), isMonth: false });
+          days.push({ x: (i / count) * this._w, label: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }), isMonth: false });
         }
         return days;
       }
@@ -266,6 +275,10 @@ function portalApp(rawSnapshots) {
         this.activeDayKey = key;
         this.activeDayItems = items;
         this.activeDayX = screenX;
+        // The track spans the whole panel now, so the popup can't just sit
+        // at top:0 -- anchor its bottom edge just above the axis (it grows
+        // upward via translateY(-100%)).
+        this.activeDayTop = this._axisY - 8;
       }
     },
 
@@ -351,10 +364,8 @@ function portalApp(rawSnapshots) {
       let dragViewStart = null;
       let dragViewEnd = null;
 
-      const unitsPerPixel = () => {
-        const rect = svg.getBoundingClientRect();
-        return rect.width ? 1000 / rect.width : 0;
-      };
+      // No units-per-pixel conversion any more: the viewBox is sized to the
+      // element's pixel box, so one SVG unit is one pixel.
 
       // IMPORTANT: do NOT call svg.setPointerCapture() here.
       //
@@ -374,9 +385,10 @@ function portalApp(rawSnapshots) {
       const onMove = (e) => {
         if (!dragging) return;
         if (Math.abs(e.clientX - startX) > 3) this._dragMoved = true;
-        const dxUnits = (e.clientX - startX) * unitsPerPixel();
+        const width = svg.getBoundingClientRect().width;
+        if (!width) return;
         const totalMs = dragViewEnd - dragViewStart;
-        const dxMs = (dxUnits / 1000) * totalMs;
+        const dxMs = ((e.clientX - startX) / width) * totalMs;
         this.viewStart = new Date(dragViewStart.getTime() - dxMs);
         this.viewEnd = new Date(dragViewEnd.getTime() - dxMs);
         this.renderTimeline();
@@ -416,8 +428,8 @@ function portalApp(rawSnapshots) {
         if (this._dragMoved) return;
         const rect = svg.getBoundingClientRect();
         if (!rect.width) return;
-        const scaleX = rect.width / 1000;
-        const ux = (e.clientX - rect.left) / scaleX;
+        // 1 unit == 1 px, so client offsets are already SVG coordinates.
+        const ux = e.clientX - rect.left;
         let best = null;
         let bestDist = Infinity;
         for (const group of this.groupsInView()) {
@@ -427,10 +439,10 @@ function portalApp(rawSnapshots) {
             best = group;
           }
         }
-        if (!best || bestDist * scaleX > 14) return;
+        if (!best || bestDist > 14) return;
         e.stopPropagation();
         const trackRect = this.$refs.timelineTrack.getBoundingClientRect();
-        this.toggleDay(best.key, best.items, rect.left - trackRect.left + best.x * scaleX);
+        this.toggleDay(best.key, best.items, rect.left - trackRect.left + best.x);
       });
     },
 
@@ -440,32 +452,74 @@ function portalApp(rawSnapshots) {
       const NS = 'http://www.w3.org/2000/svg';
       while (svg.firstChild) svg.removeChild(svg.firstChild);
 
-      // Shared vertical layout. AXIS_Y leaves enough room above for the tall
-      // selected-snapshot bubble to fit natively near the top of the widget
-      // and below for tick/day/month labels.
-      const TOTAL_HEIGHT = 90;
-      const AXIS_Y = 64;
-      const BUBBLE_TOP = -58;
-      const BUBBLE_HEIGHT = 17;
+      // ONE SVG USER UNIT == ONE CSS PIXEL.
+      //
+      // This viewBox is re-derived from the element's measured pixel box on
+      // every render (and on window resize) instead of being a fixed
+      // 1000-wide box stretched to fit with preserveAspectRatio="none".
+      // That fixed box scaled X by ~1.9 and Y by 1 on a full-width panel,
+      // which is what turned every <circle> into an oval and stretched the
+      // label glyphs horizontally (reading as "vertically squished" text).
+      // With the box matched to the pixel size there is no distortion, and
+      // shape/font sizes below are plain pixel values.
+      const rect = svg.getBoundingClientRect();
+      const W = Math.round(rect.width);
+      const H = Math.round(rect.height);
+      if (!W || !H) return;
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      this._w = W;
+
+      // Soft drop shadow for the snapshot dots. A real feDropShadow rather
+      // than the offset black disc this used to draw underneath each dot --
+      // that only ever looked like a shadow because the old non-uniform
+      // scale smeared it sideways.
+      const defs = document.createElementNS(NS, 'defs');
+      const filter = document.createElementNS(NS, 'filter');
+      filter.setAttribute('id', 'timeline-dot-shadow');
+      // Room for the blur so it isn't clipped by the filter region.
+      filter.setAttribute('x', '-50%');
+      filter.setAttribute('y', '-50%');
+      filter.setAttribute('width', '200%');
+      filter.setAttribute('height', '200%');
+      const drop = document.createElementNS(NS, 'feDropShadow');
+      drop.setAttribute('dx', '0');
+      drop.setAttribute('dy', '1');
+      drop.setAttribute('stdDeviation', '1');
+      drop.setAttribute('flood-color', '#000000');
+      drop.setAttribute('flood-opacity', '0.45');
+      filter.appendChild(drop);
+      defs.appendChild(filter);
+      svg.appendChild(defs);
+
+      // Vertical layout, absolute within the SVG. The track spans the whole
+      // panel (including the toolbar band), so BUBBLE_Y can sit level with
+      // the toolbar buttons -- the toolbar paints over the track, which is
+      // what makes a dragged bubble slide behind the buttons.
+      const AXIS_Y = H - 30; // room below for day + month/year labels
+      const BUBBLE_Y = 12;
+      const BUBBLE_HEIGHT = 22;
+      // Marker groups are translated to the axis, so bubble offsets inside
+      // a group are axis-relative.
+      const BUBBLE_TOP = BUBBLE_Y - AXIS_Y;
+      this._axisY = AXIS_Y;
 
       const axis = document.createElementNS(NS, 'line');
       axis.setAttribute('x1', '0');
-      axis.setAttribute('x2', '1000');
+      axis.setAttribute('x2', String(W));
       axis.setAttribute('y1', String(AXIS_Y));
       axis.setAttribute('y2', String(AXIS_Y));
       axis.setAttribute('class', 'timeline-axis');
       svg.appendChild(axis);
 
-      // Fixed reference line at the horizontal center of the view. Its top
-      // end is pinned to the top of the selected bubble, its bottom end to
-      // the bottom border of the widget. Selecting a snapshot pans the
+      // Fixed reference line at the horizontal center of the view, spanning
+      // the full height of the sunken panel. Selecting a snapshot pans the
       // timeline so its date lands here; it does not track any particular
       // date itself.
       const centerLine = document.createElementNS(NS, 'line');
-      centerLine.setAttribute('x1', '500');
-      centerLine.setAttribute('x2', '500');
-      centerLine.setAttribute('y1', String(TOTAL_HEIGHT));
-      centerLine.setAttribute('y2', String(AXIS_Y + BUBBLE_TOP));
+      centerLine.setAttribute('x1', String(W / 2));
+      centerLine.setAttribute('x2', String(W / 2));
+      centerLine.setAttribute('y1', '0');
+      centerLine.setAttribute('y2', String(H));
       centerLine.setAttribute('class', 'timeline-center-line');
       svg.appendChild(centerLine);
 
@@ -483,11 +537,11 @@ function portalApp(rawSnapshots) {
           text.setAttribute('class', 'timeline-tick-label--month');
           const yearSpan = document.createElementNS(NS, 'tspan');
           yearSpan.setAttribute('x', '0');
-          yearSpan.setAttribute('y', '13');
+          yearSpan.setAttribute('y', '14');
           yearSpan.textContent = String(tick.year);
           const monthSpan = document.createElementNS(NS, 'tspan');
           monthSpan.setAttribute('x', '0');
-          monthSpan.setAttribute('dy', '7');
+          monthSpan.setAttribute('dy', '11');
           monthSpan.textContent = tick.monthAbbr;
           text.appendChild(yearSpan);
           text.appendChild(monthSpan);
@@ -503,27 +557,22 @@ function portalApp(rawSnapshots) {
         svg.appendChild(g);
       }
 
-      const svgRect = svg.getBoundingClientRect();
       const trackRect = this.$refs.timelineTrack.getBoundingClientRect();
-      const offsetX = svgRect.left - trackRect.left;
-      const scaleX = svgRect.width / 1000;
+      const offsetX = rect.left - trackRect.left;
 
       for (const group of this.groupsInView()) {
         const g = document.createElementNS(NS, 'g');
         g.setAttribute('transform', `translate(${group.x},${AXIS_Y})`);
         g.setAttribute('class', 'timeline-group');
+        // Appended up front so getBBox() below can measure the label text
+        // (an element must be in the document to have a box).
+        svg.appendChild(g);
 
         const isSelected = group.items.some((s) => s.volume === this.selectedVolume);
 
-        const shadow = document.createElementNS(NS, 'circle');
-        shadow.setAttribute('cx', '0.5');
-        shadow.setAttribute('cy', '1.3');
-        shadow.setAttribute('r', '5');
-        shadow.setAttribute('class', 'timeline-shadow');
-        g.appendChild(shadow);
-
         const dot = document.createElementNS(NS, 'circle');
         dot.setAttribute('r', '5');
+        dot.setAttribute('filter', 'url(#timeline-dot-shadow)');
         dot.setAttribute('class', 'timeline-dot' + (isSelected ? ' timeline-dot--selected' : ''));
         g.appendChild(dot);
 
@@ -531,9 +580,27 @@ function portalApp(rawSnapshots) {
           const selected = group.items.find((s) => s.volume === this.selectedVolume);
           const countStr = String(group.items.length);
           const tsStr = this._formatTimestamp(selected.time);
-          const width = 16 + (countStr.length + tsStr.length) * 5.2 + 6;
           const bubbleBottom = BUBBLE_TOP + BUBBLE_HEIGHT;
           const tailApex = bubbleBottom + 6;
+
+          const text = document.createElementNS(NS, 'text');
+          text.setAttribute('x', '0');
+          text.setAttribute('y', String(BUBBLE_TOP + 15));
+          text.setAttribute('text-anchor', 'middle');
+          text.setAttribute('class', 'timeline-bubble-label');
+          const countSpan = document.createElementNS(NS, 'tspan');
+          countSpan.textContent = countStr;
+          const tsSpan = document.createElementNS(NS, 'tspan');
+          tsSpan.setAttribute('dx', '8');
+          tsSpan.textContent = tsStr;
+          text.appendChild(countSpan);
+          text.appendChild(tsSpan);
+          g.appendChild(text);
+
+          // Size the pill from the text's real rendered box rather than a
+          // characters-times-magic-number estimate, which drifts with the
+          // font and only ever worked at one particular scale.
+          const width = Math.ceil(text.getBBox().width) + 24;
 
           const connector = document.createElementNS(NS, 'line');
           connector.setAttribute('x1', '0');
@@ -541,7 +608,7 @@ function portalApp(rawSnapshots) {
           connector.setAttribute('y1', String(tailApex));
           connector.setAttribute('y2', '-4');
           connector.setAttribute('class', 'timeline-bubble-connector');
-          g.appendChild(connector);
+          g.insertBefore(connector, text);
 
           const bubble = document.createElementNS(NS, 'rect');
           bubble.setAttribute('x', String(-width / 2));
@@ -550,26 +617,12 @@ function portalApp(rawSnapshots) {
           bubble.setAttribute('height', String(BUBBLE_HEIGHT));
           bubble.setAttribute('rx', '3');
           bubble.setAttribute('class', 'timeline-bubble timeline-bubble--selected');
-          g.appendChild(bubble);
+          g.insertBefore(bubble, text);
 
           const tail = document.createElementNS(NS, 'polygon');
           tail.setAttribute('points', `-5,${bubbleBottom} 5,${bubbleBottom} 0,${tailApex}`);
           tail.setAttribute('class', 'timeline-bubble timeline-bubble--selected');
-          g.appendChild(tail);
-
-          const text = document.createElementNS(NS, 'text');
-          text.setAttribute('x', '0');
-          text.setAttribute('y', String(BUBBLE_TOP + 12));
-          text.setAttribute('text-anchor', 'middle');
-          text.setAttribute('class', 'timeline-bubble-label');
-          const countSpan = document.createElementNS(NS, 'tspan');
-          countSpan.textContent = countStr;
-          const tsSpan = document.createElementNS(NS, 'tspan');
-          tsSpan.setAttribute('dx', '6');
-          tsSpan.textContent = tsStr;
-          text.appendChild(countSpan);
-          text.appendChild(tsSpan);
-          g.appendChild(text);
+          g.insertBefore(tail, text);
 
           // Invisible click target spanning the full SVG height (from its
           // very top down to a comfortable margin past the dot), so there is
@@ -587,9 +640,9 @@ function portalApp(rawSnapshots) {
         } else {
           const bubble = document.createElementNS(NS, 'rect');
           bubble.setAttribute('x', '-9');
-          bubble.setAttribute('y', '-20');
+          bubble.setAttribute('y', '-22');
           bubble.setAttribute('width', '18');
-          bubble.setAttribute('height', '12');
+          bubble.setAttribute('height', '14');
           bubble.setAttribute('rx', '3');
           bubble.setAttribute('class', 'timeline-bubble');
           g.appendChild(bubble);
@@ -603,7 +656,7 @@ function portalApp(rawSnapshots) {
           count.setAttribute('x', '0');
           count.setAttribute('y', '-11.5');
           count.setAttribute('text-anchor', 'middle');
-          count.setAttribute('class', 'timeline-bubble-label');
+          count.setAttribute('class', 'timeline-bubble-label timeline-bubble-label--count');
           count.textContent = String(group.items.length);
           g.appendChild(count);
 
@@ -624,11 +677,8 @@ function portalApp(rawSnapshots) {
           // opened, in the same bubble phase.
           e.stopPropagation();
           if (this._dragMoved) return;
-          const screenX = offsetX + group.x * scaleX;
-          this.toggleDay(group.key, group.items, screenX);
+          this.toggleDay(group.key, group.items, offsetX + group.x);
         });
-
-        svg.appendChild(g);
       }
     },
 

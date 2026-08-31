@@ -878,8 +878,10 @@ select.login-input {
 
 .timeline-panel {
   position: relative;
+  flex: none;
+  height: 116px;
   margin: 1rem 1.5rem 1rem;
-  padding: 0.6rem;
+  padding: 0;
   background: var(--timeline-bg);
   border: 1px solid #c8d2dc;
   border-radius: 3px;
@@ -887,12 +889,19 @@ select.login-input {
   user-select: none;
 }
 
+/* Sits above .timeline-track (which spans the whole panel) so the
+   selected-snapshot callout slides behind the buttons when the timeline is
+   dragged. The bar itself is transparent -- only the buttons occlude, so
+   the ruler stays visible in the gaps between them. */
 .timeline-toolbar {
+  position: relative;
+  z-index: 2;
+  width: max-content;
   display: flex;
   align-items: center;
   gap: 0.3rem;
-  margin-bottom: 0.4rem;
-  padding-right: 78px;
+  padding: 8px;
+  background: transparent;
 }
 
 .icon-btn {
@@ -919,13 +928,16 @@ select.login-input {
   color: var(--link);
 }
 
+/* Ghosted rather than a solid dimmed block: the background goes
+   transparent too, so the ruler behind shows through a disabled button. */
 .icon-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.45;
   cursor: not-allowed;
+  background: transparent;
 }
 
 .icon-btn:disabled:hover {
-  background: var(--panel);
+  background: transparent;
   border-color: var(--border);
   color: var(--text-secondary);
 }
@@ -963,7 +975,7 @@ select.login-input {
 
 .timeline-svg {
   width: 100%;
-  height: 90px;
+  height: 100%;
   display: block;
   cursor: grab;
   touch-action: none;
@@ -986,23 +998,20 @@ select.login-input {
   vector-effect: non-scaling-stroke;
 }
 
+/* Real pixel sizes now that the viewBox matches the element's pixel box.
+   These were 7px only to compensate for the old ~1.9x horizontal stretch. */
 .timeline-tick-label {
-  font-size: 7px;
+  font-size: 10px;
   fill: var(--text-muted);
 }
 
 .timeline-tick-label--month {
-  font-size: 7px;
+  font-size: 10px;
   fill: var(--link);
 }
 
 .timeline-group {
   cursor: pointer;
-}
-
-.timeline-shadow {
-  fill: #000000;
-  opacity: 0.25;
 }
 
 .timeline-dot {
@@ -1035,18 +1044,33 @@ select.login-input {
 }
 
 .timeline-bubble-label {
-  font-size: 10px;
+  font-size: 12px;
   fill: #ffffff;
+}
+
+/* The little "N" badge on unselected days is a much smaller pill. */
+.timeline-bubble-label--count {
+  font-size: 9px;
 }
 
 .timeline-center-line {
   stroke: var(--timeline-current-line);
   stroke-width: 3;
+  opacity: 0.7;
   vector-effect: non-scaling-stroke;
 }
 
+/* Spans the entire panel, including the band occupied by the toolbar, so
+   the SVG's y=0 is the panel's top edge. That is what lets the callout be
+   drawn level with the buttons (and pass behind them) and the centre line
+   run the full height of the sunken box. */
+/* Deliberately no z-index: a positioned element with z-index:auto does not
+   create a stacking context, so the day-picker inside it (z-index 10) can
+   still rise above the toolbar (z-index 2). The toolbar paints over the
+   SVG anyway, because any positive z-index paints after the auto layer. */
 .timeline-track {
-  position: relative;
+  position: absolute;
+  inset: 0;
 }
 
 .timeline-daypicker {

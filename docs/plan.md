@@ -371,6 +371,37 @@ down from the actual CSS pixel viewport (observed here: screenshots
 `getBoundingClientRect()` coordinates by the same ratio before clicking
 with the automation tool, or clicks silently land on the wrong element.
 
+**Confirmed quirk (2026-08-30): a fixed `viewBox` +
+`preserveAspectRatio="none"` silently distorts every shape and glyph.**
+The widget was originally `viewBox="0 0 1000 90"` with
+`preserveAspectRatio="none"` on an element whose real box is ~2000x114,
+so X scaled ~2x while Y scaled 1x. Symptoms looked like several
+unrelated bugs — `<circle>` elements rendered as ovals, label text
+looked "vertically squished", and the axis looked thicker than the
+ticks (only the strokes carrying `vector-effect: non-scaling-stroke`
+escaped the stretch). Tweaking the layout constants can never fix this,
+because the coordinate system itself is anisotropic. Fix: derive the
+viewBox from the element's measured pixel box on every render (and on
+`resize`) so **one SVG user unit is one CSS pixel**; shape and font
+sizes then mean what they say. Anything that hardcoded the old 1000-unit
+width (`xFor`, `ticksInView`, the drag's units-per-pixel conversion, the
+click fallback's `scaleX`) collapses to plain pixel math.
+
+**Layout constraint worth remembering:** the selected-snapshot callout
+can only sit level with the toolbar buttons if `.timeline-track` is
+taken *out of flow* (`position: absolute; inset: 0`) so the SVG spans
+the whole panel. While the toolbar and track were flow siblings the
+SVG began *below* the buttons, so no y value could put the bubble
+beside them and negative y just clipped — which is why repeated
+attempts to "raise the bubble" oscillated between chopped-off and
+detached. With the track spanning the panel, the toolbar (`z-index: 2`)
+paints over it, which is what makes a dragged callout pass behind the
+buttons. `.timeline-track` deliberately has **no** `z-index`: a
+positioned element with `z-index: auto` does not create a stacking
+context, so the day-picker inside it (`z-index: 10`) can still rise
+above the toolbar. Giving the track a `z-index` traps the popup
+underneath the buttons.
+
 ## 6. Data model
 
 **Not implemented. As of PH.4 the app has no database.** This section is

@@ -160,7 +160,7 @@
           class="timeline-daypicker"
           x-show="activeDayKey"
           x-cloak
-          :style="'left:' + activeDayX + 'px'"
+          :style="'left:' + activeDayX + 'px; top:' + activeDayTop + 'px'"
           @click.outside="activeDayKey = null">
           <div class="timeline-daypicker-title" x-text="activeDayKey"></div>
           <ul>
