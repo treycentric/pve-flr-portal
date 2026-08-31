@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import json
 import tarfile
@@ -14,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException
 
-from . import auth, pve_client
+from . import auth, guest_agent, pve_client
 from .auth import SessionData
 from .version import REPO_URL, __version__
 
@@ -276,6 +277,36 @@ async def tree(
         "partials/tree_nodes.html",
         {"nodes": nodes, "volume": volume},
     )
+
+
+@app.get("/api/restore-capabilities")
+async def restore_capabilities(
+    type: str,
+    vmid: str,
+    session: SessionData = Depends(auth.get_session),
+):
+    """PH.5 (docs/plan.md §7.5): what push-to-guest restore this specific
+    user can actually use on this specific guest, right now. A caller
+    lacking even VM.Audit on the guest (so /config itself 403s) degrades
+    to "nothing available" rather than a 500 - restore is opt-in extra
+    access on top of the browse permission every visible guest already
+    implies, not something that should ever crash the button."""
+    if type not in ("qemu", "lxc"):
+        raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
+    try:
+        caps = await guest_agent.get_restore_capabilities(session, type, vmid)
+    except httpx.HTTPStatusError:
+        reason = "could not read this guest's configuration/permissions"
+        unavailable = guest_agent.PathAvailability(False, reason)
+        caps = guest_agent.RestoreCapabilities(
+            agent_running=False,
+            pve_version_ok=False,
+            guest_os_family=None,
+            design_a=unavailable,
+            design_b=unavailable,
+            verify_supported=False,
+        )
+    return JSONResponse(dataclasses.asdict(caps))
 
 
 @app.get("/api/download")

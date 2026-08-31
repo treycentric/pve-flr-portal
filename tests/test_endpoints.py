@@ -126,6 +126,61 @@ def test_tree_lists_only_directories(client, monkeypatch):
     assert "file.txt" not in resp.text
 
 
+def test_restore_capabilities_rejects_unknown_guest_type(client):
+    resp = client.get("/api/restore-capabilities", params={"type": "bogus", "vmid": "133"})
+    assert resp.status_code == 400
+
+
+def test_restore_capabilities_returns_capability_json(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        assert guest_type == "qemu"
+        assert vmid == "133"
+        return guest_agent.RestoreCapabilities(
+            agent_running=True,
+            pve_version_ok=True,
+            guest_os_family="linux",
+            design_a=guest_agent.PathAvailability(True),
+            design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
+            verify_supported=False,
+        )
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.get("/api/restore-capabilities", params={"type": "qemu", "vmid": "133"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["agent_running"] is True
+    assert body["design_a"] == {"available": True, "reason": None}
+    assert body["design_b"]["available"] is False
+    assert "Unrestricted" in body["design_b"]["reason"]
+
+
+def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monkeypatch):
+    from backend import guest_agent
+
+    async def boom(session, guest_type, vmid):
+        raise httpx.HTTPStatusError(
+            "x",
+            request=httpx.Request("GET", "http://x"),
+            response=httpx.Response(403, request=httpx.Request("GET", "http://x")),
+        )
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", boom)
+    resp = client.get("/api/restore-capabilities", params={"type": "qemu", "vmid": "133"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["design_a"]["available"] is False
+    assert body["design_b"]["available"] is False
+    assert body["design_a"]["reason"]
+
+
+def test_restore_capabilities_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-capabilities", params={"type": "qemu", "vmid": "133"}, follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
 def test_download_streams_with_content_disposition(client, monkeypatch):
     class FakeResponse:
         def __init__(self):
