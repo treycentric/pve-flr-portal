@@ -12,10 +12,7 @@ import zipfile
 import httpx
 import pytest
 
-main = pytest.importorskip(
-    "backend.main",
-    reason="backend.main needs FastAPI and Python 3.14 (compression.zstd)",
-)
+main = pytest.importorskip("backend.main", reason="backend.main needs FastAPI")
 from fastapi.testclient import TestClient
 
 from backend import auth, pve_client
@@ -61,6 +58,15 @@ def test_index_respects_task_query(client):
     # vm:133 has two snapshots; the newer one only, sorted first.
     assert "2026-08-30T02:03:57Z" in body
     assert "2026-08-29T02:03:57Z" in body
+
+
+def test_index_renders_version_and_repo_link_in_about_box(client, project_root):
+    from backend.version import REPO_URL
+
+    resp = client.get("/")
+    body = resp.text
+    assert f"v{(project_root / 'VERSION').read_text().strip()}" in body
+    assert REPO_URL in body
 
 
 def test_index_requires_auth():

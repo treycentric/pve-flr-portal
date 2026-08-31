@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException
 
 from . import auth, pve_client
 from .auth import SessionData
+from .version import REPO_URL, __version__
 
 app = FastAPI(title="pve-flr-portal")
 
@@ -184,6 +185,8 @@ async def index(request: Request, task: str | None = None, session: SessionData 
             "guest_label": guest_label,
             "groups_json": json.dumps(groups),
             "current_identity": session.username,
+            "app_version": __version__,
+            "repo_url": REPO_URL,
         },
     )
 

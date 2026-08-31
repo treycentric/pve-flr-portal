@@ -85,6 +85,15 @@ clean Python 3.11 (the deploy target) during development.
 
 Covers lint (`ruff`), Python (`pytest`), the `app.js` frontend logic
 (`node --test`), and CSS (`stylelint`). See [`tests/README.md`](tests/README.md).
+Runs in CI on every push/PR and again as a release gate — see
+[`docs/dev/versioning.md`](docs/dev/versioning.md).
+
+## Versioning & releases
+
+Semantic Versioning + Conventional Commits + Keep a Changelog — see
+[`CHANGELOG.md`](CHANGELOG.md) for what shipped and
+[`docs/dev/versioning.md`](docs/dev/versioning.md) for the full
+convention and how to cut a release with `scripts/release.py`.
 
 ## License
 

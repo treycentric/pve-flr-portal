@@ -1,9 +1,6 @@
 import pytest
 
-main = pytest.importorskip(
-    "backend.main",
-    reason="backend.main needs FastAPI and Python 3.14 (compression.zstd)",
-)
+main = pytest.importorskip("backend.main", reason="backend.main needs FastAPI")
 
 
 @pytest.mark.parametrize(

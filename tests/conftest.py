@@ -14,9 +14,15 @@ os.environ.setdefault("PVE_VERIFY_SSL", "false")
 os.environ.setdefault("SESSION_IDLE_TIMEOUT_MINUTES", "30")
 
 import time
+from pathlib import Path
 
 import pytest
 from starlette.requests import Request
+
+
+@pytest.fixture
+def project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
 
 
 def make_request(cookies: dict[str, str] | None = None, headers: dict[str, str] | None = None) -> Request:

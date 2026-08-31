@@ -40,6 +40,17 @@ npm run test:css
   that supplies the `window` / `document` / `htmx` globals.
 - `pytest` must run from the repo root — `backend.main` mounts
   `backend/static` and `backend/templates` by relative path.
-- `backend.main` needs Python 3.14 (`compression.zstd`); on older
-  interpreters the route/helper tests `skip` themselves and the rest still
-  run.
+- `.tar.zst` bundle downloads use the `zstandard` PyPI package (not
+  stdlib `compression.zstd`, which is Python 3.14+ only) specifically so
+  the app runs on the deploy target's Python 3.11 — see
+  `docs/plan.md` §10. Nothing here needs to skip itself by interpreter
+  version.
+
+## New functionality needs tests
+
+Every suite above runs in CI on every push/PR (`.github/workflows/ci.yml`)
+and is a required gate before a tagged release can publish
+(`.github/workflows/release.yml`) — see docs/dev/versioning.md. New
+backend logic gets a `pytest` test, new `app.js` component logic gets a
+`node --test` test; a PR that only adds code without exercising it
+through one of these suites isn't done.

@@ -1,0 +1,47 @@
+name: Release
+
+# Triggers on pushing a version tag (created by `python scripts/release.py
+# bump ...`, see docs/dev/versioning.md). Tests are a hard gate - the
+# release job only runs if `test` succeeds, so a broken tag never
+# publishes.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install npm dependencies (CSS suite)
+        run: npm install
+
+      - name: Run the full test suite
+        run: ./run-tests.sh
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create the GitHub release from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release.py release --tag "${{ github.ref_name }}"

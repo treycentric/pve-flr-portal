@@ -345,9 +345,24 @@ body {
 }
 
 .about-title {
-  margin: 0 0 16px;
+  margin: 0 0 4px;
   font-size: 1.1rem;
   color: var(--text);
+}
+
+.about-version {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.about-repo {
+  margin: 0 0 16px;
+  font-size: 12px;
+}
+
+.about-repo a {
+  color: var(--link);
 }
 
 .about-credit {
