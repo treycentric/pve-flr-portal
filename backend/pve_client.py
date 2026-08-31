@@ -75,6 +75,22 @@ async def list_path(session: SessionData, volume: str, filepath: str = "/") -> l
         return resp.json()["data"]
 
 
+async def write_guest_file(session: SessionData, guest_type: str, vmid: str, path: str, content: str) -> None:
+    """One `agent/file-write` call (PH.5, docs/plan.md §7.5) - a genuine
+    one-shot: no handle/offset, truncates and overwrites whatever was at
+    `path`. `content` must already be the wire-ready string
+    (`restore_chunking.py`'s Latin-1 mapping of raw bytes, confirmed live
+    against a real guest to round-trip losslessly - NOT base64, which
+    this endpoint does not decode)."""
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client:
+        resp = await client.post(
+            f"{_API_ROOT}/nodes/localhost/{guest_type}/{vmid}/agent/file-write",
+            data={"file": path, "content": content},
+            headers=pve_headers(session),
+        )
+        resp.raise_for_status()
+
+
 async def open_download(
     session: SessionData, volume: str, filepath: str, tar: bool = False
 ) -> tuple[httpx.AsyncClient, httpx.Response]:

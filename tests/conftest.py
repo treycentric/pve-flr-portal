@@ -60,6 +60,19 @@ def clear_sessions():
     auth._sessions.clear()
 
 
+@pytest.fixture(autouse=True)
+def clear_restore_jobs():
+    """Keep the process-wide restore job registry from leaking between
+    tests that exercise it via the FastAPI app (endpoint tests) -
+    tests that construct their own RestoreJobManager() directly aren't
+    affected either way."""
+    from backend import restore_jobs
+
+    restore_jobs.manager.clear()
+    yield
+    restore_jobs.manager.clear()
+
+
 @pytest.fixture
 def api_base():
     from backend.config import settings

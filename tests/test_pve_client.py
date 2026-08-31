@@ -67,6 +67,25 @@ async def test_list_path_raises_on_http_error(session_data):
 
 
 @respx.mock
+async def test_write_guest_file_posts_file_and_content(session_data):
+    route = respx.post(f"{API}/nodes/localhost/qemu/133/agent/file-write").mock(
+        return_value=httpx.Response(200, json={"data": None})
+    )
+    await pve_client.write_guest_file(session_data, "qemu", "133", "C:\\Windows\\Temp\\x.txt", "hello")
+    req = route.calls.last.request
+    assert req.headers["Cookie"] == f"PVEAuthCookie={session_data.ticket}"
+    body = req.content.decode()
+    assert "file=C%3A%5CWindows%5CTemp%5Cx.txt" in body or "hello" in body
+
+
+@respx.mock
+async def test_write_guest_file_raises_on_http_error(session_data):
+    respx.post(f"{API}/nodes/localhost/qemu/133/agent/file-write").mock(return_value=httpx.Response(500, text="boom"))
+    with pytest.raises(httpx.HTTPStatusError):
+        await pve_client.write_guest_file(session_data, "qemu", "133", "/etc/x", "hello")
+
+
+@respx.mock
 async def test_open_download_streams_and_sets_tar_param(session_data):
     route = respx.get(f"{BASE}/download").mock(
         return_value=httpx.Response(200, content=b"file-bytes", headers={"content-type": "application/x-tar"})

@@ -20,6 +20,8 @@ def _make(manager, session_data, **overrides):
         guest_label="web (133)",
         task_name="Restore 2026-08-30 14:48 -> /etc",
         snapshot_time="2026-08-30T14:48:06Z",
+        source_volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        source_filepath="L2V0Yy9ob3N0cw==",
         source="/etc/hosts",
         destination="/etc",
     )

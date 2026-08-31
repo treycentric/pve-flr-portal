@@ -54,6 +54,8 @@ class RestoreJob:
     guest_label: str
     task_name: str
     snapshot_time: str  # "restore ver." - the backup snapshot this restores from
+    source_volume: str  # backup volid, for re-fetching the content to restore
+    source_filepath: str  # opaque file-restore filepath token (docs/plan.md §3)
     source: str  # display path within the backup
     destination: str  # dest_dir (+ filename for a single file)
     # Independent opt-ins, not a "quick vs full" choice - the content
@@ -110,6 +112,8 @@ class RestoreJobManager:
         guest_label: str,
         task_name: str,
         snapshot_time: str,
+        source_volume: str,
+        source_filepath: str,
         source: str,
         destination: str,
         restore_metadata: bool = False,
@@ -128,6 +132,8 @@ class RestoreJobManager:
             guest_label=guest_label,
             task_name=task_name,
             snapshot_time=snapshot_time,
+            source_volume=source_volume,
+            source_filepath=source_filepath,
             source=source,
             destination=destination,
             restore_metadata=restore_metadata,
@@ -181,3 +187,10 @@ class RestoreJobManager:
         """Test/dev helper - mirrors auth._sessions.clear()'s role in tests."""
         self._jobs.clear()
         self._tasks.clear()
+
+
+# Process-wide instance backend.main uses. Tests construct their own
+# RestoreJobManager() instances instead of touching this one directly,
+# same convention as auth._sessions (a fixture clears it between tests
+# that do use it via the FastAPI app, see conftest.py).
+manager = RestoreJobManager()

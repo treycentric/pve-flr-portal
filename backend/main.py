@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException
 
-from . import auth, guest_agent, pve_client
+from . import auth, guest_agent, pve_client, restore_jobs, restore_runner
 from .auth import SessionData
 from .version import REPO_URL, __version__
 
@@ -307,6 +307,56 @@ async def restore_capabilities(
             verify_supported=False,
         )
     return JSONResponse(dataclasses.asdict(caps))
+
+
+@app.post("/api/restore")
+async def restore(
+    volume: str = Form(...),
+    filepath: str = Form(...),
+    name: str = Form(...),
+    guest_type: str = Form(...),
+    vmid: str = Form(...),
+    guest_label: str = Form(...),
+    snapshot_time: str = Form(...),
+    dest_dir: str = Form(...),
+    overwrite: bool = Form(False),
+    session: SessionData = Depends(auth.get_session),
+):
+    """PH.5 content-only restore (docs/plan.md §7.5): submits a background
+    job and returns immediately - the actual agent/file-write call runs
+    out-of-band (restore_runner.run_content_only_restore), independent of
+    this request's lifetime. Only single-chunk files are handled so far;
+    the job itself fails clearly (not this endpoint) if the file turns
+    out to be too large once its content is in hand."""
+    if guest_type not in ("qemu", "lxc"):
+        raise HTTPException(status_code=400, detail=f"Unknown guest type: {guest_type}")
+    if not overwrite:
+        raise HTTPException(status_code=400, detail="Restore must be explicitly confirmed to overwrite the destination")
+
+    # Re-checked server-side regardless of what the UI already showed -
+    # the capability response is a UI convenience, never trusted for the
+    # actual write (docs/plan.md §7.5).
+    caps = await guest_agent.get_restore_capabilities(session, guest_type, vmid)
+    if not caps.design_a.available:
+        raise HTTPException(status_code=403, detail=caps.design_a.reason or "Restore is not available for this guest")
+
+    sep = "\\" if caps.guest_os_family == "windows" else "/"
+    destination = dest_dir.rstrip("\\/") + sep + name
+
+    job = restore_jobs.manager.create(
+        session=session,
+        guest_type=guest_type,
+        vmid=vmid,
+        guest_label=guest_label,
+        task_name=f"Restore {name} → {destination}",
+        snapshot_time=snapshot_time,
+        source_volume=volume,
+        source_filepath=filepath,
+        source=name,
+        destination=destination,
+    )
+    restore_jobs.manager.submit(job, lambda j: restore_runner.run_content_only_restore(j, restore_jobs.manager))
+    return JSONResponse(job.to_dict())
 
 
 @app.get("/api/download")

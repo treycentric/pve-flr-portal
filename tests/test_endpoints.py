@@ -175,6 +175,105 @@ def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monke
     assert body["design_a"]["reason"]
 
 
+def _available_caps(**overrides):
+    from backend import guest_agent
+
+    defaults = dict(
+        agent_running=True,
+        pve_version_ok=True,
+        guest_os_family="windows",
+        design_a=guest_agent.PathAvailability(True),
+        design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
+        verify_supported=False,
+    )
+    defaults.update(overrides)
+    return guest_agent.RestoreCapabilities(**defaults)
+
+
+def _restore_form(**overrides):
+    defaults = dict(
+        volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        filepath="L2V0Yy9ob3N0cw==",
+        name="hosts",
+        guest_type="qemu",
+        vmid="133",
+        guest_label="web (133)",
+        snapshot_time="2026-08-30T14:48:06Z",
+        dest_dir="C:\\Windows\\Temp",
+        overwrite="true",
+    )
+    defaults.update(overrides)
+    return defaults
+
+
+def test_restore_submits_a_queued_job(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        # submit() launches this as a real asyncio task in the running
+        # TestClient event loop - keep it inert so the test only asserts
+        # on the synchronous "job was queued" response, not job completion.
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_content_only_restore", never_runs)
+
+    resp = client.post("/api/restore", data=_restore_form())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert body["destination"] == "C:\\Windows\\Temp\\hosts"
+    assert restore_jobs.manager.get(body["id"]) is not None
+
+
+def test_restore_rejects_unknown_guest_type(client):
+    resp = client.post("/api/restore", data=_restore_form(guest_type="bogus"))
+    assert resp.status_code == 400
+
+
+def test_restore_requires_explicit_overwrite_confirmation(client):
+    resp = client.post("/api/restore", data=_restore_form(overwrite="false"))
+    assert resp.status_code == 400
+
+
+def test_restore_blocked_when_capability_unavailable(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_a=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.post("/api/restore", data=_restore_form())
+    assert resp.status_code == 403
+    assert "FileWrite" in resp.json()["detail"]
+
+
+def test_restore_uses_posix_separator_for_non_windows_guest(client, monkeypatch):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_content_only_restore", never_runs)
+
+    resp = client.post("/api/restore", data=_restore_form(dest_dir="/etc", name="hosts"))
+    assert resp.status_code == 200
+    assert resp.json()["destination"] == "/etc/hosts"
+
+
+def test_restore_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.post("/api/restore", data=_restore_form(), follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
 def test_restore_capabilities_requires_auth():
     with TestClient(main.app) as c:
         resp = c.get("/api/restore-capabilities", params={"type": "qemu", "vmid": "133"}, follow_redirects=False)
