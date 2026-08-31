@@ -3,7 +3,10 @@
 # the opinionated plugins that would flag idiomatic FastAPI (Depends() in
 # defaults) or deliberate broad excepts.
 line-length = 120
-target-version = "py314"
+# py311, not the dev machine's 3.14: Debian 12 (bookworm), the deploy
+# target in deploy/, ships Python 3.11 by default. Keeps pyupgrade (UP)
+# from suggesting syntax that would break the LXC/Docker install.
+target-version = "py311"
 
 [lint]
 select = ["E", "F", "I", "W", "UP", "RUF"]

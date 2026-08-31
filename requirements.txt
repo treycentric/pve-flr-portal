@@ -5,3 +5,4 @@ jinja2           # server-rendered templates for the htmx frontend
 python-multipart # form/file handling for upload/download endpoints, and the login form
 python-dotenv    # loads .env for PVE host + TLS/session config
 cryptography     # generates the self-signed TLS cert on first run (docs/plan.md §7.3)
+zstandard        # .tar.zst bundle downloads - works on any Python 3.8+, unlike stdlib compression.zstd (3.14+ only)

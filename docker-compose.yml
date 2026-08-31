@@ -1,0 +1,11 @@
+# Local dev/testing convenience (see README). Not the recommended
+# production path for a real PVE host - see deploy/ for the LXC install.
+services:
+  pve-flr-portal:
+    build: .
+    ports:
+      - "8008:8008"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./certs:/app/certs
+    restart: unless-stopped

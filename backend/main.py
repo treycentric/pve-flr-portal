@@ -2,12 +2,12 @@ import io
 import json
 import tarfile
 import zipfile
-from compression import zstd
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 import httpx
+import zstandard
 from fastapi import Depends, FastAPI, Form, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,12 +57,13 @@ async def unauthorized_handler(request: Request, exc: HTTPException):
 
 @app.get("/login")
 async def login_page(request: Request):
+    # Broad except deliberate: the login page must always render even if
+    # PVE itself is unreachable (connection error, DNS failure, etc, not
+    # just a non-2xx response) - it just falls back to an empty realm
+    # dropdown rather than a 500.
     try:
         realms = await auth.list_realms()
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print("DEBUG list_realms failed:", type(e).__name__, e)
+    except Exception:
         realms = []
     return templates.TemplateResponse(request, "login.html", {"error": None, "realms": realms})
 
@@ -77,7 +78,7 @@ async def login_submit(
     except HTTPException:
         try:
             realms = await auth.list_realms()
-        except httpx.HTTPStatusError:
+        except Exception:
             realms = []
         return templates.TemplateResponse(
             request,
@@ -345,11 +346,11 @@ async def download_bundle(
             for arcname, content in entries:
                 bundle.writestr(arcname, content)
     else:
-        # compression.zstd is Python 3.14+ stdlib - no extra dependency
-        # needed for .tar.zst (docs/plan.md); .tar.gz uses tarfile's
-        # built-in gzip support the same way.
+        # .tar.gz uses tarfile's built-in gzip support; .tar.zst uses the
+        # zstandard package (not stdlib compression.zstd, which is
+        # 3.14+ only and won't exist on a normal deployment's Python).
         tar_mode = "w:gz" if format == "targz" else "w|"
-        outer = zstd.open(buffer, mode="wb") if format == "tarzst" else buffer
+        outer = zstandard.ZstdCompressor().stream_writer(buffer, closefd=False) if format == "tarzst" else buffer
         try:
             with tarfile.open(fileobj=outer, mode=tar_mode) as bundle:
                 for arcname, content in entries:

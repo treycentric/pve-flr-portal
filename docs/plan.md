@@ -815,7 +815,48 @@ recorded here so the ceiling is known before anyone leans on it.
 the live snapshot-list call (one PVE request, no helper VM), the
 timeline at realistic homelab retention.
 
-## 10. Next step
+## 10. Deployment
+
+Decided 2026-08-30, after the user asked for packaging/deployment
+options given the hard PVE dependency. Considered:
+
+- **Debian package installed directly on the PVE host.** Ruled out —
+  installing arbitrary third-party packages on a PVE host risks
+  colliding with Proxmox's own apt sources/dependencies, which the
+  Proxmox community consistently advises against. Not worth the risk
+  for a companion app that doesn't need to run *on* the hypervisor.
+- **VM / OVA.** Correct but heaviest option for what is a single tiny
+  stateless Python process (no DB) — full guest-OS overhead, a slower
+  build/update pipeline (rebuild an image vs. `git pull && restart`),
+  and "runs on any hypervisor" isn't a real benefit here since the
+  target audience is, by definition, already running Proxmox.
+- **LXC container (chosen, primary path).** PVE-native, minimal
+  overhead, matches how the Proxmox homelab community already ships
+  companion tools (the common `pct create` + install-script pattern,
+  e.g. community-scripts/tteck-style helpers). Fully isolated from the
+  PVE host's own OS/package management. See `deploy/lxc-create.sh`
+  (creates an unprivileged Debian 12 container, installs the app,
+  starts it via systemd) and `deploy/install.sh` (the in-container
+  half, also usable standalone against an already-created container).
+- **Docker image (chosen, secondary path).** Covers people running
+  Docker elsewhere entirely (Synology, TrueNAS, unraid, a separate
+  Docker host) rather than wanting another PVE guest, and doubles as
+  the fastest local dev/test loop. See `Dockerfile` /
+  `docker-compose.yml` at the repo root.
+
+**Deployment target is Python 3.11** (Debian 12 bookworm's default),
+not the dev machine's 3.14 — this mattered concretely once: the
+`.tar.zst` bundle-download format was originally implemented against
+Python 3.14's brand-new stdlib `compression.zstd` (PEP 784), which
+doesn't exist on 3.11. Switched to the `zstandard` PyPI package instead
+(`requirements.txt`) once the deployment target was decided, and
+verified the whole test suite plus a real `.tar.zst` round-trip against
+an actual Python 3.11 interpreter (not just 3.14) before considering it
+done. `ruff.toml`'s `target-version` was correspondingly changed from
+`py314` to `py311` so lint doesn't suggest syntax the deploy target
+can't run.
+
+## 11. Next step
 
 **Phase 0 is closed as of 2026-08-29** — see §3. Auth is a single
 scoped PVE API token; both `file-restore/list` and `file-restore/download`

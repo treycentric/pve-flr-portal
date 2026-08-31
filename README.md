@@ -47,6 +47,32 @@ Log in with your own PVE username/password (e.g. `admin@pam`). See
 docs/plan.md §7.1 for how to grant a user the `FileRestoreReader` role
 needed to browse/restore.
 
+## Deployment
+
+**LXC on your PVE host (recommended).** Run on the PVE host itself:
+
+```
+bash deploy/lxc-create.sh
+```
+
+Creates an unprivileged Debian 12 container, installs the app, and
+starts it as a systemd service (`pve-flr-portal`). Override
+`CTID`/`STORAGE`/`BRIDGE`/`MEMORY_MB`/etc. via environment variables -
+see the top of the script. Already have a container? Run
+`deploy/install.sh` inside it instead. Rationale for LXC over a Debian
+package on the host or a full VM/OVA is in docs/plan.md §10.
+
+**Docker, mainly for local dev/testing:**
+
+```
+docker compose up --build
+```
+
+Reads `.env` from the repo root and persists the generated cert under
+`./certs`. This is how the download-format (.zip/.tar.gz/.tar.zst) and
+login flows got exercised on both Python 3.14 (dev machine) and a
+clean Python 3.11 (the deploy target) during development.
+
 ## Tests
 
 ```

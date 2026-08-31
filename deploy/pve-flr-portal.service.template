@@ -1,0 +1,21 @@
+[Unit]
+Description=Proxmox File Level Restore Portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/.venv/bin/python run.py
+Restart=on-failure
+RestartSec=5
+# Self-signed cert + venv live under the app dir; nothing else needed.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=__APP_DIR__
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
