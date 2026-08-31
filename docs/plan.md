@@ -493,16 +493,48 @@ question from the first draft of this section:**
   it (though the exact per-call payload ceiling below still does).
   Sources: [forum: Proxmox API /agent/file-write](https://forum.proxmox.com/threads/proxmox-api-agent-file-write.67447/),
   [forum: how to create/edit a file with qm guest agent](https://forum.proxmox.com/threads/how-to-create-or-edit-file-with-qm-guest-agent.89759/).
-- Two *different* size figures show up in community reports and likely
-  describe two different layers, still to be told apart empirically
-  against the real environment: a ~40–60 KiB practical ceiling per
-  `agent/file-write` call (probably `pveproxy`'s own HTTP POST body
-  cap, since the base64 content rides in the request body) versus a
-  48 MB figure mentioned around `qemu-guest-agent` file operations
-  generally (probably QGA's own internal limit for a single QMP
-  message, not a per-portal-call number). Until measured directly,
-  treat the smaller, more specific figure as the operative per-call
-  ceiling.
+- **Live-verified 2026-09-01** against a real guest (PVE 9.2.11, QGA
+  110.0.2, Windows 10, vmid 202) — resolves both remaining open items
+  from the first draft outright, and overturns one assumption:
+  - **The per-call ceiling is exactly 61440 characters**, confirmed via
+    the server's own validation error ("value may only be 61440
+    characters long") at the boundary (60 KiB succeeds, 70 KiB fails).
+    Settles the "~40–60 KiB vs. 48 MB" ambiguity in the earlier draft
+    of this section — 48 MB evidently describes something else (a
+    different QGA file operation, not this one).
+  - **`content` is a raw literal string, not base64** — neither
+    direction is decoded/encoded by the server on this version,
+    regardless of the `encode` param (tried both `0` and `1`, no
+    observable effect). This **overturns the archived §7.4/§3 doc's
+    "content is base64-encoded" assumption** — that most likely
+    described `pvesh`'s own convenience encoding for shell safety
+    (quoted in its `--content` examples), not the raw HTTP API. Proven
+    directly: an 11-character non-base64-shaped string ("FIRST-WRITE")
+    round-tripped through file-write → file-read unchanged.
+  - **Arbitrary binary survives losslessly anyway** — mapped the full
+    0–255 byte range through a Latin-1-decoded Python `str` (each byte
+    ↔ one Unicode codepoint, no loss) before sending as `content`, and
+    it read back byte-for-byte identical. No base64 needed at all,
+    which means the 61440-character ceiling is **61440 raw bytes**
+    per chunk, not reduced by base64's ~33% overhead as originally
+    assumed — `backend/restore_chunking.py` uses this ceiling and this
+    encoding directly (`DEFAULT_CHUNK_SIZE_BYTES = 61440`).
+  - `guest-exec`/`guest-exec-status` confirmed working end-to-end on
+    this guest (ran `cmd /c echo ...`, read back `out-data`/`exited`/
+    `exitcode` via `exec-status`) — matches the assumed shape used
+    elsewhere in this design.
+  - `qemu-guest-agent` was initially *not running* on the test guest
+    despite `agent: 1` being set in its VM config — `agent/info` and
+    `agent/get-osinfo` both failed with "QEMU guest agent is not
+    running" until the in-guest service was started. Confirms the
+    capability-detection design's degrade-to-unavailable behavior on
+    any `agent/info` failure (`backend/guest_agent.py`) is the correct
+    default, not just a defensive nicety.
+  - Caveat carried forward: this was checked against one PVE/QGA
+    version. Re-verify the `content`-is-raw finding specifically if a
+    deployment ever targets a meaningfully older PVE/QGA — the
+    archived doc's base64 assumption came from somewhere, so an older
+    version behaving that way isn't impossible.
 - The five `VM.GuestAgent.*` privileges, straight from the Proxmox
   access-control patch that introduced them: `Audit` ("issue
   informational QEMU guest agent commands"), `FileRead` ("read files
@@ -706,16 +738,16 @@ entry points at. Two reasons this matters, both raised in review:
   a Close button — matching the reference screenshot's layout.
 
 **Sequencing:**
-1. Empirical verification against a real guest: the per-call payload
-   ceiling (40–60 KiB vs. 48 MB question above), `encode: 0` support,
-   and per-guest `agent: 1`/exec/OS-family facts — the append/truncate
-   question itself is already settled by research, no live test needed
-   for that part.
-2. `backend/guest_agent.py` + `/api/restore-capabilities` alone,
-   testable in isolation from fake `agent/info`/config/permissions
-   responses.
-3. `backend/restore_jobs.py` — job manager lifecycle (submit, list,
-   cancel, elapsed time), testable without any real QGA calls.
+1. ~~Empirical verification against a real guest~~ — **done 2026-09-01**,
+   see above.
+2. ~~`backend/guest_agent.py` + `/api/restore-capabilities`~~ — **done**
+   (capability logic + the live endpoint, both tested — capability
+   logic in isolation from fake `agent/info`/config/permissions
+   responses, the endpoint via `TestClient` with the module
+   monkeypatched).
+3. ~~`backend/restore_jobs.py`~~ — **done**, job manager lifecycle
+   (submit, list, cancel, elapsed time), tested without any real QGA
+   calls.
 4. Content-only restore end-to-end (`/api/restore`, single-call path
    only) running through the job manager, + UI (no metadata/verify
    checkboxes or running-jobs icon yet).
