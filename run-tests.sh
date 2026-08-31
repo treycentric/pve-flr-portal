@@ -71,7 +71,10 @@ if [ "$want_js" -eq 1 ]; then
   echo; echo "=== JavaScript (node --test) ==="
   if command -v node >/dev/null 2>&1; then
     # zero npm deps - the tests use only node:test / node:assert
-    if node --test "tests/js/*.test.mjs"; then result[JS]=PASS; else result[JS]="FAIL"; overall=1; fi
+    # Unquoted so the shell expands the glob into explicit file args -
+    # Node's own --test glob support is version-dependent (confirmed:
+    # works on Node 24, silently finds nothing on Node 20/Ubuntu CI).
+    if node --test tests/js/*.test.mjs; then result[JS]=PASS; else result[JS]="FAIL"; overall=1; fi
   else
     echo "Node.js not found - skipping."; result[JS]="SKIPPED (no node)"
   fi

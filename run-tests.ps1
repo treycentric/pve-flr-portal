@@ -98,8 +98,12 @@ if ($Js) {
     Write-Host "Node.js not found on PATH - skipping." -ForegroundColor Yellow
     $results['JS'] = 'SKIPPED (no node)'
   } else {
-    # zero npm deps - the tests use only node:test / node:assert
-    & node --test "tests/js/*.test.mjs"
+    # zero npm deps - the tests use only node:test / node:assert.
+    # Resolve the glob ourselves rather than pass the pattern string to
+    # node - its own --test glob support is version-dependent (confirmed:
+    # works on Node 24, silently finds nothing on Node 20/Ubuntu CI).
+    $jsFiles = (Get-ChildItem -Path "tests/js" -Filter "*.test.mjs").FullName
+    & node --test @jsFiles
     $results['JS'] = if ($LASTEXITCODE -eq 0) { 'PASS' } else { "FAIL ($LASTEXITCODE)" }
   }
 }
