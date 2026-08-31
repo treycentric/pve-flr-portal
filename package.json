@@ -8,7 +8,7 @@
     "test:css": "stylelint \"backend/static/**/*.css\""
   },
   "devDependencies": {
-    "stylelint": "^16.10.0"
+    "stylelint": "^17.14.1"
   },
   "engines": {
     "node": ">=20"
