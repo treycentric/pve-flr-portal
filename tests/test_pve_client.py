@@ -8,6 +8,16 @@ BASE = pve_client._BASE
 API = pve_client._API_ROOT
 
 
+def test_api_node_type_maps_app_internal_names():
+    assert pve_client.api_node_type("vm") == "qemu"
+    assert pve_client.api_node_type("ct") == "lxc"
+
+
+def test_api_node_type_rejects_unknown():
+    with pytest.raises(ValueError, match="Unknown guest type"):
+        pve_client.api_node_type("qemu")  # already-translated value isn't valid input
+
+
 @respx.mock
 async def test_list_guest_names_drops_entries_without_name(session_data):
     respx.get(f"{API}/cluster/resources").mock(
@@ -71,7 +81,7 @@ async def test_write_guest_file_posts_file_and_content(session_data):
     route = respx.post(f"{API}/nodes/localhost/qemu/133/agent/file-write").mock(
         return_value=httpx.Response(200, json={"data": None})
     )
-    await pve_client.write_guest_file(session_data, "qemu", "133", "C:\\Windows\\Temp\\x.txt", "hello")
+    await pve_client.write_guest_file(session_data, "vm", "133", "C:\\Windows\\Temp\\x.txt", "hello")
     req = route.calls.last.request
     assert req.headers["Cookie"] == f"PVEAuthCookie={session_data.ticket}"
     body = req.content.decode()
@@ -82,7 +92,7 @@ async def test_write_guest_file_posts_file_and_content(session_data):
 async def test_write_guest_file_raises_on_http_error(session_data):
     respx.post(f"{API}/nodes/localhost/qemu/133/agent/file-write").mock(return_value=httpx.Response(500, text="boom"))
     with pytest.raises(httpx.HTTPStatusError):
-        await pve_client.write_guest_file(session_data, "qemu", "133", "/etc/x", "hello")
+        await pve_client.write_guest_file(session_data, "vm", "133", "/etc/x", "hello")
 
 
 @respx.mock

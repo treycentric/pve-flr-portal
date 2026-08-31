@@ -20,6 +20,21 @@ from .config import settings
 _BASE = f"https://{settings.pve_host}:8006/api2/json/nodes/localhost/storage/{settings.pve_storage}/file-restore"
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 
+# App-internal guest type ("vm"/"ct", the second volid path segment - see
+# the docstring above) vs. PVE's actual API node-path segment ("qemu"/
+# "lxc", confirmed live against a real guest - docs/plan.md §7.5). PH.5's
+# guest-agent calls hit /nodes/localhost/{qemu|lxc}/{vmid}/... directly,
+# so every such call needs this translated first - everywhere else in the
+# app (grouping, the task picker, display) stays in "vm"/"ct" throughout.
+API_NODE_TYPE = {"vm": "qemu", "ct": "lxc"}
+
+
+def api_node_type(guest_type: str) -> str:
+    try:
+        return API_NODE_TYPE[guest_type]
+    except KeyError:
+        raise ValueError(f"Unknown guest type: {guest_type}") from None
+
 
 async def list_guest_names(session: SessionData) -> dict[str, str]:
     """Best-effort vmid -> guest name map from /cluster/resources. This
@@ -81,10 +96,11 @@ async def write_guest_file(session: SessionData, guest_type: str, vmid: str, pat
     `path`. `content` must already be the wire-ready string
     (`restore_chunking.py`'s Latin-1 mapping of raw bytes, confirmed live
     against a real guest to round-trip losslessly - NOT base64, which
-    this endpoint does not decode)."""
+    this endpoint does not decode). `guest_type` is the app-internal
+    "vm"/"ct" value - translated to PVE's "qemu"/"lxc" node segment here."""
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client:
         resp = await client.post(
-            f"{_API_ROOT}/nodes/localhost/{guest_type}/{vmid}/agent/file-write",
+            f"{_API_ROOT}/nodes/localhost/{api_node_type(guest_type)}/{vmid}/agent/file-write",
             data={"file": path, "content": content},
             headers=pve_headers(session),
         )

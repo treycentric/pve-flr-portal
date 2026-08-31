@@ -147,7 +147,7 @@ async def test_get_restore_capabilities_degrades_cleanly_when_agent_info_403s(se
     respx.get(f"{API}/nodes/localhost/qemu/133/agent/info").mock(return_value=httpx.Response(403, text="no Audit"))
     respx.get(f"{API}/nodes/localhost/qemu/133/agent/get-osinfo").mock(return_value=httpx.Response(403))
 
-    caps = await get_restore_capabilities(session_data, "qemu", "133")
+    caps = await get_restore_capabilities(session_data, "vm", "133")
     # agent/info failed -> agent_running is False (can't confirm QGA is
     # actually responding), so nothing is offered - but no exception raised.
     assert not caps.agent_running
@@ -182,7 +182,7 @@ async def test_get_restore_capabilities_happy_path(session_data):
         return_value=httpx.Response(200, json={"data": {"result": {"id": "debian", "kernel-name": "linux"}}})
     )
 
-    caps = await get_restore_capabilities(session_data, "qemu", "133")
+    caps = await get_restore_capabilities(session_data, "vm", "133")
     assert caps.agent_running
     assert caps.pve_version_ok
     assert caps.design_a.available
@@ -198,6 +198,6 @@ async def test_get_restore_capabilities_lxc_skips_agent_calls(session_data):
     respx.get(f"{API}/access/permissions").mock(return_value=httpx.Response(200, json={"data": {}}))
     respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
 
-    caps = await get_restore_capabilities(session_data, "lxc", "133")
+    caps = await get_restore_capabilities(session_data, "ct", "133")
     assert not caps.agent_running
     assert not caps.design_a.available

@@ -291,8 +291,11 @@ async def restore_capabilities(
     lacking even VM.Audit on the guest (so /config itself 403s) degrades
     to "nothing available" rather than a 500 - restore is opt-in extra
     access on top of the browse permission every visible guest already
-    implies, not something that should ever crash the button."""
-    if type not in ("qemu", "lxc"):
+    implies, not something that should ever crash the button. `type` is
+    the app-internal "vm"/"ct" value (matching the task picker/groups
+    elsewhere) - guest_agent.py translates it to PVE's "qemu"/"lxc" API
+    node segment."""
+    if type not in ("vm", "ct"):
         raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
     try:
         caps = await guest_agent.get_restore_capabilities(session, type, vmid)
@@ -328,8 +331,9 @@ async def restore(
     out-of-band (restore_runner.run_content_only_restore), independent of
     this request's lifetime. Only single-chunk files are handled so far;
     the job itself fails clearly (not this endpoint) if the file turns
-    out to be too large once its content is in hand."""
-    if guest_type not in ("qemu", "lxc"):
+    out to be too large once its content is in hand. `guest_type` is the
+    app-internal "vm"/"ct" value - see restore_capabilities() above."""
+    if guest_type not in ("vm", "ct"):
         raise HTTPException(status_code=400, detail=f"Unknown guest type: {guest_type}")
     if not overwrite:
         raise HTTPException(status_code=400, detail="Restore must be explicitly confirmed to overwrite the destination")

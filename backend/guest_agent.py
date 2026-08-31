@@ -29,6 +29,7 @@ import httpx
 
 from .auth import SessionData, pve_headers
 from .config import settings
+from .pve_client import api_node_type
 
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 
@@ -142,11 +143,14 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
     parse_capabilities(). agent/info and get-osinfo failures (guest agent
     not running, or the caller lacking VM.GuestAgent.Audit) are treated as
     "no info available" rather than propagated - a missing grant should
-    degrade to "unavailable", not a 500."""
+    degrade to "unavailable", not a 500. `guest_type` is the app-internal
+    "vm"/"ct" value (matching the rest of the app - task picker, groups,
+    etc.), translated to PVE's "qemu"/"lxc" API node segment here."""
+    node_type = api_node_type(guest_type)
     headers = pve_headers(session)
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         config_resp = await client.get(
-            f"{_API_ROOT}/nodes/localhost/{guest_type}/{vmid}/config", headers=headers
+            f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/config", headers=headers
         )
         config_resp.raise_for_status()
         vm_config = config_resp.json()["data"]
@@ -169,7 +173,7 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
 
         agent_info = None
         osinfo = None
-        if guest_type == "qemu":
+        if node_type == "qemu":
             try:
                 info_resp = await client.get(
                     f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/info", headers=headers

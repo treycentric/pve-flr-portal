@@ -18,7 +18,7 @@ def manager():
 def _make_job(manager, session_data, **overrides):
     defaults = dict(
         session=session_data,
-        guest_type="qemu",
+        guest_type="vm",
         vmid="133",
         guest_label="web (133)",
         task_name="Restore hosts -> C:\\Windows\\Temp\\hosts",

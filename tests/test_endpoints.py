@@ -135,7 +135,7 @@ def test_restore_capabilities_returns_capability_json(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        assert guest_type == "qemu"
+        assert guest_type == "vm"
         assert vmid == "133"
         return guest_agent.RestoreCapabilities(
             agent_running=True,
@@ -147,7 +147,7 @@ def test_restore_capabilities_returns_capability_json(client, monkeypatch):
         )
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
-    resp = client.get("/api/restore-capabilities", params={"type": "qemu", "vmid": "133"})
+    resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["agent_running"] is True
@@ -167,7 +167,7 @@ def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monke
         )
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", boom)
-    resp = client.get("/api/restore-capabilities", params={"type": "qemu", "vmid": "133"})
+    resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["design_a"]["available"] is False
@@ -195,7 +195,7 @@ def _restore_form(**overrides):
         volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
         filepath="L2V0Yy9ob3N0cw==",
         name="hosts",
-        guest_type="qemu",
+        guest_type="vm",
         vmid="133",
         guest_label="web (133)",
         snapshot_time="2026-08-30T14:48:06Z",
@@ -276,7 +276,7 @@ def test_restore_requires_auth():
 
 def test_restore_capabilities_requires_auth():
     with TestClient(main.app) as c:
-        resp = c.get("/api/restore-capabilities", params={"type": "qemu", "vmid": "133"}, follow_redirects=False)
+        resp = c.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"}, follow_redirects=False)
     assert resp.status_code in (302, 401)
 
 

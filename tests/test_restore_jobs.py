@@ -15,7 +15,7 @@ def manager():
 def _make(manager, session_data, **overrides):
     defaults = dict(
         session=session_data,
-        guest_type="qemu",
+        guest_type="vm",
         vmid="133",
         guest_label="web (133)",
         task_name="Restore 2026-08-30 14:48 -> /etc",
