@@ -136,6 +136,18 @@ body {
 }
 
 .modal-box--resizable {
+  /* Taken out of .modal-overlay's flex-centering flow deliberately -
+     mixing flexbox auto-centering with CSS `resize` on the same element
+     fights itself as the box grows (the flex container keeps
+     re-centering against the changing size while the box is also being
+     manually resized), and could push the box outside the viewport.
+     position:fixed + top/left:50% + a translate(-50%,-50%) base offset
+     replicates the centering without flex involved, so resize behaves
+     like resizing any ordinary positioned block. The drag offset (see
+     app.js's startDrag) is a second translate() stacked after it. */
+  position: fixed;
+  top: 50%;
+  left: 50%;
   resize: both;
   min-width: 480px;
   min-height: 320px;
