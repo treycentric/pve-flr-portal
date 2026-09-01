@@ -296,19 +296,30 @@ function portalApp(rawSnapshots) {
     // fit: majors are always kept, then minors are taken left-to-right and
     // any whose estimated box would touch one already kept is unlabeled.
     // The tick mark itself always stays -- only its text goes.
+    //
+    // Two gaps, because a minor next to a major reads fine much tighter
+    // than two minors next to each other. Without the looser major gap the
+    // last labelled day of a month (28/29/30) -- one day before the next
+    // month's wide two-line major -- gets dropped, which is what "Feb had
+    // no 28" was.
     _thinLabels(ticks) {
-      const PAD = 4; // minimum clear gap between two label boxes, px
-      const CHAR_W = 6; // ~10px Open Sans advance per digit/letter
+      const GAP_MINOR = 4; // clear px required between two minor labels
+      const GAP_MAJOR = 0; // minor-vs-major: touching is ok, overlap is not
+      const CHAR_W = 5; // ~10px Open Sans advance per digit/letter
       const halfWidth = (t) => (Math.max(...t.lines.map((l) => l.length)) * CHAR_W) / 2;
       const kept = [];
       for (const t of ticks) {
-        if (t.major && t.lines.length) kept.push({ x: t.x, half: halfWidth(t) });
+        if (t.major && t.lines.length) kept.push({ x: t.x, half: halfWidth(t), major: true });
       }
       for (const t of ticks) {
         if (t.major || !t.lines.length) continue;
         const half = halfWidth(t);
-        if (kept.some((k) => Math.abs(k.x - t.x) < k.half + half + PAD)) t.lines = [];
-        else kept.push({ x: t.x, half });
+        const collides = kept.some((k) => {
+          const gap = k.major ? GAP_MAJOR : GAP_MINOR;
+          return Math.abs(k.x - t.x) < k.half + half + gap;
+        });
+        if (collides) t.lines = [];
+        else kept.push({ x: t.x, half, major: false });
       }
       return ticks;
     },

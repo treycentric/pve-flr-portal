@@ -189,6 +189,40 @@ test('_thinLabels drops minor labels that collide with each other, keeping a spr
   }
 });
 
+test('level 3 keeps the last even-day label of a month at a realistic panel width', () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps);
+  a.zoomLevel = 3;
+  a._w = 1100; // ~18px per day over the 60-day span
+
+  const dayLabel = (start, end, y, m, d) => {
+    a.viewStart = start;
+    a.viewEnd = end;
+    const target = new Date(y, m, d).getTime();
+    return a.ticksInView().find((t) => Math.abs(a.xFor(new Date(y, m, d)) - t.x) < 0.5 && t.lines.length);
+  };
+
+  // Feb 2026 is not a leap year: the 28th is the last even day, one tick
+  // before the March major.
+  assert.ok(dayLabel(new Date(2026, 0, 15), new Date(2026, 2, 15), 2026, 1, 28), 'Feb 28 label missing');
+  // Sep 2026 has 30 days.
+  assert.ok(dayLabel(new Date(2026, 8, 1), new Date(2026, 9, 31), 2026, 8, 30), 'Sep 30 label missing');
+});
+
+test('level 3 walks real calendar days, so each month gets exactly its own day count of ticks', () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps);
+  a.zoomLevel = 3;
+  a._w = 1000;
+  // Whole of Feb 2024 (leap) and Feb 2026 (common).
+  a.viewStart = new Date(2024, 1, 1);
+  a.viewEnd = new Date(2024, 1, 29, 23, 59);
+  assert.equal(a.ticksInView().length, 29); // 1..29
+  a.viewStart = new Date(2026, 1, 1);
+  a.viewEnd = new Date(2026, 1, 28, 23, 59);
+  assert.equal(a.ticksInView().length, 28); // 1..28
+});
+
 test('ticksInView thins colliding labels at a realistic level-3 width', () => {
   const { portalApp } = loadApp();
   const a = portalApp(snaps);
@@ -199,7 +233,7 @@ test('ticksInView thins colliding labels at a realistic level-3 width', () => {
   const labeled = a.ticksInView().filter((t) => t.lines.length);
   for (let i = 1; i < labeled.length; i++) {
     assert.ok(
-      labeled[i].x - labeled[i - 1].x >= 10,
+      labeled[i].x - labeled[i - 1].x >= 10 - 1e-6,
       `labels at ${labeled[i - 1].x} and ${labeled[i].x} are too close`,
     );
   }

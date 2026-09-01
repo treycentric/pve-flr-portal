@@ -280,7 +280,14 @@ every-other-one labels ~36px apart — the spacing the issue's labelling
 scheme assumes. Because the panel is fluid that isn't guaranteed, so
 `_thinLabels()` is a backstop: it keeps every major label, then takes
 minor labels left-to-right and blanks any whose estimated text box would
-touch one already kept. Only the *text* is dropped, never the tick mark. Snapshots are
+touch one already kept. Only the *text* is dropped, never the tick mark.
+It uses a looser gap for a minor next to a major than for two adjacent
+minors — without that the last labelled day of a month (the 28th/30th,
+one tick before the next month's wide two-line major) got dropped. The
+day ticks themselves are a real calendar walk (`_ticksDay`
+`cursor.setDate(+1)`), so every month already carries exactly its own
+day count of ticks, leap Februaries included — the thinner only ever
+removes *labels*, never changes the tick spacing. Snapshots are
 grouped per level by `_bucketStart()` — the tick a snapshot's instant
 collapses onto — so zooming out merges snapshots whose buckets coincide
 into one pale-blue numbered callout and zooming in spreads them back
