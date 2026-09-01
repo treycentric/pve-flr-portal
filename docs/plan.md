@@ -480,6 +480,15 @@ QGA facts — live-filesystem hazard, etc.); this section is the living
 design on top of it and supersedes §7.4's Design A/B split with a
 revised one below (2026-08-31 research + user design review).
 
+**Naming note:** §7.4's original "Design B" (`file-write` bootstrap +
+`guest-exec` `curl`/`Invoke-WebRequest` pull over the guest's own NIC)
+was never built and is *not* the same thing as "Design B" below, despite
+sharing the label — the revised split below reused the name for a
+different mechanism (chunked writes + local concat, no guest-initiated
+network call). The original pull-based idea lives on as a separate,
+not-yet-built follow-on — see issue #22, which renames it "Design C" to
+stop the collision.
+
 **Confirmed from official sources (2026-08-31), resolving the open
 question from the first draft of this section:**
 - `agent/file-write` is a genuine one-shot wrapper — the only
@@ -1005,6 +1014,138 @@ functionality needs a test in the same change" rule — the real QGA
 calls aren't mockable end-to-end without a live guest, so tests target
 the pure logic the same way `pve_client`/`auth` are unit-tested today.
 Commits cite #5.
+
+### 7.6 Design C — network-pull restore (issue #22, not yet built)
+
+A third restore mechanism, on top of Design A/B above: instead of moving
+every byte over the QMP/virtio-serial control channel, have the guest
+fetch the file itself over its own network, at normal network
+throughput. Exists to fix Design B's real bottleneck — `agent/file-write`
+chunks capped at ~40 KiB, one sequential round-trip each, which is fine
+for a small file and genuinely slow for a large one.
+
+**Naming history, so this doesn't cause the same confusion twice:** this
+is what `docs/archive/plan-phases-0-4.md` §7.4 originally called "Design
+B" — a `file-write` bootstrap + `guest-exec` pull. §7.5's "Revised Design
+A / B split" reused the same labels for a different mechanism (the one
+that shipped). To stop the two ideas colliding under one name, the
+pull-based mechanism is "Design C" everywhere from here on.
+
+**Mechanism:**
+1. Backend writes a small bootstrap script into the guest via the
+   existing `agent/file-write` path (same mechanism Design A already
+   uses) — a one-liner `curl`/`Invoke-WebRequest` against a per-job,
+   single-use, short-lived, signed download URL this app serves.
+2. `guest-exec` runs the script. The guest fetches the file directly
+   from the portal over its own NIC — not through PVE, not through QMP.
+3. A follow-up `guest-exec` (same pattern Design B already uses) fixes
+   ownership/mode/mtime as requested.
+
+**Auth for the new download endpoint.** The guest must never see the
+operator's PVE ticket. Instead the backend mints a random, single-use
+token scoped to exactly one restore job's one file, short TTL (e.g. 2
+minutes), stored server-side alongside the job. The bootstrap script
+embeds only that token in its URL; the endpoint consumes it on first use
+(or TTL expiry) and 404s afterward — never a standing, reusable, or
+broadly-scoped credential.
+
+**Requires:** `VM.GuestAgent.Unrestricted` (same as Design B — no new
+privilege tier, but Design C adds "the guest can reach this app" as a
+new dependency on top of it, a meaningfully larger blast radius than
+Design A's `FileWrite`-only path); guest→portal IP reachability (see
+network segmentation below); a fetch tool already present in the guest
+(`curl` on modern Linux, `Invoke-WebRequest`/`curl.exe` on Windows
+10+/Server 2019+ — needs a capability check, same spirit as `agent/info`
+detection, not an assumption for older guests); `guest-exec` unblocked
+(same RHEL-family caveat as Design B).
+
+**Network segmentation.** Design C is the first (and so far only)
+feature where the guest genuinely needs a network path to this app —
+everything else is QMP-mediated with no such requirement. Given a
+homelab with several *mutually non-routable* subnets, "add one NIC" isn't
+enough — the design is **one data-plane NIC per non-routable subnet**:
+
+- The existing interface keeps serving the UI (user-facing) and the
+  outbound PVE API calls (management-plane) — unchanged.
+- **N additional data-plane interfaces**, one per subnet that isn't
+  routable to the others, each serving *only* the token-gated download
+  endpoint — no UI, no other route reachable from any of them.
+  Firewalled so inbound traffic on each can reach only that one path,
+  and only while a Design C job holds a live token.
+- A compromised guest on any one subnet can therefore hit, at most, one
+  narrow, auth-gated, self-expiring endpoint on the NIC facing *its own*
+  subnet — never the UI, never PVE-management, never a NIC facing an
+  unrelated subnet. The PVE-management NIC stays unreachable from any VM
+  subnet in either direction.
+
+**Per-job data-NIC selection.** With several mutually unreachable
+subnets, the bootstrap script's download URL only works if it points at
+the one data-NIC IP actually reachable from that guest's subnet.
+Proposed approach: query the guest's own reported IP(s) via QGA
+(`agent/network-get-interfaces` — already a QMP-wrapped call, no new PVE
+API surface), and match against the container's own data-NIC subnets
+(computed at startup from local interface config) to find the one
+data-NIC IP sharing a subnet with the guest. Same capability-detection
+spirit as `restoreCaps` today: if no configured data NIC's subnet
+matches any of the guest's reported addresses, Design C simply isn't
+offered for that job — falls back to Design B, no guessing. An explicit
+admin-configured subnet→local-IP override table is worth keeping as a
+fallback for guests with unreliable network reporting or ambiguous
+matches, but QGA auto-match should be the default so it doesn't need
+per-guest admin upkeep as subnets change.
+
+**Deploy-level implementation** (host/deploy config, not app logic,
+beyond the selection step above and the one new route):
+- **LXC:** one additional `netN` interface per non-routable subnet
+  (`pct set <id> -netN name=ethN,bridge=<vlan-bridge>,ip=...`); bind
+  `run.py`'s HTTPS listener to specific interface IPs rather than
+  `0.0.0.0` (UI+PVE-API bind stays as-is; the Design C download route
+  binds separately, across the data-NIC IPs only).
+- **Docker:** `docker network connect` one additional Docker network per
+  subnet; same per-interface bind-address restriction.
+- Host/hypervisor firewall rules restricting what's reachable on each
+  interface — defense in depth, not a substitute for the per-job token
+  above.
+
+**Provisioning documentation is a required deliverable, not follow-up
+polish.** This is real deploy-time work an admin has to get right before
+Design C is usable — user-facing setup documentation, the same audience
+as README.md's existing "Provisioning access" section (not
+`docs/dev/`, which is contributor/process docs). Ship either as a new
+README.md section or a linked `docs/network-provisioning.md`, in the
+same change as the feature, covering: adding the bridge/VLAN
+interface(s) to the LXC config and Docker Compose file, one per
+non-routable subnet; the subnet→IP mapping/override and how to confirm
+QGA auto-match picked correctly; concrete firewall rule examples
+(Proxmox's own firewall, and iptables/nftables as a generic Docker-path
+fallback) restricting each data NIC to inbound-only-to-the-download-
+route; and a worked example with 2–3 subnets, matching the actual
+homelab shape this is built for.
+
+**Simpler alternative worth documenting alongside this, not competing
+with it: guests with a full desktop, when they can reach the management
+plane.** For a guest with a full graphical desktop, logging into the
+portal from *inside the guest itself* and using the already-shipped
+browse+download feature needs none of the above — no `Unrestricted`
+grant, no guest-exec, no bootstrap script, no data NIC. Not a new
+mechanism; browse/download already works today. The caveat that makes
+this conditional rather than a blanket recommendation: a subnet can
+legitimately have a route to a Design C data NIC without any route to
+the management NIC at all — that's the point of keeping them separate —
+so the portal has no reliable way to know whether a given guest can
+actually reach the management UI. User-facing docs and any in-app
+callout should state this as conditional ("if this guest's subnet
+routes to the portal's management interface, this is the simplest,
+lowest-privilege option — check with whoever set up the network
+segmentation if unsure"), not assume it always applies.
+
+**Scope.** Opt-in, separate from Design A/B — same authorization posture
+as today's `VM.GuestAgent.Unrestricted` gate (§7.4's authorization
+model: never folded into `FileRestoreReader`, restore stays a
+deliberate, separate grant). Open-ended effort; worth pursuing once
+Design A/B prove too slow for real large-file restores in practice.
+Tracked as issue #22, filed as a follow-on to #5, not part of PH.5
+itself.
 
 ## 8. Stack — and why
 
