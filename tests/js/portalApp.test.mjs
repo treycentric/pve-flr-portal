@@ -117,7 +117,7 @@ test('stepZoom moves between the five levels, clamps at the ends, and resizes th
 
   a.stepZoom(-1);
   assert.equal(a.zoomLevel, 2);
-  assert.equal(a.viewEnd - a.viewStart, 4 * 24 * 60 * 60 * 1000);
+  assert.equal(a.viewEnd - a.viewStart, 60 * 60 * 60 * 1000); // 60 hourly minors
   assert.equal((a.viewStart.getTime() + a.viewEnd.getTime()) / 2, mid);
 
   a.stepZoom(-1);
@@ -155,6 +155,54 @@ test('the selected callout number is the position within its own tick group, not
   // The first member of the same cluster still reads "1".
   a.selectedVolume = 'b';
   assert.equal(a._calloutPosition(cluster), 1);
+});
+
+test('_thinLabels keeps every major label and drops minor labels that would collide', () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps);
+  // Two majors 10px apart with a minor squeezed between them: both majors
+  // survive, the minor loses its text but keeps its tick.
+  const ticks = [
+    { x: 0, major: true, lines: ['2026', 'Feb'] },
+    { x: 5, major: false, lines: ['2'] },
+    { x: 200, major: false, lines: ['20'] },
+    { x: 210, major: true, lines: ['2026', 'Mar'] },
+  ];
+  const out = a._thinLabels(ticks);
+  assert.deepEqual(out[0].lines, ['2026', 'Feb']);
+  assert.deepEqual(out[1].lines, []); // collides with the Feb major
+  assert.deepEqual(out[2].lines, []); // collides with the Mar major
+  assert.deepEqual(out[3].lines, ['2026', 'Mar']);
+  assert.equal(out.length, 4); // ticks themselves are never dropped
+});
+
+test('_thinLabels drops minor labels that collide with each other, keeping a spread subset', () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps);
+  const ticks = [0, 8, 16, 24, 32].map((x) => ({ x, major: false, lines: ['28'] }));
+  const kept = a._thinLabels(ticks).filter((t) => t.lines.length);
+  // '28' is ~12px wide, so consecutive 8px-apart labels cannot all fit.
+  assert.ok(kept.length < 5);
+  assert.ok(kept.length >= 2);
+  for (let i = 1; i < kept.length; i++) {
+    assert.ok(kept[i].x - kept[i - 1].x >= 16);
+  }
+});
+
+test('ticksInView thins colliding labels at a realistic level-3 width', () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps);
+  a.zoomLevel = 3;
+  a._w = 600; // narrow panel: 60 days over 600px is 10px/day
+  a.viewStart = new Date(2026, 0, 1);
+  a.viewEnd = new Date(2026, 2, 2);
+  const labeled = a.ticksInView().filter((t) => t.lines.length);
+  for (let i = 1; i < labeled.length; i++) {
+    assert.ok(
+      labeled[i].x - labeled[i - 1].x >= 10,
+      `labels at ${labeled[i - 1].x} and ${labeled[i].x} are too close`,
+    );
+  }
 });
 
 test('toggleDay anchors the picker over the callout it was opened from, and toggles shut', () => {

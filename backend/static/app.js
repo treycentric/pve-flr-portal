@@ -134,13 +134,20 @@ function fileGridState() {
 // every level. Spans are approximate (real months/years vary in length)
 // and picked so a readable number of major ticks fills a ~1000px panel.
 // Level 1 is farthest in (minutes), level 5 farthest out (years).
-const TIMELINE_DAY_MS = 24 * 60 * 60 * 1000;
+//
+// Every level shows ~60 minor ticks, so at a typical panel width they land
+// ~18px apart and the every-other-one labels ~36px apart -- enough that a
+// 10px font's 2-4 character labels clear each other. _thinLabels() is the
+// backstop for narrower panels.
+const TIMELINE_MINUTE_MS = 60 * 1000;
+const TIMELINE_HOUR_MS = 60 * TIMELINE_MINUTE_MS;
+const TIMELINE_DAY_MS = 24 * TIMELINE_HOUR_MS;
 const ZOOM_LEVELS = {
-  1: { span: 2 * 60 * 60 * 1000 }, // ~2 hours   -- minute ticks, 10-min majors
-  2: { span: 4 * TIMELINE_DAY_MS }, // ~4 days    -- hourly minors, daily majors
-  3: { span: 75 * TIMELINE_DAY_MS }, // ~2.5 months -- daily minors, monthly majors
-  4: { span: 365 * TIMELINE_DAY_MS }, // ~1 year   -- month/5 minors, monthly majors
-  5: { span: 6 * 365 * TIMELINE_DAY_MS }, // ~6 years -- monthly minors, Jan majors
+  1: { span: 60 * TIMELINE_MINUTE_MS }, // 1 hour    -- 60 minute minors
+  2: { span: 60 * TIMELINE_HOUR_MS }, // 2.5 days  -- 60 hour minors
+  3: { span: 60 * TIMELINE_DAY_MS }, // 60 days   -- 60 day minors
+  4: { span: 365 * TIMELINE_DAY_MS }, // ~1 year   -- 60 month-fifth minors
+  5: { span: 5 * 365 * TIMELINE_DAY_MS }, // ~5 years  -- 60 month minors
 };
 const DEFAULT_ZOOM_LEVEL = 3;
 
@@ -271,16 +278,39 @@ function portalApp(rawSnapshots) {
     ticksInView() {
       switch (this.zoomLevel) {
         case 1:
-          return this._ticksMinute();
+          return this._thinLabels(this._ticksMinute());
         case 2:
-          return this._ticksHour();
+          return this._thinLabels(this._ticksHour());
         case 4:
-          return this._ticksMonthFifth();
+          return this._thinLabels(this._ticksMonthFifth());
         case 5:
-          return this._ticksMonth();
+          return this._thinLabels(this._ticksMonth());
         default:
-          return this._ticksDay();
+          return this._thinLabels(this._ticksDay());
       }
+    },
+
+    // Tick labels are plain SVG text with no collision handling of their
+    // own, so on a narrow panel (or right beside a wide two-line major)
+    // neighbouring labels run into each other. Drop the ones that don't
+    // fit: majors are always kept, then minors are taken left-to-right and
+    // any whose estimated box would touch one already kept is unlabeled.
+    // The tick mark itself always stays -- only its text goes.
+    _thinLabels(ticks) {
+      const PAD = 4; // minimum clear gap between two label boxes, px
+      const CHAR_W = 6; // ~10px Open Sans advance per digit/letter
+      const halfWidth = (t) => (Math.max(...t.lines.map((l) => l.length)) * CHAR_W) / 2;
+      const kept = [];
+      for (const t of ticks) {
+        if (t.major && t.lines.length) kept.push({ x: t.x, half: halfWidth(t) });
+      }
+      for (const t of ticks) {
+        if (t.major || !t.lines.length) continue;
+        const half = halfWidth(t);
+        if (kept.some((k) => Math.abs(k.x - t.x) < k.half + half + PAD)) t.lines = [];
+        else kept.push({ x: t.x, half });
+      }
+      return ticks;
     },
 
     // Level 1: every tick a minute, majors every 10 min (HH:MM), even
@@ -852,11 +882,13 @@ function portalApp(rawSnapshots) {
           // lone snapshot still shows its "1"; several collapsed onto one
           // tick show the count. Clicking a count > 1 opens the list picker
           // (activateGroup); it never auto-selects (issue #18).
+          // Grows upward from the tail at y=-8 so the tail stays attached
+          // to the dot; the hit area (-26..10) still covers the taller pill.
           const bubble = document.createElementNS(NS, 'rect');
           bubble.setAttribute('x', '-9');
-          bubble.setAttribute('y', '-22');
+          bubble.setAttribute('y', '-25');
           bubble.setAttribute('width', '18');
-          bubble.setAttribute('height', '14');
+          bubble.setAttribute('height', '17');
           bubble.setAttribute('rx', '3');
           bubble.setAttribute('class', 'timeline-bubble');
           g.appendChild(bubble);
@@ -868,7 +900,7 @@ function portalApp(rawSnapshots) {
 
           const count = document.createElementNS(NS, 'text');
           count.setAttribute('x', '0');
-          count.setAttribute('y', '-11.5');
+          count.setAttribute('y', '-13');
           count.setAttribute('text-anchor', 'middle');
           count.setAttribute('class', 'timeline-bubble-label timeline-bubble-label--count');
           count.textContent = String(group.items.length);

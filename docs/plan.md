@@ -273,7 +273,14 @@ farthest in, level 5 farthest out, default is level 3, and the `+`/`-`
 buttons step between them and clamp at the ends. Each level fixes only
 the view *span* and the tick/label scheme (`ticksInView()` dispatches to
 `_ticksMinute`/`_ticksHour`/`_ticksDay`/`_ticksMonthFifth`/`_ticksMonth`);
-panning stays continuous and unbounded at every level. Snapshots are
+panning stays continuous and unbounded at every level. Every level's span
+is sized to show **~60 minor ticks** (1h / 2.5d / 60d / 1y / 5y), which
+at a typical panel width puts minor ticks ~18px apart and the
+every-other-one labels ~36px apart — the spacing the issue's labelling
+scheme assumes. Because the panel is fluid that isn't guaranteed, so
+`_thinLabels()` is a backstop: it keeps every major label, then takes
+minor labels left-to-right and blanks any whose estimated text box would
+touch one already kept. Only the *text* is dropped, never the tick mark. Snapshots are
 grouped per level by `_bucketStart()` — the tick a snapshot's instant
 collapses onto — so zooming out merges snapshots whose buckets coincide
 into one pale-blue numbered callout and zooming in spreads them back
