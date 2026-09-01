@@ -12,6 +12,9 @@ list response already hands back ready-to-use base64 filepath tokens
 for each entry, so callers should treat filepath as an opaque token
 from the API rather than re-deriving it from a display path.
 """
+import asyncio
+import re
+
 import httpx
 
 from .auth import SessionData, pve_headers
@@ -20,6 +23,24 @@ from .guest_agent_lock import call_with_retries, guest_agent_command
 
 _BASE = f"https://{settings.pve_host}:8006/api2/json/nodes/localhost/storage/{settings.pve_storage}/file-restore"
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
+
+# Conservative denylist, not a full shell-safety abstraction - acceptable
+# for a single-admin homelab tool where a path reaching this check is
+# either empty, a value guest_browse.py itself returned on a prior
+# browse call, or a user-typed destination directory that this same
+# check gates before it ever reaches a shell-interpreted guest-exec
+# command (concatenation, metadata restore) - never arbitrary external
+# input (docs/plan.md §7.5).
+_UNSAFE_PATH_CHARS = re.compile(r"[\"'`;&|$<>\r\n]")
+
+
+class UnsafePathError(ValueError):
+    pass
+
+
+def check_path_safe(path: str) -> None:
+    if _UNSAFE_PATH_CHARS.search(path):
+        raise UnsafePathError(f"Path contains unsupported characters: {path!r}")
 
 # App-internal guest type ("vm"/"ct", the second volid path segment - see
 # the docstring above) vs. PVE's actual API node-path segment ("qemu"/
@@ -120,6 +141,65 @@ async def write_guest_file(session: SessionData, guest_type: str, vmid: str, pat
         httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client,
     ):
         await call_with_retries(do_write)
+
+
+class GuestExecTimeout(RuntimeError):
+    pass
+
+
+async def run_guest_exec(session: SessionData, guest_type: str, vmid: str, argv: list[str]) -> tuple[int, str, str]:
+    """Runs one guest-exec command to completion (polling exec-status) and
+    returns (exitcode, stdout, stderr). `guest_type` is the app-internal
+    "vm"/"ct" value, translated here like every other guest-agent call.
+
+    The whole exec-then-poll sequence runs under guest_agent_lock's
+    per-vmid lock (see that module) - the exec-status polls are
+    themselves guest-agent commands sharing the same single-command-at-
+    a-time virtio-serial channel, so nothing else from *this app* may
+    interleave for the full duration, not just the initial POST.
+
+    The initial POST starts a new in-guest command, so - like every
+    other "start something new" call in this app - it only retries via
+    call_with_retries on a definite HTTP error response (something else
+    was legitimately using the channel), never on an ambiguous timeout.
+    Polling exec-status is different: it only ever asks about a pid that
+    already exists, so re-querying it is safe regardless of *why* the
+    previous poll failed - a transient error there just means "try again
+    next tick" rather than "not done yet", reusing the same overall
+    budget rather than aborting the whole command over one bad poll."""
+    node_type = api_node_type(guest_type)
+    headers = pve_headers(session)
+
+    async def start():
+        resp = await client.post(
+            f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/exec",
+            data={"command": argv},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.json()["data"]["pid"]
+
+    async with (
+        guest_agent_command(vmid),
+        httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=20.0) as client,
+    ):
+        pid = await call_with_retries(start)
+
+        for _ in range(30):  # ~15s of polling - listing/writing/hashing are all fast commands
+            try:
+                status_resp = await client.get(
+                    f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/exec-status",
+                    params={"pid": pid},
+                    headers=headers,
+                )
+                status_resp.raise_for_status()
+                data = status_resp.json()["data"]
+                if data.get("exited"):
+                    return data.get("exitcode", -1), data.get("out-data", ""), data.get("err-data", "")
+            except httpx.HTTPError:
+                pass  # transient - try again next tick, see docstring
+            await asyncio.sleep(0.5)
+        raise GuestExecTimeout("Guest command timed out")
 
 
 async def open_download(

@@ -18,6 +18,46 @@ def test_api_node_type_rejects_unknown():
         pve_client.api_node_type("qemu")  # already-translated value isn't valid input
 
 
+def test_check_path_safe_rejects_shell_metacharacters():
+    for bad in ['"', "'", "`", ";", "&", "|", "$", "<", ">", "\n", "\r"]:
+        with pytest.raises(pve_client.UnsafePathError):
+            pve_client.check_path_safe(f"/tmp/evil{bad}here")
+
+
+def test_check_path_safe_allows_ordinary_paths():
+    pve_client.check_path_safe("/etc/nginx")
+    pve_client.check_path_safe("C:\\Users\\bob\\Documents")
+
+
+@respx.mock
+async def test_run_guest_exec_returns_exit_out_err(session_data):
+    respx.post(f"{API}/nodes/localhost/qemu/133/agent/exec").mock(
+        return_value=httpx.Response(200, json={"data": {"pid": 1}})
+    )
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/exec-status").mock(
+        return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "hi", "err-data": ""}})
+    )
+    exitcode, out, err = await pve_client.run_guest_exec(session_data, "vm", "133", ["echo", "hi"])
+    assert (exitcode, out, err) == (0, "hi", "")
+
+
+@respx.mock
+async def test_run_guest_exec_times_out(session_data, monkeypatch):
+    monkeypatch.setattr(pve_client.asyncio, "sleep", lambda *_a, **_kw: _noop())
+    respx.post(f"{API}/nodes/localhost/qemu/133/agent/exec").mock(
+        return_value=httpx.Response(200, json={"data": {"pid": 1}})
+    )
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/exec-status").mock(
+        return_value=httpx.Response(200, json={"data": {"exited": 0}})
+    )
+    with pytest.raises(pve_client.GuestExecTimeout):
+        await pve_client.run_guest_exec(session_data, "vm", "133", ["echo", "hi"])
+
+
+async def _noop():
+    return None
+
+
 @respx.mock
 async def test_list_guest_names_drops_entries_without_name(session_data):
     respx.get(f"{API}/cluster/resources").mock(
