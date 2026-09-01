@@ -39,7 +39,25 @@ class FakeDownloadResponse:
         self.aclose_called = False
 
     async def aread(self) -> bytes:
-        return self._content
+        # Deliberately not what run_restore() should call anymore -
+        # buffering the whole file (even just once) is exactly what got
+        # a memory-constrained deployment OOM-killed on a real large
+        # file (docs/plan.md §7.6's 2026-09-01 finding). Raising here
+        # means any regression back to whole-file buffering fails loudly
+        # in every test that exercises a download, not just a dedicated
+        # one.
+        raise AssertionError("run_restore() must stream via aiter_bytes(), not aread() - see the OOM finding")
+
+    async def aiter_bytes(self, chunk_size: int):
+        # Mirrors real httpx.Response.aiter_bytes(chunk_size=...): fixed-
+        # size pieces, last one short, one (empty) piece for empty
+        # content - matches split_into_chunks()'s old "empty content
+        # still needs one write" behavior at the restore_runner.py level.
+        if not self._content:
+            yield b""
+            return
+        for start in range(0, len(self._content), chunk_size):
+            yield self._content[start : start + chunk_size]
 
     async def aclose(self) -> None:
         self.aclose_called = True
@@ -157,7 +175,7 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     # 2 chunk-write units + 1 concat unit, all complete
     assert (job.progress_total, job.progress_current) == (3, 3)
     log_text = "\n".join(job.log_lines)
-    assert "needs 2 chunks" in log_text
+    assert "Content needs more than one chunk" in log_text
     assert "Creating scratch directory" in log_text
     assert "Concatenation complete" in log_text
 
@@ -605,6 +623,51 @@ async def test_design_c_used_when_nic_and_tool_are_both_available(manager, sessi
     # download endpoint itself, exercised separately in test_endpoints.py).
     assert len(restore_download._tokens) == 1
     assert next(iter(restore_download._tokens.values())).job_id == job.id
+
+
+async def test_design_c_with_verify_hashes_the_drained_stream_correctly(manager, session_data, monkeypatch):
+    # Direct Network Transfer never writes the source bytes anywhere
+    # itself (the guest fetches them independently) - this confirms the
+    # checksum still gets computed correctly by hashing the stream while
+    # draining it, not by buffering the whole file first.
+    import hashlib
+
+    content = bytes(range(256)) * 500  # ~128 KB, spans multiple chunks
+    expected = hashlib.sha256(content).hexdigest()
+    job = _make_job(manager, session_data, destination="/etc/hosts", verify=True)
+    _patch_download(monkeypatch, content)
+    _with_data_nics(monkeypatch, '[{"cidr": "10.0.5.0/24", "local_ip": "10.0.5.5"}]')
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""
+        if argv[0] == "curl":
+            return 0, "", ""
+        if argv[:2] == ["test", "-f"]:
+            return 0, "", ""
+        if argv[0] == "sha256sum":
+            return 0, f"{expected}  /etc/hosts\n", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.DONE
+    assert any("Checksum verified" in line for line in job.log_lines)
 
 
 async def test_design_c_fetch_failure_fails_the_job_rather_than_falling_back(manager, session_data, monkeypatch):

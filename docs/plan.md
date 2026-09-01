@@ -1354,21 +1354,34 @@ memory (`content = await response.aread()`), then `split_into_chunks()`
 built a **second, full, separate copy** as a list of every chunk's
 wire-ready (Latin-1) string - roughly doubling peak memory for content
 that Direct Network Transfer doesn't even use in wire-string form at
-all. Fixed by removing that redundant copy: `restore_chunking.py` lost
-`Chunk`/`split_into_chunks()`/`needs_guest_exec()` in favor of a cheap
-`chunk_count()` (arithmetic only, no content touched) and a public
-`bytes_to_wire_str()`; `restore_runner.py`'s `_write_chunks_to_scratch()`
-now slices the already-downloaded bytes and converts one
-`DEFAULT_CHUNK_SIZE_BYTES` piece to its wire string immediately before
-writing it, discarding it right after - at most one chunk's wire string
-alive at a time instead of the whole file's worth. The initial
-`response.aread()` still buffers the full file once (true
-streaming-download without ever buffering the whole file is a bigger,
-separate change, not taken here) - this fix roughly halves peak memory
-for any multi-chunk restore, Direct Network Transfer or not, but a file
-large enough relative to the container's memory limit could still be an
-issue; revisit with a real streaming download if this proves
-insufficient on an actual large-file test.
+all. First fix removed the redundant wire-string copy (`chunk_count()` +
+`bytes_to_wire_str()` replacing `Chunk`/`split_into_chunks()`/
+`needs_guest_exec()`) but deliberately left the initial
+`content = await response.aread()` in place, on the reasoning that
+halving peak memory was a lower-risk change than a full streaming
+rewrite. **That wasn't enough** - retried against a real large file and
+the process was OOM-killed again, this time with only the job's very
+first log line ("Starting restore...") ever written, meaning it died
+during that initial `aread()` itself, before even logging a byte count.
+One buffered copy of a large-enough file is still too much for a
+memory-constrained deployment on its own.
+
+Fixed properly this time: `run_restore()` now reads at most two
+`DEFAULT_CHUNK_SIZE_BYTES` pieces up front (`response.aiter_bytes()`,
+not `aread()`) - just enough to know whether this is the small,
+single-call case, without ever buffering the rest of a possibly-large
+file to find out. For the multi-chunk case, the exact chunk count isn't
+known until the stream is exhausted (a growing/placeholder
+`progress_total`, refined as chunks are actually written, rather than
+computed up front from a fully-known size) - Direct Network Transfer
+drains and discards the rest (only needs the total byte count and,
+if verify was requested, a running `hashlib.sha256` digest); the
+scratch-write path streams the same way, writing and discarding one
+piece at a time. At most one piece (~60 KiB) of raw bytes and one
+piece's wire string are ever alive at once, for the whole restore,
+regardless of file size. Locked in with a test double that raises if
+`aread()` is ever called again, and a byte-fidelity test confirming the
+streamed reassembly is still exact.
 
 **Not started, remaining:** deploy-level LXC/Docker additional-NIC
 provisioning steps (the `pct set -netN`/Docker Compose `networks:`

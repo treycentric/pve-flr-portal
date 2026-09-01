@@ -35,7 +35,6 @@ from .config import settings
 from .restore_chunking import (
     DEFAULT_CHUNK_SIZE_BYTES,
     bytes_to_wire_str,
-    chunk_count,
     scratch_dir_path,
     scratch_filename,
     scratch_path_sep,
@@ -82,22 +81,66 @@ async def _remove_scratch_dir(job: RestoreJob, guest_os_family: str | None, scra
         pass
 
 
+async def _iter_download_pieces(first_piece: bytes, second_piece: bytes | None, byte_iter) -> None:
+    """Re-chains the two pieces `run_restore()` already had to read (to
+    find out whether there even *is* a second piece, i.e. whether
+    single-call or multi-chunk applies) back in front of whatever's left
+    in `byte_iter`, so downstream code can just iterate one clean
+    sequence instead of special-casing "the first two are already in
+    hand"."""
+    yield first_piece
+    if second_piece is not None:
+        yield second_piece
+        async for piece in byte_iter:
+            yield piece
+
+
+async def _drain_and_hash(pieces, hasher) -> int:
+    """Consumes the rest of a download without writing it anywhere -
+    used when Direct Network Transfer is handling the actual guest-side
+    fetch itself, so this process only needs the total byte count (for
+    logging) and, if verify was requested, a running checksum - never
+    the file's bytes themselves. Returns total bytes seen."""
+    total = 0
+    async for piece in pieces:
+        total += len(piece)
+        if hasher is not None:
+            hasher.update(piece)
+    return total
+
+
 async def _write_chunks_to_scratch(
-    job: RestoreJob, content: bytes, guest_os_family: str | None, scratch_dir: str
-) -> list[str]:
-    """Writes `content` to the guest as numbered scratch files, one
-    `DEFAULT_CHUNK_SIZE_BYTES` slice at a time - converting each slice to
-    its wire-ready string immediately before writing it and discarding
-    that string right after, rather than pre-building the whole file's
-    worth of wire strings up front (restore_chunking.py's module
-    docstring explains the real memory problem this replaced)."""
+    job: RestoreJob,
+    guest_os_family: str | None,
+    scratch_dir: str,
+    pieces,
+    hasher,
+) -> tuple[list[str], int]:
+    """Writes each already-downloaded-but-not-yet-buffered piece from
+    `pieces` (an async iterable, `_iter_download_pieces()` below) to the
+    guest as a numbered scratch file, one piece at a time - never more
+    than one piece's worth of raw bytes or wire-ready string alive at
+    once, and never the whole file. Updates `hasher` (a hashlib object,
+    or None if verify wasn't requested) incrementally so the full
+    checksum is available without ever buffering the whole file for that
+    either. Returns (scratch paths written, total bytes seen) - the real
+    chunk count isn't known until the source is exhausted, unlike the
+    pre-2026-09-01 design which downloaded everything up front specifically
+    to know this before writing a single byte (confirmed live: that
+    up-front-buffering approach OOM-killed a memory-constrained
+    deployment on a large file, twice - once for the redundant
+    wire-string copy, fixed first, and again for the raw-bytes buffer
+    itself, fixed here)."""
     sep = scratch_path_sep(guest_os_family)
-    paths = []
+    paths: list[str] = []
+    total = 0
     index = 0
-    for start in range(0, len(content), DEFAULT_CHUNK_SIZE_BYTES):
+    async for piece in pieces:
         if job.cancel_requested:
             break
-        piece = content[start : start + DEFAULT_CHUNK_SIZE_BYTES]
+        if hasher is not None:
+            hasher.update(piece)
+        total += len(piece)
         chunk_path = scratch_dir + sep + scratch_filename(job.id, index)
         await ensure_fresh_ticket(job.session)
         await pve_client.write_guest_file(
@@ -105,8 +148,13 @@ async def _write_chunks_to_scratch(
         )
         paths.append(chunk_path)
         job.progress_current += 1
+        # Keep the total at least one ahead of current (room for the
+        # trailing concat unit) while the real count is still unknown -
+        # RestoreJob.progress_percent clamps to 100 regardless, but this
+        # avoids it reading a premature 100% mid-write.
+        job.progress_total = max(job.progress_total, job.progress_current + 1)
         index += 1
-    return paths
+    return paths, total
 
 
 async def _ensure_destination_dir(job: RestoreJob, guest_os_family: str | None) -> None:
@@ -327,104 +375,151 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         job.log(f"Starting restore of {job.source!r} -> {job.destination!r}.")
         await ensure_fresh_ticket(job.session)
 
+        hasher = hashlib.sha256() if job.verify else None
+
         client, response = await pve_client.open_download(
             job.session, job.source_volume, job.source_filepath, tar=False
         )
         try:
-            content = await response.aread()
-        finally:
-            await response.aclose()
-            await client.aclose()
-        job.log(f"Downloaded {len(content)} byte(s) from the backup.")
+            # Read just enough (at most two pieces) to know whether this
+            # is the small, single-call case, without buffering the rest
+            # of a possibly-large file just to find out. See
+            # restore_chunking.py's module docstring for why this
+            # matters: buffering the whole file up front - even just
+            # once, let alone the old double-buffering - OOM-killed a
+            # memory-constrained deployment on a real large file.
+            byte_iter = response.aiter_bytes(chunk_size=DEFAULT_CHUNK_SIZE_BYTES)
+            first_piece = None
+            async for piece in byte_iter:
+                first_piece = piece
+                break
+            if first_piece is None:
+                first_piece = b""
+            second_piece = None
+            async for piece in byte_iter:
+                second_piece = piece
+                break
+            has_more = second_piece is not None
 
-        if job.cancel_requested:
-            jobs.mark_cancelled(job.id)
-            return
-
-        n_chunks = chunk_count(len(content))
-        needs_exec = n_chunks > 1 or job.restore_metadata or job.verify
-        if n_chunks > 1:
-            job.log(f"Content needs {n_chunks} chunks (over the single-call size limit).")
-
-        # Coarse step-count total, known up front so the UI can show a
-        # percentage from the start rather than only once work begins -
-        # see RestoreJob.progress_total's docstring for what a "unit" is.
-        job.progress_total = (
-            (n_chunks if n_chunks > 1 else 1)
-            + (1 if n_chunks > 1 else 0)  # concatenation step
-            + (1 if job.restore_metadata else 0)
-            + (1 if job.verify else 0)
-        )
-
-        if not needs_exec:
-            job.log("Fits in one call and no metadata/verify requested - writing directly, no guest-exec.")
-            await ensure_fresh_ticket(job.session)
-            await pve_client.write_guest_file(
-                job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(content)
-            )
-            job.progress_current = 1
-            jobs.mark_done(job.id)
-            return
-
-        # Everything past this point talks to guest-exec, so the
-        # destination has to be safe to embed in a shell/PowerShell
-        # command string (concatenation, LastWriteTime, certutil aren't
-        # all pure-argv invocations the way file-write is) - checked once
-        # up front rather than at each individual step.
-        pve_client.check_path_safe(job.destination)
-
-        job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
-        await ensure_fresh_ticket(job.session)
-        caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
-        if not caps.design_b.available:
-            jobs.mark_failed(
-                job.id,
-                caps.design_b.reason
-                or "This restore needs guest-exec (large file, restore metadata, or verify was "
-                "requested), which is not available for this guest.",
-            )
-            return
-        guest_os_family = caps.guest_os_family
-        job.log(f"guest-exec available (guest OS family: {guest_os_family or 'unknown'}).")
-
-        await _ensure_destination_dir(job, guest_os_family)
-        job.log("Confirmed the destination directory exists.")
-
-        if job.cancel_requested:
-            jobs.mark_cancelled(job.id)
-            return
-
-        if n_chunks == 1:
-            await ensure_fresh_ticket(job.session)
-            await pve_client.write_guest_file(
-                job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(content)
-            )
-            job.progress_current += 1
-            job.log("Wrote the file directly (single chunk, exec still needed for a later step).")
-        elif await _try_direct_network_transfer(job, guest_os_family):
-            # Direct Network Transfer (docs/plan.md §7.6, issue #22): a
-            # faster alternative to the scratch-write+concat path below,
-            # only ever taken when an admin has actually configured a
-            # data NIC that matches this guest's subnet - see
-            # _try_direct_network_transfer's docstring for the full
-            # eligibility chain. Counts as the same number of progress
-            # units the chunked-write path below would have used (chunks
-            # + concat), so the percentage math stays consistent with
-            # progress_total either way.
-            job.progress_current += n_chunks + 1
-        else:
-            scratch_dir = scratch_dir_path(guest_os_family, job.id)
-            job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
-            await _create_scratch_dir(job, guest_os_family, scratch_dir)
-            chunk_paths = await _write_chunks_to_scratch(job, content, guest_os_family, scratch_dir)
             if job.cancel_requested:
                 jobs.mark_cancelled(job.id)
                 return
-            job.log(f"Wrote all {len(chunk_paths)} chunk(s) to scratch; concatenating into the destination.")
-            await _concat_chunks(job, chunk_paths, guest_os_family)
-            await _verify_destination_exists(job, guest_os_family)
-            job.progress_current += 1
-            job.log("Concatenation complete.")
+
+            if not has_more:
+                job.log(f"Downloaded {len(first_piece)} byte(s) from the backup.")
+                needs_exec = job.restore_metadata or job.verify
+                job.progress_total = 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+
+                if not needs_exec:
+                    job.log("Fits in one call and no metadata/verify requested - writing directly, no guest-exec.")
+                    await ensure_fresh_ticket(job.session)
+                    await pve_client.write_guest_file(
+                        job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece)
+                    )
+                    job.progress_current = 1
+                    jobs.mark_done(job.id)
+                    return
+
+                # Everything past this point talks to guest-exec, so the
+                # destination has to be safe to embed in a shell/
+                # PowerShell command string (concatenation, LastWriteTime,
+                # certutil aren't all pure-argv invocations the way
+                # file-write is) - checked once up front rather than at
+                # each individual step.
+                pve_client.check_path_safe(job.destination)
+
+                job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
+                await ensure_fresh_ticket(job.session)
+                caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
+                if not caps.design_b.available:
+                    jobs.mark_failed(
+                        job.id,
+                        caps.design_b.reason
+                        or "This restore needs guest-exec (restore metadata or verify was "
+                        "requested), which is not available for this guest.",
+                    )
+                    return
+                guest_os_family = caps.guest_os_family
+                job.log(f"guest-exec available (guest OS family: {guest_os_family or 'unknown'}).")
+
+                await _ensure_destination_dir(job, guest_os_family)
+                job.log("Confirmed the destination directory exists.")
+                if job.cancel_requested:
+                    jobs.mark_cancelled(job.id)
+                    return
+
+                if hasher is not None:
+                    hasher.update(first_piece)
+                await ensure_fresh_ticket(job.session)
+                await pve_client.write_guest_file(
+                    job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece)
+                )
+                job.progress_current += 1
+                job.log("Wrote the file directly (single chunk, exec still needed for a later step).")
+            else:
+                job.log("Content needs more than one chunk (over the single-call size limit).")
+                pve_client.check_path_safe(job.destination)
+
+                job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
+                await ensure_fresh_ticket(job.session)
+                caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
+                if not caps.design_b.available:
+                    jobs.mark_failed(
+                        job.id,
+                        caps.design_b.reason
+                        or "This restore needs guest-exec (large file, restore metadata, or verify was "
+                        "requested), which is not available for this guest.",
+                    )
+                    return
+                guest_os_family = caps.guest_os_family
+                job.log(f"guest-exec available (guest OS family: {guest_os_family or 'unknown'}).")
+
+                await _ensure_destination_dir(job, guest_os_family)
+                job.log("Confirmed the destination directory exists.")
+                if job.cancel_requested:
+                    jobs.mark_cancelled(job.id)
+                    return
+
+                # A growing/placeholder total - the real chunk count
+                # isn't known until the source is exhausted (streamed,
+                # not pre-downloaded - see above). Refined as chunks are
+                # actually written, finalized once the count is known.
+                job.progress_total = 2 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+
+                pieces = _iter_download_pieces(first_piece, second_piece, byte_iter)
+                if await _try_direct_network_transfer(job, guest_os_family):
+                    # Direct Network Transfer (docs/plan.md §7.6, issue
+                    # #22): the guest fetches the file itself, straight
+                    # from PVE - so the rest of this already-open stream
+                    # (only read this far to determine chunking) is
+                    # drained and discarded, never written anywhere by
+                    # this process. Counts as one progress unit.
+                    total_bytes = await _drain_and_hash(pieces, hasher)
+                    job.log(f"Downloaded {total_bytes} byte(s) from the backup.")
+                    job.progress_total = 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                    job.progress_current = 1
+                else:
+                    scratch_dir = scratch_dir_path(guest_os_family, job.id)
+                    job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
+                    await _create_scratch_dir(job, guest_os_family, scratch_dir)
+                    chunk_paths, total_bytes = await _write_chunks_to_scratch(
+                        job, guest_os_family, scratch_dir, pieces, hasher
+                    )
+                    job.log(f"Downloaded {total_bytes} byte(s) from the backup.")
+                    if job.cancel_requested:
+                        jobs.mark_cancelled(job.id)
+                        return
+                    job.progress_total = (
+                        len(chunk_paths) + 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                    )
+                    job.log(f"Wrote all {len(chunk_paths)} chunk(s) to scratch; concatenating into the destination.")
+                    await _concat_chunks(job, chunk_paths, guest_os_family)
+                    await _verify_destination_exists(job, guest_os_family)
+                    job.progress_current += 1
+                    job.log("Concatenation complete.")
+        finally:
+            await response.aclose()
+            await client.aclose()
 
         if job.cancel_requested:
             jobs.mark_cancelled(job.id)
@@ -442,7 +537,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         if job.verify:
             job.status = RestoreStatus.VERIFYING
             job.log("Verifying checksum against the source.")
-            expected = hashlib.sha256(content).hexdigest()
+            expected = hasher.hexdigest()
             verified = await _verify_checksum(job, expected, guest_os_family)
             job.progress_current += 1
             if not verified:
