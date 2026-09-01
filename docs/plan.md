@@ -882,8 +882,13 @@ entry points at. Two reasons this matters, both raised in review:
    metadata/verify checkboxes or running-jobs icon yet — that's steps
    5-6). A file needing more than one chunk fails the job with a clear
    message rather than a silent fallback, since multi-chunk isn't built.
-5. Running-jobs UI (icon/spinner/modal/cancel) wired to the job manager
-   built in step 3.
+5. ~~Running-jobs UI~~ — **done**: `GET /api/restore-jobs` (list) and
+   `POST /api/restore-jobs/{id}/cancel` wired into `main.py`;
+   `restoreJobsWidget()` (new top-bar Alpine component, between the
+   task picker and user menu) polls every 4s, shows a spinning ring +
+   active-job-count badge on the icon, and opens the "Restore Task"
+   modal (device/task/restore-ver/source/destination/status/elapsed
+   columns, row select, Cancel, matching the reference screenshots).
 6. Multi-chunk write (scratch files + concat) and the metadata/verify
    checkboxes added to the same endpoint/modal once the content-only
    path and the job infrastructure are solid.

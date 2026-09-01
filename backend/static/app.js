@@ -32,6 +32,53 @@ function taskPicker(groups, current) {
   };
 }
 
+function restoreJobsWidget() {
+  const ACTIVE_STATUSES = ['queued', 'running', 'verifying'];
+  const POLL_INTERVAL_MS = 4000;
+  return {
+    open: false,
+    jobs: [],
+    selectedId: null,
+    get activeCount() {
+      return this.jobs.filter((j) => ACTIVE_STATUSES.includes(j.status)).length;
+    },
+    get selectedCancellable() {
+      const job = this.jobs.find((j) => j.id === this.selectedId);
+      return !!job && job.cancellable;
+    },
+    init() {
+      this.refresh();
+      setInterval(() => this.refresh(), POLL_INTERVAL_MS);
+    },
+    async refresh() {
+      try {
+        const resp = await fetch('/api/restore-jobs');
+        if (!resp.ok) return;
+        this.jobs = await resp.json();
+      } catch (e) {
+        // Transient failure - keep showing the last known list rather
+        // than flashing it empty on every hiccup.
+      }
+    },
+    async cancelSelected() {
+      if (!this.selectedId || !this.selectedCancellable) return;
+      try {
+        await fetch('/api/restore-jobs/' + encodeURIComponent(this.selectedId) + '/cancel', { method: 'POST' });
+      } finally {
+        await this.refresh();
+      }
+    },
+    formatElapsed(seconds) {
+      const total = Math.max(0, Math.floor(seconds || 0));
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      const pad = (n) => String(n).padStart(2, '0');
+      return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    },
+  };
+}
+
 function userMenu(identity) {
   return {
     identity,

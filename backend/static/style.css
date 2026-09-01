@@ -399,6 +399,61 @@ body {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
 
+.restore-jobs-trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin-left: 4px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.restore-jobs-trigger:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.restore-jobs-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.restore-jobs-spinner {
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: var(--link-alt);
+  animation: restore-jobs-spin 0.9s linear infinite;
+}
+
+@keyframes restore-jobs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.restore-jobs-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--link-alt);
+  color: #ffffff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
 .user-menu-trigger {
   position: relative;
   display: flex;

@@ -6,6 +6,7 @@ so nothing here touches the network. Auth is bypassed by overriding the
 unauthenticated path.
 """
 
+import asyncio
 import io
 import zipfile
 
@@ -271,6 +272,66 @@ def test_restore_uses_posix_separator_for_non_windows_guest(client, monkeypatch)
 def test_restore_requires_auth():
     with TestClient(main.app) as c:
         resp = c.post("/api/restore", data=_restore_form(), follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
+def test_restore_jobs_list_returns_submitted_job(client, monkeypatch):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_content_only_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    resp = client.get("/api/restore-jobs")
+    assert resp.status_code == 200
+    jobs = resp.json()
+    assert any(j["id"] == submitted["id"] for j in jobs)
+
+
+def test_restore_jobs_list_empty_when_none_submitted(client):
+    resp = client.get("/api/restore-jobs")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_restore_jobs_list_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-jobs", follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
+def test_restore_jobs_cancel_unknown_job_404s(client):
+    resp = client.post("/api/restore-jobs/does-not-exist/cancel")
+    assert resp.status_code == 404
+
+
+def test_restore_jobs_cancel_marks_flag_and_returns_job(client, monkeypatch):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def hangs(job, jobs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_content_only_restore", hangs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    resp = client.post(f"/api/restore-jobs/{submitted['id']}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == submitted["id"]
+
+
+def test_restore_jobs_cancel_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.post("/api/restore-jobs/x/cancel", follow_redirects=False)
     assert resp.status_code in (302, 401)
 
 

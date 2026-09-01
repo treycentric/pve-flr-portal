@@ -364,6 +364,24 @@ async def restore(
     return JSONResponse(job.to_dict())
 
 
+@app.get("/api/restore-jobs")
+async def restore_jobs_list(session: SessionData = Depends(auth.get_session)):
+    """PH.5 (docs/plan.md §7.5): the running-jobs indicator's data source,
+    polled from the top bar. Jobs are visible to any logged-in user, not
+    scoped per-requester - a single-admin homelab tool with one shared
+    task list, same as the rest of this design."""
+    return JSONResponse([job.to_dict() for job in restore_jobs.manager.list_jobs()])
+
+
+@app.post("/api/restore-jobs/{job_id}/cancel")
+async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.get_session)):
+    job = restore_jobs.manager.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such restore job")
+    restore_jobs.manager.cancel(job_id)
+    return JSONResponse(job.to_dict())
+
+
 @app.get("/api/restore-browse")
 async def restore_browse(
     type: str,
