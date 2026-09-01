@@ -145,3 +145,76 @@ test('formatElapsed renders m:ss under an hour, h:mm:ss at or past one hour', ()
   assert.equal(w.formatElapsed(0), '0:00');
   assert.equal(w.formatElapsed(undefined), '0:00');
 });
+
+test('formatStatus appends the percentage only when progress_percent is present', () => {
+  const { restoreJobsWidget } = loadApp();
+  const w = restoreJobsWidget();
+  assert.equal(w.formatStatus(job({ status: 'running', progress_percent: 42 })), 'running (42%)');
+  assert.equal(w.formatStatus(job({ status: 'done', progress_percent: null })), 'done');
+  assert.equal(w.formatStatus(job({ status: 'queued', progress_percent: undefined })), 'queued');
+  assert.equal(w.formatStatus(job({ status: 'running', progress_percent: 0 })), 'running (0%)');
+});
+
+// A minimal fake `window` for testing startDrag()'s window-level
+// pointermove/pointerup listeners, since app.js's top-level `window`
+// reference resolves to whatever stub loadApp() was given (see
+// helpers.mjs) - the real global `window` in this file is never used by
+// the code under test.
+function fakeWindow() {
+  const listeners = {};
+  return {
+    location: {},
+    Alpine: undefined,
+    addEventListener(type, fn) {
+      (listeners[type] ||= []).push(fn);
+    },
+    removeEventListener(type, fn) {
+      listeners[type] = (listeners[type] || []).filter((f) => f !== fn);
+    },
+    dispatch(type, event) {
+      for (const fn of listeners[type] || []) fn(event);
+    },
+    listenerCount(type) {
+      return (listeners[type] || []).length;
+    },
+  };
+}
+
+test('startDrag tracks pointer movement as a dragX/dragY offset', () => {
+  const win = fakeWindow();
+  const { restoreJobsWidget } = loadApp({ window: win });
+  const w = restoreJobsWidget();
+  w.dragX = 10;
+  w.dragY = 20;
+
+  w.startDrag({ clientX: 100, clientY: 100, target: { closest: () => null } });
+  win.dispatch('pointermove', { clientX: 130, clientY: 90 });
+
+  assert.equal(w.dragX, 40); // 10 + (130 - 100)
+  assert.equal(w.dragY, 10); // 20 + (90 - 100)
+});
+
+test('startDrag stops updating after pointerup removes the listeners', () => {
+  const win = fakeWindow();
+  const { restoreJobsWidget } = loadApp({ window: win });
+  const w = restoreJobsWidget();
+
+  w.startDrag({ clientX: 0, clientY: 0, target: { closest: () => null } });
+  win.dispatch('pointermove', { clientX: 10, clientY: 10 });
+  assert.equal(w.dragX, 10);
+
+  win.dispatch('pointerup', {});
+  assert.equal(win.listenerCount('pointermove'), 0);
+
+  win.dispatch('pointermove', { clientX: 999, clientY: 999 });
+  assert.equal(w.dragX, 10); // unchanged - listener was removed
+});
+
+test('startDrag ignores pointerdown on the close button', () => {
+  const win = fakeWindow();
+  const { restoreJobsWidget } = loadApp({ window: win });
+  const w = restoreJobsWidget();
+
+  w.startDrag({ clientX: 0, clientY: 0, target: { closest: (sel) => (sel === '.modal-close' ? {} : null) } });
+  assert.equal(win.listenerCount('pointermove'), 0);
+});

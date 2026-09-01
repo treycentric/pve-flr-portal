@@ -869,7 +869,17 @@ entry points at. Two reasons this matters, both raised in review:
   Restore ver., Source, Destination, Status, Elapsed Time, an actions
   column) with row selection and a "Cancel" button wired to
   `POST /api/restore-jobs/{id}/cancel`, an empty "No data" state, and
-  a Close button — matching the reference screenshot's layout.
+  a Close button — matching the reference screenshot's layout. The
+  Status column shows a coarse percentage while active (`RestoreJob.
+  progress_current`/`progress_total` — one unit per chunk written, plus
+  one each for concatenation/metadata restore/verify when those run;
+  `progress_percent` is `None`, not a frozen number, once a job is no
+  longer active). The modal itself is resizable (native CSS `resize:
+  both`) and movable (drag the header — same window-level
+  pointermove/pointerup pattern as the timeline's drag-to-pan,
+  deliberately no `setPointerCapture()`, which would break the header's
+  own Close button and the table's row-selection clicks the same way it
+  once broke the timeline's marker clicks).
 
 **Sequencing:**
 1. ~~Empirical verification against a real guest~~ — **done 2026-09-01**,

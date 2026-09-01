@@ -71,6 +71,14 @@ class RestoreJob:
     # meaningful when restore_metadata is set; None if the frontend
     # didn't have an mtime to send (e.g. a directory entry).
     source_mtime: int | None = None
+    # Coarse step-count progress, not byte-level - one unit per chunk
+    # written, plus one each for concatenation/metadata restore/verify
+    # when those run (restore_runner.py sets progress_total once the
+    # actual step count is known; the single-call fast path is just
+    # total=1). Good enough to show "running (42%)" without the added
+    # complexity of tracking partial-chunk upload progress.
+    progress_current: int = 0
+    progress_total: int = 1
     status: RestoreStatus = RestoreStatus.QUEUED
     error: str | None = None
     started_at: float = field(default_factory=time.time)
@@ -86,6 +94,15 @@ class RestoreJob:
     def is_active(self) -> bool:
         return self.status in ACTIVE_STATUSES
 
+    @property
+    def progress_percent(self) -> int | None:
+        # Only meaningful while actually in progress - a finished job
+        # (done/failed/cancelled) shows its terminal state, not a
+        # possibly-partial percentage frozen at whatever point it stopped.
+        if not self.is_active or self.progress_total <= 0:
+            return None
+        return max(0, min(100, round(100 * self.progress_current / self.progress_total)))
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -95,6 +112,7 @@ class RestoreJob:
             "source": self.source,
             "destination": self.destination,
             "status": self.status.value,
+            "progress_percent": self.progress_percent,
             "elapsed_seconds": round(self.elapsed_seconds, 1),
             "error": self.error,
             "cancellable": self.is_active,

@@ -54,8 +54,8 @@
   </button>
 
   <div class="modal-overlay" x-show="open" x-cloak @click.self="open = false" @keydown.escape.window="open = false">
-    <div class="modal-box">
-      <div class="modal-header">
+    <div class="modal-box modal-box--resizable" :style="'transform: translate(' + dragX + 'px, ' + dragY + 'px)'">
+      <div class="modal-header modal-header--draggable" @pointerdown="startDrag($event)">
         <h2>Restore Task</h2>
         <button type="button" class="modal-close" @click="open = false">&times;</button>
       </div>
@@ -75,7 +75,7 @@
                 <td x-text="j.restore_version"></td>
                 <td x-text="j.source"></td>
                 <td x-text="j.destination"></td>
-                <td x-text="j.status"></td>
+                <td x-text="formatStatus(j)"></td>
                 <td x-text="formatElapsed(j.elapsed_seconds)"></td>
               </tr>
             </template>

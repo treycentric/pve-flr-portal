@@ -131,12 +131,36 @@ def test_to_dict_shape_matches_ui_columns(manager, session_data):
         "source",
         "destination",
         "status",
+        "progress_percent",
         "elapsed_seconds",
         "error",
         "cancellable",
     }
     assert d["device"] == "web (133)"
     assert d["cancellable"] is True
+
+
+def test_progress_percent_none_when_not_active(manager, session_data):
+    job = _make(manager, session_data)
+    manager.mark_done(job.id)
+    assert job.progress_percent is None
+    assert job.to_dict()["progress_percent"] is None
+
+
+def test_progress_percent_computed_while_active(manager, session_data):
+    job = _make(manager, session_data)
+    job.progress_total = 4
+    job.progress_current = 1
+    assert job.progress_percent == 25
+    job.progress_current = 4
+    assert job.progress_percent == 100
+
+
+def test_progress_percent_clamped_to_100(manager, session_data):
+    job = _make(manager, session_data)
+    job.progress_total = 4
+    job.progress_current = 9  # shouldn't happen, but never report over 100%
+    assert job.progress_percent == 100
 
 
 def test_restore_metadata_and_verify_are_independent_opt_ins(manager, session_data):

@@ -39,6 +39,11 @@ function restoreJobsWidget() {
     open: false,
     jobs: [],
     selectedId: null,
+    // Drag offset for the modal (docs/plan.md §7.5's UI section) - an
+    // inline transform on the modal box, reset only on a fresh page
+    // load so the position persists across repeated opens/closes.
+    dragX: 0,
+    dragY: 0,
     get activeCount() {
       return this.jobs.filter((j) => ACTIVE_STATUSES.includes(j.status)).length;
     },
@@ -75,6 +80,37 @@ function restoreJobsWidget() {
       const s = total % 60;
       const pad = (n) => String(n).padStart(2, '0');
       return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    },
+    formatStatus(job) {
+      const pct = job.progress_percent;
+      return pct === null || pct === undefined ? job.status : `${job.status} (${pct}%)`;
+    },
+
+    // Dragging the modal by its header. Same window-pointermove/pointerup
+    // pattern as the timeline's drag-to-pan (_bindTimelineDrag) -
+    // deliberately no setPointerCapture(), which retargets click/pointerup
+    // to the capturing element and would break the header's own Close
+    // button and the table's row-selection clicks (see that function's
+    // comment for the full story).
+    startDrag(e) {
+      if (e.target.closest('.modal-close')) return; // let Close still work
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const originX = this.dragX;
+      const originY = this.dragY;
+
+      const onMove = (ev) => {
+        this.dragX = originX + (ev.clientX - startX);
+        this.dragY = originY + (ev.clientY - startY);
+      };
+      const endDrag = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', endDrag);
+        window.removeEventListener('pointercancel', endDrag);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', endDrag);
+      window.addEventListener('pointercancel', endDrag);
     },
   };
 }

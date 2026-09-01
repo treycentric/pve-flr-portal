@@ -94,6 +94,7 @@ async def test_small_file_no_flags_uses_fast_path_no_capability_check(manager, s
     assert job.status == RestoreStatus.DONE
     assert written["path"] == job.destination
     assert written["content"] == "127.0.0.1 localhost"
+    assert (job.progress_total, job.progress_current) == (1, 1)
 
 
 async def test_oversized_file_fails_with_clear_message_when_no_exec_available(manager, session_data, monkeypatch):
@@ -146,6 +147,69 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     assert exec_calls[1][:2] == ["sh", "-c"]
     assert "cat" in exec_calls[1][2] and job.destination in exec_calls[1][2]
     assert exec_calls[-1][:2] == ["rm", "-rf"]
+    # 2 chunk-write units + 1 concat unit, all complete
+    assert (job.progress_total, job.progress_current) == (3, 3)
+
+
+async def test_progress_updates_incrementally_during_multi_chunk_write(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 * 2 + 1))  # 3 chunks
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    seen_progress = []
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        seen_progress.append(job.progress_current)
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.progress_total == 4  # 3 chunks + 1 concat
+    # progress_current was 0, 1, 2 respectively *before* each of the three
+    # writes completed (incremented right after) - confirms it climbs
+    # incrementally rather than jumping straight to the final value.
+    assert seen_progress == [0, 1, 2]
+    assert job.progress_current == 4
+
+
+async def test_progress_total_includes_metadata_and_verify_units(manager, session_data, monkeypatch):
+    import hashlib
+
+    content = b"small"
+    job = _make_job(
+        manager, session_data, destination="/etc/hosts", restore_metadata=True, verify=True, source_mtime=123
+    )
+    _patch_download(monkeypatch, content)
+    expected = hashlib.sha256(content).hexdigest()
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        if argv[0] == "sha256sum":
+            return 0, f"{expected}  /etc/hosts\n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    # 1 write unit + 1 metadata unit + 1 verify unit
+    assert (job.progress_total, job.progress_current) == (3, 3)
 
 
 async def test_restore_metadata_runs_touch_on_linux(manager, session_data, monkeypatch):

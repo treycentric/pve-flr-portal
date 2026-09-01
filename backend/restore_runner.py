@@ -78,6 +78,7 @@ async def _write_chunks_to_scratch(
         await ensure_fresh_ticket(job.session)
         await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, chunk_path, chunk.content)
         paths.append(chunk_path)
+        job.progress_current += 1
     return paths
 
 
@@ -180,11 +181,22 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         chunks = split_into_chunks(content)
         needs_exec = needs_guest_exec(chunks) or job.restore_metadata or job.verify
 
+        # Coarse step-count total, known up front so the UI can show a
+        # percentage from the start rather than only once work begins -
+        # see RestoreJob.progress_total's docstring for what a "unit" is.
+        job.progress_total = (
+            (len(chunks) if len(chunks) > 1 else 1)
+            + (1 if len(chunks) > 1 else 0)  # concatenation step
+            + (1 if job.restore_metadata else 0)
+            + (1 if job.verify else 0)
+        )
+
         if not needs_exec:
             await ensure_fresh_ticket(job.session)
             await pve_client.write_guest_file(
                 job.session, job.guest_type, job.vmid, job.destination, chunks[0].content
             )
+            job.progress_current = 1
             jobs.mark_done(job.id)
             return
 
@@ -216,6 +228,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             await pve_client.write_guest_file(
                 job.session, job.guest_type, job.vmid, job.destination, chunks[0].content
             )
+            job.progress_current += 1
         else:
             scratch_dir = scratch_dir_path(guest_os_family, job.id)
             await _create_scratch_dir(job, guest_os_family, scratch_dir)
@@ -224,6 +237,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
                 jobs.mark_cancelled(job.id)
                 return
             await _concat_chunks(job, chunk_paths, guest_os_family)
+            job.progress_current += 1
 
         if job.cancel_requested:
             jobs.mark_cancelled(job.id)
@@ -231,11 +245,14 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
 
         if job.restore_metadata:
             await _restore_mtime(job, guest_os_family)
+            job.progress_current += 1
 
         if job.verify:
             job.status = RestoreStatus.VERIFYING
             expected = hashlib.sha256(content).hexdigest()
-            if not await _verify_checksum(job, expected, guest_os_family):
+            verified = await _verify_checksum(job, expected, guest_os_family)
+            job.progress_current += 1
+            if not verified:
                 jobs.mark_failed(
                     job.id,
                     "Restore completed but checksum verification failed - the file may not "

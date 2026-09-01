@@ -135,6 +135,17 @@ body {
   overflow: hidden;
 }
 
+.modal-box--resizable {
+  resize: both;
+  min-width: 480px;
+  min-height: 320px;
+}
+
+.modal-header--draggable {
+  cursor: move;
+  user-select: none;
+}
+
 .modal-header {
   display: flex;
   align-items: center;
