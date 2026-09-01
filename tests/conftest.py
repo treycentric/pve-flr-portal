@@ -74,6 +74,18 @@ def clear_restore_jobs():
 
 
 @pytest.fixture(autouse=True)
+def clear_restore_download_tokens():
+    """Same leak-between-tests convention as sessions/restore jobs above,
+    for Design C's (docs/plan.md §7.6, issue #22) single-use download
+    tokens."""
+    from backend import restore_download
+
+    restore_download.clear()
+    yield
+    restore_download.clear()
+
+
+@pytest.fixture(autouse=True)
 def clear_guest_agent_locks():
     """asyncio.Lock is bound to the event loop that created it, and tests
     widely reuse the same vmid ("133") under a fresh event loop per test

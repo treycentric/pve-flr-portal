@@ -1176,6 +1176,41 @@ Design A/B prove too slow for real large-file restores in practice.
 Tracked as issue #22, filed as a follow-on to #5, not part of PH.5
 itself.
 
+**Sequencing (started 2026-09-01):**
+1. ~~Data-NIC config + per-job subnet selection~~ — **done**:
+   `backend/restore_network_pull.py`'s `parse_data_nics()` (reads
+   `RESTORE_DATA_NICS`, a JSON array of `{cidr, local_ip}`, empty by
+   default so Design C stays off until an admin opts in) and
+   `select_data_nic()` (matches a guest's reported IP(s) against the
+   configured subnets, first match wins, `None` if nothing matches —
+   never guesses). Pure logic, fully unit-tested without a live guest or
+   real multi-NIC hardware.
+2. ~~Fetch-tool detection~~ — **done**: `detect_fetch_tool()` in the same
+   module, walking the priority list from the fallback-chain section
+   above via injected `exec_fn` (same pattern as `restore_runner.py`'s
+   own `_exec` wrapper) — not yet called from anywhere live, since
+   nothing wires Design C into a real restore yet (step 4 below).
+3. ~~Single-use download token + endpoint~~ — **done**:
+   `backend/restore_download.py` (mint/consume, single-use,
+   `RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS` TTL, in-memory — same
+   lost-on-restart tradeoff as `auth._sessions`/`restore_jobs.manager`)
+   and `GET /api/restore-downloads/{token}` in `main.py` — deliberately
+   unauthenticated (the guest has no PVE session and must never get
+   one), re-streams from PVE using the *job's own* session snapshot.
+   Not reachable yet: nothing mints a token outside of tests.
+4. **Not started.** Bootstrap script generation per OS/tool, wiring
+   `detect_fetch_tool()` + `select_data_nic()` + token minting into
+   `restore_runner.run_restore()` as an automatic preference over
+   Design B's scratch/concat path when available (same "not a
+   user-facing choice" principle as A/B), and the actual per-interface
+   HTTPS bind changes in `run.py`. This is the part that changes live
+   restore behavior, so it's being held for a separate check-in before
+   starting rather than folded into the same pass as steps 1–3.
+5. **Not started.** Deploy-level: LXC/Docker additional-NIC
+   provisioning, firewall rule examples, and the user-facing
+   provisioning documentation (README.md section or
+   `docs/network-provisioning.md` — not `docs/dev/`, see above).
+
 ## 8. Stack — and why
 
 - **Backend:** Python, FastAPI — one small process, typed surface for a

@@ -612,3 +612,82 @@ def test_logout_clears_cookie_and_session(session_data):
     assert resp.status_code == 303
     assert resp.headers["location"] == "/login"
     assert "session-xyz" not in auth._sessions
+
+
+# --- Design C download endpoint (docs/plan.md §7.6, issue #22) -----------
+# Not yet reachable from a live restore - these exercise the endpoint
+# directly with a job created straight through the manager and a token
+# minted straight through restore_download, the way a future bootstrap
+# script's fetch would eventually reach it.
+
+
+def _make_download_job(session_data):
+    from backend import restore_jobs
+
+    return restore_jobs.manager.create(
+        session=session_data,
+        guest_type="vm",
+        vmid="133",
+        guest_label="web (133)",
+        task_name="Restore hosts -> /etc/hosts",
+        snapshot_time="2026-08-30T14:48:06Z",
+        source_volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        source_filepath="L2V0Yy9ob3N0cw==",
+        source="/etc/hosts",
+        destination="/etc/hosts",
+    )
+
+
+def test_restore_download_fetch_requires_no_auth_but_a_valid_token(session_data, monkeypatch):
+    """The endpoint is deliberately unauthenticated - the guest has no
+    PVE session - so this uses a bare TestClient with no session cookie
+    at all, unlike the other tests here."""
+    from backend import restore_download
+
+    job = _make_download_job(session_data)
+    token = restore_download.mint_token(job.id, ttl_seconds=60)
+
+    async def fake_open_download(session, volume, filepath, tar=False):
+        assert session is job.session
+        return httpx.AsyncClient(), httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open_download)
+    with TestClient(main.app) as c:
+        resp = c.get(f"/api/restore-downloads/{token}")
+    assert resp.status_code == 200
+    assert resp.content == b"hello world"
+
+
+def test_restore_download_fetch_unknown_token_404s():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-downloads/not-a-real-token")
+    assert resp.status_code == 404
+
+
+def test_restore_download_fetch_is_single_use(session_data, monkeypatch):
+    from backend import restore_download
+
+    job = _make_download_job(session_data)
+    token = restore_download.mint_token(job.id, ttl_seconds=60)
+
+    async def fake_open_download(session, volume, filepath, tar=False):
+        return httpx.AsyncClient(), httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open_download)
+    with TestClient(main.app) as c:
+        first = c.get(f"/api/restore-downloads/{token}")
+        second = c.get(f"/api/restore-downloads/{token}")
+    assert first.status_code == 200
+    assert second.status_code == 404
+
+
+def test_restore_download_fetch_404s_if_the_job_no_longer_exists(session_data):
+    from backend import restore_download, restore_jobs
+
+    job = _make_download_job(session_data)
+    token = restore_download.mint_token(job.id, ttl_seconds=60)
+    restore_jobs.manager.clear()  # job gone, token still "valid" on its own terms
+
+    with TestClient(main.app) as c:
+        resp = c.get(f"/api/restore-downloads/{token}")
+    assert resp.status_code == 404

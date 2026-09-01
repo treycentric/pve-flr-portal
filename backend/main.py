@@ -15,8 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException
 
-from . import auth, guest_agent, guest_browse, pve_client, restore_jobs, restore_runner
-from .auth import SessionData
+from . import auth, guest_agent, guest_browse, pve_client, restore_download, restore_jobs, restore_runner
+from .auth import SessionData, ensure_fresh_ticket
 from .version import REPO_URL, __version__
 
 app = FastAPI(title="pve-flr-portal")
@@ -406,6 +406,42 @@ async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.g
         raise HTTPException(status_code=404, detail="No such restore job")
     restore_jobs.manager.cancel(job_id)
     return JSONResponse(job.to_dict())
+
+
+@app.get("/api/restore-downloads/{token}")
+async def restore_download_fetch(token: str):
+    """Design C (docs/plan.md §7.6, issue #22) - not yet reachable from a
+    live restore (nothing mints a token yet; that's a later step). The
+    endpoint a Design C bootstrap script's `curl`/`Invoke-WebRequest`/etc.
+    fetches its file from, once wired in. Deliberately **not** gated by
+    `Depends(auth.get_session)` - the guest has no PVE session and must
+    never be handed one; the single-use token minted by
+    restore_download.mint_token() is the only credential here, consumed
+    on first use regardless of outcome (restore_download.py's docstring).
+    Re-streams from PVE using the *job's own* session snapshot, the same
+    one restore_runner.py already uses for the rest of that job's work -
+    never the requester's, since the requester is the guest, not a
+    logged-in user."""
+    job_id = restore_download.consume_token(token)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="This download link is invalid, already used, or has expired")
+    job = restore_jobs.manager.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such restore job")
+
+    await ensure_fresh_ticket(job.session)
+    client, response = await pve_client.open_download(job.session, job.source_volume, job.source_filepath, tar=False)
+
+    async def body():
+        try:
+            async for chunk in response.aiter_bytes():
+                yield chunk
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+    media_type = response.headers.get("content-type", "application/octet-stream")
+    return StreamingResponse(body(), media_type=media_type)
 
 
 @app.get("/api/restore-browse")

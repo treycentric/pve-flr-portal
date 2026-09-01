@@ -61,6 +61,23 @@ class Settings:
     # restore is observed crowding out other guest-agent users.
     guest_agent_min_command_gap_seconds: float
 
+    # Design C (docs/plan.md §7.6, issue #22 - not yet wired into a live
+    # restore): the data-plane NIC(s) a restore's network-pull download
+    # endpoint may be served from, one entry per non-routable subnet a
+    # target guest might live in. Raw JSON here, parsed by
+    # restore_network_pull.parse_data_nics() - kept as a plain string
+    # rather than parsed eagerly so a malformed value fails where it's
+    # used (with a clear error) instead of crashing the whole app at
+    # import time over a feature most deployments won't configure.
+    # Empty by default - Design C is simply never offered until an admin
+    # opts in by setting this.
+    restore_data_nics_json: str
+    # How long a single-use network-pull download token stays valid
+    # before it's treated as expired - long enough for guest-exec to
+    # kick off the bootstrap script and for it to start the fetch, short
+    # enough that a leaked/logged URL isn't useful for long.
+    restore_download_token_ttl_seconds: float
+
 
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
@@ -71,4 +88,6 @@ settings = Settings(
     tls_cert_file=_get("TLS_CERT_FILE", "certs/portal.crt"),
     tls_key_file=_get("TLS_KEY_FILE", "certs/portal.key"),
     guest_agent_min_command_gap_seconds=_float("GUEST_AGENT_MIN_COMMAND_GAP_SECONDS", 0.0),
+    restore_data_nics_json=_get("RESTORE_DATA_NICS", "[]"),
+    restore_download_token_ttl_seconds=_float("RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS", 120.0),
 )
