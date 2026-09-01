@@ -95,6 +95,11 @@
         <div class="restore-form">
           <p>Restores <strong x-text="selectedItems.length ? selectedItems[0].name : ''"></strong> directly into the running guest.</p>
 
+          <div class="restore-mode-toggle" x-show="restoreBrowseAvailable" role="tablist">
+            <button type="button" class="restore-mode-btn" :class="{ 'is-active': restoreBrowsing }" role="tab" :aria-selected="restoreBrowsing" @click="setDestMode('browse')">Browse</button>
+            <button type="button" class="restore-mode-btn" :class="{ 'is-active': !restoreBrowsing }" role="tab" :aria-selected="!restoreBrowsing" @click="setDestMode('manual')">Manual entry</button>
+          </div>
+
           <template x-if="restoreBrowseAvailable && restoreBrowsing">
             <div class="restore-browser">
               <div class="restore-browse-toolbar">
@@ -113,7 +118,6 @@
                 </template>
               </div>
               <p class="restore-browse-selected">Restoring into: <strong x-text="restoreDestDir || '(select a folder)'"></strong></p>
-              <button type="button" class="link-btn restore-browse-toggle" @click="toggleManualDestEntry()">Enter path manually instead</button>
             </div>
           </template>
 
@@ -123,7 +127,6 @@
               <input type="text" x-model="restoreDestDir" placeholder="e.g. C:\Windows\Temp or /etc" class="modal-filter-input">
             </label>
           </template>
-          <button type="button" class="link-btn restore-browse-toggle" x-show="restoreBrowseAvailable && !restoreBrowsing" @click="toggleManualDestEntry()">Browse the guest instead</button>
 
           <p class="restore-warning">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
           <label class="restore-checkbox">

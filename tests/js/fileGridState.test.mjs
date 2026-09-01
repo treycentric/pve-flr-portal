@@ -348,12 +348,12 @@ test('browseUp browses into the current parent, including null (top level)', asy
   assert.ok(requestedUrl.includes('path=%2Fetc'));
 });
 
-test('toggleManualDestEntry flips to manual entry, then back re-browses the current path', async () => {
+test('setDestMode switches to manual, then back re-browses the current path', async () => {
   const { fileGridState } = loadApp();
   const s = fileGridState();
   s.restoreBrowsing = true;
   s.restoreBrowsePath = '/etc';
-  s.toggleManualDestEntry();
+  s.setDestMode('manual');
   assert.equal(s.restoreBrowsing, false);
 
   let requestedUrl = null;
@@ -363,11 +363,27 @@ test('toggleManualDestEntry flips to manual entry, then back re-browses the curr
     return { ok: true, json: async () => ({ path: '/etc', parent: '/', entries: [] }) };
   };
   try {
-    s.toggleManualDestEntry();
+    s.setDestMode('browse');
     await new Promise((r) => setTimeout(r, 0));
   } finally {
     globalThis.fetch = originalFetch;
   }
   assert.equal(s.restoreBrowsing, true);
   assert.ok(requestedUrl.includes('path=%2Fetc'));
+});
+
+test('setDestMode is a no-op when the requested mode is already active', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreBrowsing = true;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('should not re-fetch when already in browse mode');
+  };
+  try {
+    s.setDestMode('browse');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowsing, true);
 });

@@ -105,6 +105,27 @@ def _posix_parent(target: str) -> str | None:
     return posixpath.dirname(target.rstrip("/")) or "/"
 
 
+# Legacy Windows compatibility junctions (pointing at C:\Users and its
+# subfolders). The PowerShell listing above already filters these out of
+# any directory it successfully lists (ReparsePoint attribute), so they
+# won't normally show up as clickable entries at all - this is a
+# defensive fallback for the case a user types one of these paths
+# directly in manual-entry mode, where Windows still blocks listing into
+# it (by design, even for SYSTEM) and `dir`/PowerShell alike report it as
+# not found rather than listing it.
+_KNOWN_WINDOWS_JUNCTIONS = {"documents and settings", "application data", "local settings", "my documents"}
+
+
+def _friendlier_windows_listing_error(path: str, raw_message: str) -> str:
+    leaf = path.rstrip("\\").rsplit("\\", 1)[-1].lower()
+    if leaf in _KNOWN_WINDOWS_JUNCTIONS:
+        return (
+            f"'{path}' is a legacy Windows compatibility shortcut that can't be browsed directly "
+            "(Windows blocks listing it, even for SYSTEM) - try C:\\Users instead."
+        )
+    return raw_message
+
+
 async def list_directories(
     session: SessionData, guest_type: str, vmid: str, guest_os_family: str | None, path: str | None
 ) -> dict:
@@ -129,9 +150,29 @@ async def list_directories(
             entries = [{"name": n, "path": n + "\\"} for n in names]
             return {"path": None, "parent": None, "separator": sep, "entries": entries}
 
-        exitcode, out, err = await _run_exec(session, node_type, vmid, ["cmd", "/c", "dir", path, "/b", "/ad"])
+        # PowerShell, not `dir`, because filtering out junctions/symlinked
+        # directories needs the ReparsePoint attribute - `dir /b` (bare
+        # names) can't distinguish a real directory from one, and even
+        # `dir`'s non-bare <JUNCTION> marker would mean parsing its
+        # locale-dependent date/time columns. `path` rides in as $args[0],
+        # a separate guest-exec argv element, never interpolated into the
+        # script string - same "no shell string-building" approach as
+        # `find`'s argv on the Linux/BSD side.
+        exitcode, out, err = await _run_exec(
+            session,
+            node_type,
+            vmid,
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "try { Get-ChildItem -LiteralPath $args[0] -Directory -Force -ErrorAction Stop | "
+                "Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | "
+                "Select-Object -ExpandProperty Name } catch { Write-Error $_; exit 1 }",
+                path,
+            ],
+        )
         if exitcode != 0:
-            raise ListingError(err.strip() or out.strip() or f"Listing failed (exit {exitcode})")
+            raw = err.strip() or out.strip() or f"Listing failed (exit {exitcode})"
+            raise ListingError(_friendlier_windows_listing_error(path, raw))
         names = [ln.strip() for ln in out.splitlines() if ln.strip()]
         base = path if path.endswith("\\") else path + "\\"
         entries = [{"name": n, "path": base + n} for n in names]

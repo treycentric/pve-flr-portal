@@ -125,6 +125,32 @@ async def test_list_directories_nonzero_exit_raises_listing_error(session_data):
         await list_directories(session_data, "vm", "133", "linux", "/does/not/exist")
 
 
+def test_friendlier_windows_listing_error_for_known_junction():
+    msg = guest_browse._friendlier_windows_listing_error("C:\\Documents and Settings", "File Not Found")
+    assert "legacy Windows compatibility shortcut" in msg
+    assert "C:\\Users" in msg
+
+
+def test_friendlier_windows_listing_error_is_case_insensitive_and_trailing_slash_safe():
+    msg = guest_browse._friendlier_windows_listing_error("C:\\documents AND settings\\", "File Not Found")
+    assert "legacy Windows compatibility shortcut" in msg
+
+
+def test_friendlier_windows_listing_error_passes_through_for_ordinary_folders():
+    msg = guest_browse._friendlier_windows_listing_error("C:\\Some Real Folder", "File Not Found")
+    assert msg == "File Not Found"
+
+
+@respx.mock
+async def test_list_directories_windows_maps_known_junction_to_friendlier_message(session_data):
+    _exec_route().mock(return_value=httpx.Response(200, json={"data": {"pid": 1}}))
+    _status_route().mock(
+        return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 1, "out-data": "File Not Found"}})
+    )
+    with pytest.raises(guest_browse.ListingError, match="legacy Windows compatibility shortcut"):
+        await list_directories(session_data, "vm", "133", "windows", "C:\\Documents and Settings")
+
+
 @respx.mock
 async def test_run_exec_polls_until_exited(session_data, monkeypatch):
     monkeypatch.setattr(guest_browse.asyncio, "sleep", lambda *_: _noop())

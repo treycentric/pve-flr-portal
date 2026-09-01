@@ -100,9 +100,14 @@ function fileGridState() {
       if (browseAvailable) this.browseInto(null);
     },
 
-    toggleManualDestEntry() {
-      this.restoreBrowsing = !this.restoreBrowsing;
-      if (this.restoreBrowsing) this.browseInto(this.restoreBrowsePath);
+    // mode is 'browse' or 'manual' - the segmented toggle above the
+    // destination picker calls this directly rather than a plain flip, so
+    // clicking the already-active side is a no-op instead of re-fetching.
+    setDestMode(mode) {
+      const wantBrowsing = mode === 'browse';
+      if (wantBrowsing === this.restoreBrowsing) return;
+      this.restoreBrowsing = wantBrowsing;
+      if (wantBrowsing) this.browseInto(this.restoreBrowsePath);
     },
 
     async browseInto(path) {

@@ -802,11 +802,42 @@ entry points at. Two reasons this matters, both raised in review:
     destination field is replaced by a small in-modal directory
     browser (`GET /api/restore-browse`, `backend/guest_browse.py`) —
     Up/Drives navigation, click a folder to descend, destination
-    mirrors the current position — with a "Enter path manually
-    instead" toggle back to plain typing for anyone who prefers it.
-    Browsing itself needs the same `Unrestricted` grant (no dedicated
-    QGA listing command), so it's simply absent, not merely disabled,
-    when only `FileWrite` is held.
+    mirrors the current position — with a segmented Browse/Manual
+    entry toggle above the picker (not a small link — a real regression
+    once tested, easy to miss) for anyone who prefers typing. Browsing
+    itself needs the same `Unrestricted` grant (no dedicated QGA
+    listing command), so it's simply absent, not merely disabled, when
+    only `FileWrite` is held.
+
+    **Real-world finding (2026-09-02):** the Windows subfolder listing
+    initially used `cmd /c dir <path> /b /ad` (bare names only), which
+    can't distinguish a real directory from a reparse point - clicking
+    into a legacy compatibility junction like `C:\Documents and
+    Settings` (which Windows deliberately blocks normal enumeration
+    into, even for SYSTEM, specifically to stop naive tools looping on
+    the redirect) surfaced a raw "File Not Found" with no indication
+    why. Switched the Windows subfolder listing from `dir` to
+    PowerShell (`Get-ChildItem -Directory` filtered on the
+    `ReparsePoint` attribute) so junctions/symlinked directories are
+    excluded from the listing outright rather than merely erroring
+    when clicked — the general fix, not a per-name workaround. The
+    path rides in as PowerShell's `$args[0]` (a separate guest-exec
+    argv element, passed the same way `find`'s path argument already
+    was on the POSIX side) rather than being interpolated into the
+    script string, so this doesn't introduce a new injection surface.
+    A small denylist of known junction names
+    (`_KNOWN_WINDOWS_JUNCTIONS` in `guest_browse.py`) stays as a
+    defensive fallback purely for manual-entry mode, where a user can
+    still type such a path directly — Windows blocks listing into it
+    either way, so the fallback just gives a clearer message than the
+    raw error in that one remaining path. **Unverified live:** the
+    PowerShell listing itself (this specific query/output shape)
+    hasn't been checked against a real guest the way the earlier
+    `cmd`/`wmic`/`dir` calls were — worth confirming output parses
+    cleanly and `ErrorAction Stop`/the `try`/`catch` actually produces
+    a non-zero exit on failure, since PowerShell's exit-code behavior
+    for script errors doesn't always follow the same convention as a
+    native command.
 - **Running-jobs indicator** — a new icon in the top bar between the
   guest/task picker and the user menu (matching the reference
   screenshot's placement), showing a small spinning ring around it
