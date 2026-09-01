@@ -9,3 +9,34 @@ services:
       - ./.env:/app/.env:ro
       - ./certs:/app/certs
     restart: unless-stopped
+
+  # Design C (docs/plan.md §7.6, issue #22) local testing only - not
+  # needed for ordinary use of the app. RESTORE_DATA_NICS' local_ip has
+  # to be an address the container can actually bind to from inside its
+  # own network namespace; the default service above uses Docker's
+  # bridge/NAT networking, which never gives a container the host's real
+  # LAN IP at all (only a private 172.x address), so a data-NIC entry
+  # naming a real subnet IP would fail to bind under it. host networking
+  # gives the container the host's real interfaces directly instead -
+  # same effect Docker's native macvlan/ipvlan drivers or a bare-metal/
+  # LXC deployment already get "for free". On Windows/Mac this needs
+  # Docker Desktop's "Enable host networking" setting turned on first
+  # (Settings > Resources > Network) - without it, network_mode: host is
+  # silently non-functional on Desktop, unlike on native Linux Docker
+  # hosts where it always works.
+  #
+  # `ports:` is deliberately omitted here - meaningless (and rejected by
+  # Compose alongside network_mode: host) once the container shares the
+  # host's own port namespace directly; PORT and RESTORE_DATA_NIC_PORT
+  # from .env bind straight onto the host instead.
+  #
+  # Opt in explicitly, this service is not started by a plain
+  # `docker compose up`: docker compose --profile hostnet up pve-flr-portal-hostnet
+  pve-flr-portal-hostnet:
+    build: .
+    network_mode: host
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./certs:/app/certs
+    restart: unless-stopped
+    profiles: ["hostnet"]

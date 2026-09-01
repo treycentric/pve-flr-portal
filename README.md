@@ -188,6 +188,15 @@ Reads `.env` from the repo root and persists the generated cert under
 login flows got exercised on both Python 3.14 (dev machine) and a
 clean Python 3.11 (the deploy target) during development.
 
+Testing Design C (network-pull restore, docs/plan.md §7.6 — still in
+development, not part of any release yet)? `RESTORE_DATA_NICS`' address
+needs to be one the container can actually bind to, which Docker's
+default bridge networking won't give you (a container never has the
+host's real LAN IP under it). Use the `hostnet` profile instead, which
+gives the container the host's real interfaces directly (on Windows/Mac
+this needs Docker Desktop's "Enable host networking" setting on first):
+`docker compose --profile hostnet up --build pve-flr-portal-hostnet`.
+
 ## Tests
 
 ```
