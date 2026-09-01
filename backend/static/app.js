@@ -734,27 +734,30 @@ function portalApp(rawSnapshots) {
         line.setAttribute('y2', tick.major ? '-8' : '-5');
         line.setAttribute('class', 'timeline-tick');
         g.appendChild(line);
-        if (tick.lines.length === 2) {
+        // The class follows tick.major (majors are bold), the layout follows
+        // how many lines the level asked for. The two are independent: a
+        // level-1 major is a single bold "11:00", a level-3 major is a
+        // two-line bold year/month.
+        if (tick.lines.length) {
+          const cls = tick.major ? 'timeline-tick-label--major' : 'timeline-tick-label';
           const text = document.createElementNS(NS, 'text');
           text.setAttribute('text-anchor', 'middle');
-          text.setAttribute('class', 'timeline-tick-label--month');
-          const topSpan = document.createElementNS(NS, 'tspan');
-          topSpan.setAttribute('x', '0');
-          topSpan.setAttribute('y', '14');
-          topSpan.textContent = tick.lines[0];
-          const botSpan = document.createElementNS(NS, 'tspan');
-          botSpan.setAttribute('x', '0');
-          botSpan.setAttribute('dy', '11');
-          botSpan.textContent = tick.lines[1];
-          text.appendChild(topSpan);
-          text.appendChild(botSpan);
-          g.appendChild(text);
-        } else if (tick.lines.length === 1) {
-          const text = document.createElementNS(NS, 'text');
-          text.setAttribute('y', '14');
-          text.setAttribute('text-anchor', 'middle');
-          text.setAttribute('class', 'timeline-tick-label');
-          text.textContent = tick.lines[0];
+          text.setAttribute('class', cls);
+          if (tick.lines.length === 2) {
+            const topSpan = document.createElementNS(NS, 'tspan');
+            topSpan.setAttribute('x', '0');
+            topSpan.setAttribute('y', '14');
+            topSpan.textContent = tick.lines[0];
+            const botSpan = document.createElementNS(NS, 'tspan');
+            botSpan.setAttribute('x', '0');
+            botSpan.setAttribute('dy', '11');
+            botSpan.textContent = tick.lines[1];
+            text.appendChild(topSpan);
+            text.appendChild(botSpan);
+          } else {
+            text.setAttribute('y', '14');
+            text.textContent = tick.lines[0];
+          }
           g.appendChild(text);
         }
         svg.appendChild(g);
