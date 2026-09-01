@@ -1,9 +1,10 @@
 import asyncio
+from dataclasses import replace as _replace
 
 import httpx
 import pytest
 
-from backend import guest_agent, pve_client
+from backend import guest_agent, pve_client, restore_download, restore_runner
 from backend.restore_jobs import RestoreJobManager, RestoreStatus
 from backend.restore_runner import run_restore
 
@@ -409,6 +410,197 @@ async def test_unsafe_destination_fails_before_any_exec_call(manager, session_da
     await run_restore(job, manager)
     assert job.status == RestoreStatus.FAILED
     assert "unsupported characters" in job.error.lower()
+
+
+# --- Design C (network-pull, docs/plan.md §7.6, issue #22) ----------------
+
+
+def _with_data_nics(monkeypatch, raw_json: str):
+    monkeypatch.setattr(restore_runner, "settings", _replace(restore_runner.settings, restore_data_nics_json=raw_json))
+
+
+async def test_design_c_unconfigured_falls_back_to_design_b_without_any_extra_calls(manager, session_data, monkeypatch):
+    # No RESTORE_DATA_NICS set (the default, and the default test env) -
+    # _try_design_c must bail out before making any live-ish call at all.
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    content = b"a" * (61440 + 100)
+    _patch_download(monkeypatch, content)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fail_if_called(*a, **kw):
+        raise AssertionError("Design C is unconfigured - should never probe the guest's network or a fetch tool")
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    exec_calls = []
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        exec_calls.append(argv)
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fail_if_called)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.DONE
+    # Went through the ordinary Design B path (mkdir, sh -c cat ..., test -f).
+    assert any(c[:2] == ["sh", "-c"] for c in exec_calls)
+
+
+async def test_design_c_no_subnet_match_falls_back_to_design_b(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    content = b"a" * (61440 + 100)
+    _patch_download(monkeypatch, content)
+    _with_data_nics(monkeypatch, '[{"cidr": "10.0.5.0/24", "local_ip": "10.0.5.5"}]')
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["192.168.1.50"]  # doesn't match the configured 10.0.5.0/24
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    exec_calls = []
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        exec_calls.append(argv)
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.DONE
+    assert any(c[:2] == ["sh", "-c"] for c in exec_calls)  # Design B's concat, not a fetch command
+    assert any("no configured data NIC matches" in line for line in job.log_lines)
+
+
+async def test_design_c_no_fetch_tool_falls_back_to_design_b(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    content = b"a" * (61440 + 100)
+    _patch_download(monkeypatch, content)
+    _with_data_nics(monkeypatch, '[{"cidr": "10.0.5.0/24", "local_ip": "10.0.5.5"}]')
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    exec_calls = []
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        exec_calls.append(argv)
+        if argv[:2] == ["sh", "-c"] and "command -v" in argv[2]:
+            return 1, "", "not found"  # every fetch-tool probe fails
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.DONE
+    assert any("no usable fetch tool found" in line for line in job.log_lines)
+    # Still ends up doing the real Design B concat (a "cat ... > dest" call, not just probes).
+    assert any(c[:2] == ["sh", "-c"] and "cat" in c[2] for c in exec_calls)
+
+
+async def test_design_c_used_when_nic_and_tool_are_both_available(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    content = b"a" * (61440 + 100)
+    _patch_download(monkeypatch, content)
+    _with_data_nics(monkeypatch, '[{"cidr": "10.0.5.0/24", "local_ip": "10.0.5.5"}]')
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    exec_calls = []
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        exec_calls.append(argv)
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""  # _ensure_destination_dir, runs before Design C is even attempted
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""  # curl is available - first POSIX candidate
+        if argv[0] == "curl":
+            return 0, "", ""  # the actual fetch
+        if argv[:2] == ["test", "-f"]:
+            return 0, "", ""  # _verify_destination_exists
+        raise AssertionError(f"unexpected exec call once Design C should have taken over: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.DONE
+    assert any(c[0] == "curl" for c in exec_calls)
+    assert not any(c[:2] == ["sh", "-c"] and "cat" in (c[2] if len(c) > 2 else "") for c in exec_calls)
+    assert any("fetching via curl" in line for line in job.log_lines)
+    assert any("fetch complete" in line for line in job.log_lines)
+    # A single-use download token was actually minted for this job -
+    # nothing in this fake flow consumes it (the real consumer is the
+    # download endpoint itself, exercised separately in test_endpoints.py).
+    assert len(restore_download._tokens) == 1
+    assert next(iter(restore_download._tokens.values())).job_id == job.id
+
+
+async def test_design_c_fetch_failure_fails_the_job_rather_than_falling_back(manager, session_data, monkeypatch):
+    # Once Design C has been confidently offered (a NIC and a tool were
+    # both found), a real failure during the fetch itself should be a
+    # clear job failure, never a silent retry via Design B.
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    content = b"a" * (61440 + 100)
+    _patch_download(monkeypatch, content)
+    _with_data_nics(monkeypatch, '[{"cidr": "10.0.5.0/24", "local_ip": "10.0.5.5"}]')
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""
+        if argv[0] == "curl":
+            return 1, "", "curl: (7) Failed to connect"
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.FAILED
+    assert "Design C fetch failed" in job.error
 
 
 # --- cancellation / errors / cleanup ---------------------------------------

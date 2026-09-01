@@ -3,10 +3,13 @@ import pytest
 from backend.restore_network_pull import (
     DataNic,
     InvalidDataNicConfig,
+    build_fetch_command,
     detect_fetch_tool,
     parse_data_nics,
     select_data_nic,
 )
+
+URL = "https://10.0.5.5:8008/api/restore-downloads/abc123"
 
 # --- parse_data_nics --------------------------------------------------
 
@@ -128,3 +131,81 @@ async def test_detect_fetch_tool_tolerates_a_probe_raising_and_tries_the_next_on
 
     assert await detect_fetch_tool(flaky, "windows") == "certutil"
     assert calls == ["powershell", "where"]
+
+
+# --- build_fetch_command --------------------------------------------------
+
+DEST_WIN = "C:\\Windows\\Temp\\hosts"
+DEST_POSIX = "/etc/hosts"
+
+
+def test_build_fetch_command_invoke_webrequest():
+    plan = build_fetch_command("Invoke-WebRequest", URL, DEST_WIN, "windows")
+    assert plan.stage_content is None
+    assert plan.exec_argv[0] == "powershell"
+    script = plan.exec_argv[-1]
+    assert URL in script and DEST_WIN in script
+    assert "Invoke-WebRequest" in script
+
+
+def test_build_fetch_command_certutil():
+    plan = build_fetch_command("certutil", URL, DEST_WIN, "windows")
+    assert plan.exec_argv == ["certutil", "-urlcache", "-split", "-f", URL, DEST_WIN]
+    assert plan.stage_content is None
+
+
+def test_build_fetch_command_bitsadmin():
+    plan = build_fetch_command("bitsadmin", URL, DEST_WIN, "windows")
+    assert plan.exec_argv[:2] == ["cmd", "/c"]
+    assert URL in plan.exec_argv[2] and DEST_WIN in plan.exec_argv[2]
+
+
+def test_build_fetch_command_cscript_requires_a_stage_path():
+    with pytest.raises(ValueError):
+        build_fetch_command("cscript", URL, DEST_WIN, "windows")
+
+
+def test_build_fetch_command_cscript_stages_a_vbs_script():
+    plan = build_fetch_command("cscript", URL, DEST_WIN, "windows", stage_path="C:\\Windows\\Temp\\x.vbs")
+    assert plan.exec_argv == ["cscript", "//nologo", "//B", "C:\\Windows\\Temp\\x.vbs"]
+    assert plan.stage_path == "C:\\Windows\\Temp\\x.vbs"
+    assert URL in plan.stage_content
+    assert DEST_WIN in plan.stage_content
+    assert "WinHttp.WinHttpRequest" in plan.stage_content
+
+
+def test_build_fetch_command_curl():
+    plan = build_fetch_command("curl", URL, DEST_POSIX, "linux")
+    assert plan.exec_argv == ["curl", "-fsSL", "-o", DEST_POSIX, URL]
+
+
+def test_build_fetch_command_wget():
+    plan = build_fetch_command("wget", URL, DEST_POSIX, "linux")
+    assert plan.exec_argv == ["wget", "-q", "-O", DEST_POSIX, URL]
+
+
+def test_build_fetch_command_python():
+    plan = build_fetch_command("python3", URL, DEST_POSIX, "linux")
+    assert plan.exec_argv[0] == "python3"
+    assert URL in plan.exec_argv[-1] and DEST_POSIX in plan.exec_argv[-1]
+    assert "urlretrieve" in plan.exec_argv[-1]
+
+
+def test_build_fetch_command_bash_devtcp_over_plain_http():
+    plan = build_fetch_command("bash", "http://10.0.5.5:8008/api/restore-downloads/abc123", DEST_POSIX, "linux")
+    assert plan.exec_argv[0] == "bash"
+    script = plan.exec_argv[-1]
+    assert "/dev/tcp/10.0.5.5/8008" in script
+    assert DEST_POSIX in script
+
+
+def test_build_fetch_command_bash_devtcp_rejects_https_url():
+    # /dev/tcp is a plain socket - bash has no TLS, so an https URL would
+    # fail confusingly in the guest rather than cleanly here.
+    with pytest.raises(ValueError):
+        build_fetch_command("bash", URL, DEST_POSIX, "linux")  # URL is https://
+
+
+def test_build_fetch_command_unknown_tool_raises():
+    with pytest.raises(ValueError):
+        build_fetch_command("magic", URL, DEST_POSIX, "linux")

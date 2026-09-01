@@ -1198,14 +1198,49 @@ itself.
    unauthenticated (the guest has no PVE session and must never get
    one), re-streams from PVE using the *job's own* session snapshot.
    Not reachable yet: nothing mints a token outside of tests.
-4. **Not started.** Bootstrap script generation per OS/tool, wiring
-   `detect_fetch_tool()` + `select_data_nic()` + token minting into
-   `restore_runner.run_restore()` as an automatic preference over
-   Design B's scratch/concat path when available (same "not a
-   user-facing choice" principle as A/B), and the actual per-interface
-   HTTPS bind changes in `run.py`. This is the part that changes live
-   restore behavior, so it's being held for a separate check-in before
-   starting rather than folded into the same pass as steps 1–3.
+4. ~~Bootstrap command generation + wiring into `run_restore()`~~ —
+   **done**: `restore_network_pull.build_fetch_command()` builds the
+   actual guest-exec command per detected tool (`Invoke-WebRequest`/
+   `certutil`/`bitsadmin`/`curl`/`wget`/`python`/`bash` — all single
+   guest-exec calls, no staged script needed for any of these; only
+   `cscript` would need one, see the caveat below). `restore_runner.
+   _try_design_c()` wires `select_data_nic()` + `detect_fetch_tool()` +
+   `restore_download.mint_token()` + the built command into
+   `run_restore()`'s multi-chunk branch, tried automatically ahead of
+   Design B's scratch-write+concat whenever it's eligible — silently
+   falling back to Design B the moment any prerequisite isn't met (no
+   data NICs configured — the default, and therefore **zero behavior
+   change for any deployment that hasn't opted in** — no subnet match,
+   no fetch tool), but raising a clear, job-failing error if it *was*
+   eligible and the fetch itself then failed, rather than masking that
+   by quietly retrying via a different mechanism.
+
+   **Two things not yet done, both logged clearly rather than silently
+   wrong:**
+   - `cscript` is detected as a candidate but never actually used yet —
+     it needs a `.vbs` script staged via `agent/file-write` first (no
+     stdin piping through `agent/exec`), and that staging/cleanup isn't
+     threaded through `_try_design_c()` yet. A guest whose *only* usable
+     tool is `cscript` currently falls back to Design B.
+   - The actual per-interface HTTPS/HTTP bind changes in `run.py` (so a
+     data NIC really serves the download route) are **not started** —
+     `_try_design_c()` builds a real URL (`http://<nic-ip>:<port>/...`)
+     today, but nothing is listening there yet outside of a normal
+     `TestClient` in tests. Live end-to-end use needs this plus real
+     multi-NIC deployment to actually test against.
+
+   **Deliberate design decision made while wiring this in: the download
+   URL is `http://`, never `https://`.** Teaching every one of six
+   different guest-side fetch tools to trust this app's own (self-signed
+   by default, §7.3) certificate individually would be its own source of
+   subtle bugs, and `bash`'s `/dev/tcp` fallback cannot speak TLS at all
+   regardless (`build_fetch_command()` raises clearly if asked to, rather
+   than generating a script that would fail confusingly in the guest).
+   The single-use, short-TTL token is the real access control on this
+   one route; the NIC segmentation design above firewalls it further.
+   The rest of the app (UI, PVE API calls) stays HTTPS-only as always —
+   this is a narrow, deliberate tradeoff on one specific route, not a
+   general relaxation.
 5. **Not started.** Deploy-level: LXC/Docker additional-NIC
    provisioning, firewall rule examples, and the user-facing
    provisioning documentation (README.md section or

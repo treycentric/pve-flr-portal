@@ -162,6 +162,44 @@ async def _get_agent_json(
             return None
 
 
+def _extract_ip_addresses(network_interfaces: list[dict] | None) -> list[str]:
+    """Flattens QGA's network-get-interfaces response (one entry per NIC,
+    each with its own ip-addresses list) down to a plain list of address
+    strings - loopback excluded, since it can never match a configured
+    data-NIC subnet and would just be noise for Design C's
+    select_data_nic() (docs/plan.md §7.6, issue #22) to skip over."""
+    addresses = []
+    for iface in network_interfaces or []:
+        for entry in iface.get("ip-addresses") or []:
+            ip = entry.get("ip-address")
+            if ip and not ip.startswith("127.") and ip != "::1":
+                addresses.append(ip)
+    return addresses
+
+
+async def get_guest_ip_addresses(session: SessionData, guest_type: str, vmid: str) -> list[str]:
+    """Design C (docs/plan.md §7.6, issue #22): the guest's own reported
+    IP(s), via QGA's network-get-interfaces (already-wrapped QMP call, no
+    new PVE API surface) - used to pick which configured data NIC is
+    actually reachable from this guest's subnet. Same
+    tolerate-failure-as-no-info pattern as agent/info and get-osinfo
+    above: a guest that can't be asked (agent not running, caller lacks
+    VM.GuestAgent.Audit, LXC container with no QGA at all) just gets an
+    empty list back, which select_data_nic() correctly treats as "no
+    match" rather than this raising and failing the whole restore over a
+    capability check."""
+    node_type = api_node_type(guest_type)
+    if node_type != "qemu":  # LXC containers have no qemu-guest-agent
+        return []
+    headers = pve_headers(session)
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        data = await _get_agent_json(
+            client, vmid, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/network-get-interfaces", headers, retry=False
+        )
+    result = (data or {}).get("result") if isinstance(data, dict) else None
+    return _extract_ip_addresses(result)
+
+
 async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: str) -> RestoreCapabilities:
     """Live orchestration: fetches the four raw facts, then hands them to
     parse_capabilities(). agent/info and get-osinfo failures (guest agent

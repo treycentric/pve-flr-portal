@@ -334,3 +334,58 @@ async def test_get_restore_capabilities_missing_path_key_means_no_privileges(ses
     caps = await get_restore_capabilities(session_data, "vm", "133")
     assert not caps.design_a.available
     assert not caps.design_b.available
+
+
+# --- get_guest_ip_addresses (Design C, docs/plan.md §7.6, issue #22) ----
+
+
+def test_extract_ip_addresses_flattens_and_skips_loopback():
+    interfaces = [
+        {"name": "lo", "ip-addresses": [{"ip-address": "127.0.0.1", "ip-address-type": "ipv4"}]},
+        {
+            "name": "eth0",
+            "ip-addresses": [
+                {"ip-address": "10.0.5.42", "ip-address-type": "ipv4"},
+                {"ip-address": "fe80::1", "ip-address-type": "ipv6"},
+            ],
+        },
+    ]
+    assert guest_agent._extract_ip_addresses(interfaces) == ["10.0.5.42", "fe80::1"]
+
+
+def test_extract_ip_addresses_tolerates_none_or_empty():
+    assert guest_agent._extract_ip_addresses(None) == []
+    assert guest_agent._extract_ip_addresses([]) == []
+    assert guest_agent._extract_ip_addresses([{"name": "eth0"}]) == []
+
+
+@respx.mock
+async def test_get_guest_ip_addresses_happy_path(session_data):
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/network-get-interfaces").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "result": [
+                        {"name": "lo", "ip-addresses": [{"ip-address": "127.0.0.1"}]},
+                        {"name": "eth0", "ip-addresses": [{"ip-address": "10.0.5.42"}]},
+                    ]
+                }
+            },
+        )
+    )
+    assert await guest_agent.get_guest_ip_addresses(session_data, "vm", "133") == ["10.0.5.42"]
+
+
+async def test_get_guest_ip_addresses_lxc_returns_empty_without_any_call(session_data, monkeypatch):
+    async def fail_if_called(*a, **kw):
+        raise AssertionError("LXC containers have no qemu-guest-agent - should never be called")
+
+    monkeypatch.setattr(guest_agent, "_get_agent_json", fail_if_called)
+    assert await guest_agent.get_guest_ip_addresses(session_data, "ct", "133") == []
+
+
+@respx.mock
+async def test_get_guest_ip_addresses_degrades_to_empty_on_failure(session_data):
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/network-get-interfaces").mock(return_value=httpx.Response(403))
+    assert await guest_agent.get_guest_ip_addresses(session_data, "vm", "133") == []

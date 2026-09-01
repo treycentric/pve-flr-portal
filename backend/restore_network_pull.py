@@ -120,6 +120,120 @@ def _candidates_for(guest_os_family: str | None) -> list[tuple[str, list[str]]]:
     return []  # unknown OS family - nothing to safely probe
 
 
+@dataclass(frozen=True)
+class FetchPlan:
+    """What it takes to actually run one fetch-tool's command in the
+    guest. `stage_content`/`stage_path` are set only for tools that need
+    a script staged via `agent/file-write` first (currently just
+    `cscript`, which needs a real .vbs file - `agent/exec` has no stdin
+    piping to hand it a script inline); every other tool's fetch is a
+    single guest-exec call, `exec_argv` alone."""
+
+    exec_argv: list[str]
+    stage_content: str | None = None
+    stage_path: str | None = None
+
+
+def build_fetch_command(
+    tool: str, url: str, destination: str, guest_os_family: str | None, stage_path: str | None = None
+) -> FetchPlan:
+    """Builds the guest-exec command for one detected fetch tool. `url`
+    and `destination` are embedded directly in shell/PowerShell-
+    interpreted command strings for several of these tools - the same
+    trust assumption `restore_runner.py`'s `_concat_chunks`/
+    `_restore_mtime` already make: `destination` must already have
+    passed `pve_client.check_path_safe()` (done once, up front, by the
+    caller before any of this runs), and `url` is never user input - it's
+    built entirely from this app's own validated pieces (a configured
+    data-NIC IP, this app's own port, a random token), never anything a
+    guest or a user supplies.
+
+    `stage_path` is required for `cscript` (see FetchPlan's docstring)
+    and ignored for every other tool - the caller picks the actual path
+    (typically via `restore_chunking.scratch_dir_path`/a job-scoped
+    filename) since only it knows the job's scratch directory.
+
+    **Unverified live** (docs/plan.md §7.6): none of these have been
+    tested against a real guest yet - same caution this project already
+    applies elsewhere (certutil's hash-output shape, `copy /b`'s exit
+    code) before trusting a Windows/POSIX command's exact behavior.
+    """
+    if tool == "Invoke-WebRequest":
+        script = f"Invoke-WebRequest -Uri '{url}' -OutFile '{destination}'"
+        return FetchPlan(exec_argv=["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+    if tool == "certutil":
+        return FetchPlan(exec_argv=["certutil", "-urlcache", "-split", "-f", url, destination])
+    if tool == "bitsadmin":
+        command = f'bitsadmin /transfer pve-flr-portal-restore /priority normal "{url}" "{destination}"'
+        return FetchPlan(exec_argv=["cmd", "/c", command])
+    if tool == "cscript":
+        if not stage_path:
+            raise ValueError("cscript needs a stage_path to write its .vbs script to")
+        vbs = (
+            'Dim http, stream\n'
+            'Set http = CreateObject("WinHttp.WinHttpRequest.5.1")\n'
+            f'http.Open "GET", "{url}", False\n'
+            "http.Send\n"
+            'Set stream = CreateObject("ADODB.Stream")\n'
+            "stream.Type = 1\n"  # binary
+            "stream.Open\n"
+            "stream.Write http.ResponseBody\n"
+            f'stream.SaveToFile "{destination}", 2\n'  # 2 = overwrite
+            "stream.Close\n"
+        )
+        return FetchPlan(
+            exec_argv=["cscript", "//nologo", "//B", stage_path],
+            stage_content=vbs,
+            stage_path=stage_path,
+        )
+    if tool == "curl":
+        return FetchPlan(exec_argv=["curl", "-fsSL", "-o", destination, url])
+    if tool == "wget":
+        return FetchPlan(exec_argv=["wget", "-q", "-O", destination, url])
+    if tool in ("python3", "python"):
+        py = f"import urllib.request; urllib.request.urlretrieve({url!r}, {destination!r})"
+        return FetchPlan(exec_argv=[tool, "-c", py])
+    if tool == "bash":
+        # Last resort: a hand-rolled HTTP/1.0 GET over bash's /dev/tcp
+        # pseudo-device, no external binary at all. Parses the URL's
+        # host/port/path in Python (this app's own validated pieces, per
+        # this function's docstring - never guest input) so the guest
+        # only ever has to run a fixed-shape script, then strips the
+        # HTTP response headers (everything up to the first blank line)
+        # before writing the rest to the destination.
+        #
+        # Real limitation, not an oversight: /dev/tcp is a plain TCP
+        # socket - bash has no built-in TLS, so this cannot speak HTTPS.
+        # Every other tool on this list (even certutil/bitsadmin) handles
+        # TLS natively; this is the one candidate that can't, which is
+        # exactly why it's last in the priority list. Rather than
+        # generate a script that will fail confusingly against an https
+        # URL, this raises clearly so the caller finds out now.
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+        if parts.scheme != "http":
+            raise ValueError(
+                "The bash /dev/tcp fetch fallback cannot speak TLS - it only works against a plain "
+                f"http:// download URL, got {url!r}. If this is the only available fetch tool for this "
+                "guest, Design C isn't usable here unless the data-NIC download route is served over "
+                "plain HTTP (acceptable given it's already firewalled/token-gated, per docs/plan.md §7.6)."
+            )
+        host = parts.hostname
+        port = parts.port or 80
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        script = (
+            f"exec 3<>/dev/tcp/{host}/{port}\n"
+            f'printf "GET %s HTTP/1.0\\r\\nHost: %s\\r\\nConnection: close\\r\\n\\r\\n" "{path}" "{host}" >&3\n'
+            "awk 'f{print} /^\\r$/{f=1}' <&3 > "
+            f"'{destination}'\n"
+        )
+        return FetchPlan(exec_argv=["bash", "-c", script])
+    raise ValueError(f"Unknown fetch tool: {tool!r}")
+
+
 async def detect_fetch_tool(exec_fn: ExecFn, guest_os_family: str | None) -> str | None:
     """Walks the priority list for this guest's OS family, running one
     cheap guest-exec probe per candidate, and returns the name of the

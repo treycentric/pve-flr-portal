@@ -77,6 +77,15 @@ class Settings:
     # kick off the bootstrap script and for it to start the fetch, short
     # enough that a leaked/logged URL isn't useful for long.
     restore_download_token_ttl_seconds: float
+    # The port a Design C download URL points at on the chosen data NIC.
+    # 0 (default) means "same as PORT" - only worth overriding once the
+    # actual per-interface bind work (docs/plan.md §7.6, still not
+    # started) stands up a listener on the data NIC(s) that isn't just
+    # the same process/port the main UI+PVE-API listener already uses.
+    # Deliberately plain HTTP, never HTTPS, on this one route/NIC pair -
+    # see the "why HTTP, not HTTPS" note in restore_runner.py's
+    # _try_design_c().
+    restore_data_nic_port: int
 
 
 settings = Settings(
@@ -90,4 +99,5 @@ settings = Settings(
     guest_agent_min_command_gap_seconds=_float("GUEST_AGENT_MIN_COMMAND_GAP_SECONDS", 0.0),
     restore_data_nics_json=_get("RESTORE_DATA_NICS", "[]"),
     restore_download_token_ttl_seconds=_float("RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS", 120.0),
+    restore_data_nic_port=_int("RESTORE_DATA_NIC_PORT", 0),
 )

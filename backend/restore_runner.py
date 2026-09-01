@@ -8,6 +8,13 @@ means guest-exec is needed; any one of them does. When it is, the
 caller's `VM.GuestAgent.Unrestricted` grant is re-checked here (never
 trusted from the earlier `/api/restore-capabilities` response used to
 build the confirmation UI).
+
+Whenever more than one chunk would otherwise be needed, `_try_design_c()`
+(docs/plan.md §7.6, issue #22) is tried first as a faster alternative to
+the scratch-write+concat path below it - silently, and only when an
+admin has actually configured a data NIC that matches the guest's own
+subnet; every other guest keeps going through the unchanged Design B
+path exactly as before.
 """
 import asyncio
 import hashlib
@@ -16,8 +23,9 @@ import posixpath
 
 import httpx
 
-from . import guest_agent, pve_client
+from . import guest_agent, pve_client, restore_download, restore_network_pull
 from .auth import ensure_fresh_ticket
+from .config import settings
 from .restore_chunking import (
     Chunk,
     needs_guest_exec,
@@ -120,6 +128,78 @@ async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | Non
             "Concatenation reported success but the destination file wasn't actually created - "
             "check that the destination directory exists and is writable."
         )
+
+
+async def _try_design_c(job: RestoreJob, guest_os_family: str | None) -> bool:
+    """Design C (docs/plan.md §7.6, issue #22): the network-pull path -
+    the guest fetches its own file over its own NIC instead of this app
+    chunking it over the slow QMP/virtio-serial channel. Attempted only
+    as an alternative to Design B's scratch-write+concat (the caller
+    only calls this when more than one chunk would otherwise be needed),
+    and only ever silently: returns False - meaning "not eligible, fall
+    back to Design B" - the moment any prerequisite isn't met (no data
+    NICs configured at all, the common case; the guest's reported
+    subnet doesn't match a configured one; no usable fetch tool found;
+    the detected tool can't build a command for this URL). Once truly
+    eligible (a NIC AND a tool were both found and a command was built),
+    an actual failure during the fetch itself raises rather than falling
+    back - having confidently offered Design C and then had it fail
+    partway is a real problem worth surfacing clearly, not masking by
+    silently retrying via a completely different mechanism.
+
+    **Why the download URL is plain HTTP, never HTTPS:** every guest
+    fetch tool this app might use would otherwise have to be individually
+    taught to trust this app's own (self-signed by default, docs/plan.md
+    §7.3) certificate, and `bash`'s `/dev/tcp` fallback cannot speak TLS
+    at all regardless. The token (restore_download.py - single-use,
+    short TTL) is the real access control on this one route; the NIC
+    segmentation design (§7.6) firewalls it to begin with. Skipping TLS
+    here is a deliberate, narrow tradeoff, not an oversight - the rest of
+    this app (UI, PVE API calls) stays HTTPS-only as always.
+
+    **Not yet wired: `cscript` staging.** Detected as a candidate by
+    `detect_fetch_tool()`, but building its command needs a scratch file
+    written first (`build_fetch_command()`'s docstring) - that staging,
+    and its cleanup, isn't threaded through here yet, so a guest whose
+    *only* usable tool is `cscript` currently falls back to Design B
+    rather than actually using it. Follow-up, not a silent bug: logged
+    clearly below so it's visible in a real job's log if it happens.
+    """
+    data_nics = restore_network_pull.parse_data_nics(settings.restore_data_nics_json)
+    if not data_nics:
+        return False  # Design C unconfigured - the common case, cheapest check first
+
+    guest_ips = await guest_agent.get_guest_ip_addresses(job.session, job.guest_type, job.vmid)
+    nic = restore_network_pull.select_data_nic(guest_ips, data_nics)
+    if nic is None:
+        job.log("Design C: no configured data NIC matches this guest's reported subnet - using Design B.")
+        return False
+
+    tool = await restore_network_pull.detect_fetch_tool(lambda argv: _exec(job, argv), guest_os_family)
+    if tool is None:
+        job.log("Design C: no usable fetch tool found in the guest - using Design B.")
+        return False
+    if tool == "cscript":
+        job.log("Design C: only cscript was detected, and its script-staging isn't wired up yet - using Design B.")
+        return False
+
+    port = settings.restore_data_nic_port or settings.port
+    token = restore_download.mint_token(job.id)
+    url = f"http://{nic.local_ip}:{port}/api/restore-downloads/{token}"
+
+    try:
+        plan = restore_network_pull.build_fetch_command(tool, url, job.destination, guest_os_family)
+    except ValueError as exc:
+        job.log(f"Design C: {tool} can't be used for this download ({exc}) - using Design B.")
+        return False
+
+    job.log(f"Design C: fetching via {tool} over {nic.local_ip} (matches the guest's own subnet).")
+    exitcode, out, err = await _exec(job, plan.exec_argv)
+    if exitcode != 0:
+        raise RuntimeError(f"Design C fetch failed via {tool}: {err.strip() or out.strip()}")
+    await _verify_destination_exists(job, guest_os_family)
+    job.log("Design C: fetch complete.")
+    return True
 
 
 async def _concat_chunks(job: RestoreJob, chunk_paths: list[str], guest_os_family: str | None) -> None:
@@ -280,6 +360,16 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             )
             job.progress_current += 1
             job.log("Wrote the file directly (single chunk, exec still needed for a later step).")
+        elif await _try_design_c(job, guest_os_family):
+            # Design C (docs/plan.md §7.6, issue #22): a faster
+            # alternative to the scratch-write+concat path below, only
+            # ever taken when an admin has actually configured a data
+            # NIC that matches this guest's subnet - see _try_design_c's
+            # docstring for the full eligibility chain. Counts as the
+            # same number of progress units the Design B path below
+            # would have used (chunks + concat), so the percentage math
+            # stays consistent with progress_total either way.
+            job.progress_current += len(chunks) + 1
         else:
             scratch_dir = scratch_dir_path(guest_os_family, job.id)
             job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
