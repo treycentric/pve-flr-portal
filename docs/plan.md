@@ -1054,10 +1054,39 @@ privilege tier, but Design C adds "the guest can reach this app" as a
 new dependency on top of it, a meaningfully larger blast radius than
 Design A's `FileWrite`-only path); guest→portal IP reachability (see
 network segmentation below); a fetch tool already present in the guest
-(`curl` on modern Linux, `Invoke-WebRequest`/`curl.exe` on Windows
-10+/Server 2019+ — needs a capability check, same spirit as `agent/info`
-detection, not an assumption for older guests); `guest-exec` unblocked
+(see fallback chain below — needs a capability check, same spirit as
+`agent/info` detection, never an assumption); `guest-exec` unblocked
 (same RHEL-family caveat as Design B).
+
+**Fetch-tool fallback chain.** "Living off the land" (assuming
+`curl`/`Invoke-WebRequest` is present) is exactly the kind of assumption
+this project has been burned by before (`certutil`'s output shape,
+`copy /b`'s exit code, `wmic`'s slowness) — so Design C probes for a
+fetch tool rather than assuming one, and degrades gracefully rather than
+failing outright when the preferred one is missing. Probe cheaply via
+`guest-exec` (a `--version`/`where`/`command -v` style check per
+candidate, cached per job like the rest of `restoreCaps`) and walk a
+priority list per guest OS family, picking the first that's actually
+present:
+- **Windows:** `Invoke-WebRequest` (PowerShell 3.0+, the common case) →
+  `certutil -urlcache -f <url> <dest>` (a genuine LOLBin already used
+  elsewhere in this app for hashing, present on stock Windows without
+  PowerShell) → `bitsadmin /transfer` (deprecated but still present on
+  older Server builds) → a tiny VBScript one-liner via `cscript`
+  (`WinHttp.WinHttpRequest` COM object — works back to very old Windows,
+  last resort given how dated it is).
+- **Linux/BSD:** `curl` → `wget` → `python3 -c "urllib.request..."` /
+  `python -c` (common on most distros even when neither HTTP client is
+  installed) → bash's `/dev/tcp` pseudo-device for a hand-rolled raw
+  HTTP GET (no external binary at all, but bash-specific — doesn't work
+  under a POSIX `/bin/sh` guest-exec shell, so only reachable if bash is
+  confirmed present).
+- **If nothing on the list is available:** Design C simply isn't offered
+  for that job — same automatic, silent fallback to Design B that
+  already happens when `VM.GuestAgent.Unrestricted` isn't granted or the
+  guest OS family can't be determined. Never a hard failure just because
+  the fast path isn't available; Design B is the always-available floor
+  this degrades to.
 
 **Network segmentation.** Design C is the first (and so far only)
 feature where the guest genuinely needs a network path to this app —
