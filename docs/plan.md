@@ -996,16 +996,40 @@ entry points at. Two reasons this matters, both raised in review:
    Fixed with two additions to `restore_runner.py`, both guest-OS-aware
    (`ntpath`/`posixpath` for the parent-directory math): a new
    `_ensure_destination_dir()` creates the destination's parent
-   directory up front (`cmd /c if not exist ... mkdir`/`mkdir -p`,
-   tolerant of it already existing) before any write happens, and a new
-   `_verify_destination_exists()` runs immediately after concatenation
-   — a direct existence check (`cmd /c if exist ...`/`test -f`) that
+   directory up front (tolerant of it already existing) before any
+   write happens, and a new `_verify_destination_exists()` runs
+   immediately after concatenation — a direct existence check that
    raises a clear, specific error right there if concatenation silently
    didn't produce the file, rather than letting the failure surface
-   confusingly in whatever step happens to run next. Confirms the
-   general lesson from the browse feature's `dir`/`wmic` findings
-   above: a Windows shell command's exit code alone is not always
-   trustworthy evidence that it did what it claims.
+   confusingly in whatever step happens to run next (Windows commands
+   for both corrected in the finding just below, after the very first
+   live test). Confirms the general lesson from the browse feature's
+   `dir`/`wmic` findings above: a Windows shell command's exit code
+   alone is not always trustworthy evidence that it did what it claims.
+
+   **Real-world finding (2026-09-01), first live test of the two
+   functions above:** their original Windows commands
+   (`cmd /c if not exist "X" mkdir "X"` / `cmd /c if exist "X" (echo
+   FOUND)`) had never actually run against a real Windows guest before
+   this point, and the very first live restore attempt after adding
+   them failed - not with a missing-directory problem this time, but
+   with `_ensure_destination_dir()` itself: "The filename, directory
+   name, or volume label syntax is incorrect" against a destination
+   path that was completely valid. Root cause: `cmd.exe`'s handling of
+   *multiple* embedded double-quoted segments on one `/c` command line
+   is unreliable - unlike `_concat_chunks()`'s superficially similar
+   `copy /b "a"+"b" "dest"`, which had at least run without erroring in
+   an earlier live test (though that test never actually proved correct
+   quote-handling, only that a missing directory didn't crash it).
+   Fixed by switching both functions to PowerShell (`New-Item -Force`/
+   `Test-Path -LiteralPath`, single-quoted literals) - the exact pattern
+   `_restore_mtime()` already used successfully in the *previous* live
+   finding above, which is the one Windows code path in this whole
+   feature that had genuine confirmed-correct field behavior before
+   this. `_concat_chunks()` itself is left as-is for now - it hasn't
+   been shown to actually fail, and per this project's practice of not
+   fixing what isn't confirmed broken, it stays on `cmd /c` until (if
+   ever) a live test says otherwise.
 
 Each step gets its own pytest coverage (chunking/base64 math,
 capability-object construction from fake responses, job lifecycle

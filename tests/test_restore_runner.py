@@ -273,8 +273,10 @@ async def test_restore_metadata_runs_powershell_on_windows(manager, session_data
     await run_restore(job, manager)
 
     assert job.status == RestoreStatus.DONE
-    ps_call = next(c for c in exec_calls if c[0] == "powershell")
-    assert "LastWriteTime" in ps_call[-1]
+    # Two PowerShell calls happen now (New-Item for the destination dir,
+    # then this one for the mtime) - filter to the one that actually sets
+    # LastWriteTime rather than assuming the first PowerShell call is it.
+    ps_call = next(c for c in exec_calls if c[0] == "powershell" and "LastWriteTime" in c[-1])
     assert "FromUnixTimeSeconds(1700000000)" in ps_call[-1]
     assert job.destination in ps_call[-1]
 
@@ -382,9 +384,10 @@ async def test_verify_windows_parses_certutil_output(manager, session_data, monk
     )
 
     async def fake_exec(session, guest_type, vmid, argv):
-        # Ensuring the destination directory exists runs first (cmd
-        # /c mkdir); the certutil hash check is the last exec call.
-        if argv[0] == "cmd":
+        # Ensuring the destination directory exists runs first
+        # (PowerShell New-Item); the certutil hash check is the last
+        # exec call.
+        if argv[0] == "powershell":
             return 0, "", ""
         assert argv[0] == "certutil"
         return 0, certutil_output, ""

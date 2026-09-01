@@ -100,11 +100,23 @@ async def _ensure_destination_dir(job: RestoreJob, guest_os_family: str | None) 
     failure mode - while never actually creating the file, which then
     failed confusingly two steps later in metadata restore ("Cannot find
     path ... because it does not exist"), docs/plan.md §7.5. Tolerant of
-    the directory already existing (Windows `mkdir` errors on that;
-    `mkdir -p` doesn't)."""
+    the directory already existing.
+
+    Windows uses PowerShell's `New-Item -Force` (idempotent - no
+    separate exists-check needed) rather than `cmd /c if not exist "X"
+    mkdir "X"`, which this function originally used: confirmed live
+    2026-09-01 that cmd.exe's handling of multiple embedded double-quoted
+    segments on one `/c` line is unreliable ("The filename, directory
+    name, or volume label syntax is incorrect" against a perfectly valid
+    path). Single-quoted PowerShell literal instead, matching
+    `_restore_mtime()`'s already-live-verified pattern - safe for the
+    same reason: `pve_client.check_path_safe()` (called once, up front,
+    before any exec step runs) already rejects `'` along with every
+    other shell-metacharacter."""
     if guest_os_family == "windows":
         parent = ntpath.dirname(job.destination.rstrip("\\")) or job.destination
-        exitcode, out, err = await _exec(job, ["cmd", "/c", f'if not exist "{parent}" mkdir "{parent}"'])
+        script = f"New-Item -ItemType Directory -Force -Path '{parent}' | Out-Null"
+        exitcode, out, err = await _exec(job, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
     else:
         parent = posixpath.dirname(job.destination.rstrip("/")) or "/"
         exitcode, out, err = await _exec(job, ["mkdir", "-p", parent])
@@ -116,9 +128,14 @@ async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | Non
     """A direct existence check right after concatenation, because its
     exit code alone isn't trustworthy enough (see _ensure_destination_dir)
     - catches a silent failure here, with a clear message, instead of
-    letting it surface confusingly in a later step."""
+    letting it surface confusingly in a later step.
+
+    Windows uses PowerShell's `Test-Path -LiteralPath`, not `cmd /c if
+    exist "X" (...)` - see `_ensure_destination_dir()`'s docstring for
+    why `cmd /c` with embedded quotes is being moved away from here."""
     if guest_os_family == "windows":
-        exitcode, out, _err = await _exec(job, ["cmd", "/c", f'if exist "{job.destination}" (echo FOUND)'])
+        script = f"if (Test-Path -LiteralPath '{job.destination}') {{ Write-Output 'FOUND' }}"
+        exitcode, out, _err = await _exec(job, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
         exists = "FOUND" in out
     else:
         exitcode, _out, _err = await _exec(job, ["test", "-f", job.destination])
