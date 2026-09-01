@@ -141,13 +141,28 @@ async def list_directories(
 
     if is_windows:
         if not path:
+            # PowerShell's Get-PSDrive, not `wmic` - `wmic` is legacy/
+            # deprecated and goes through the WMI provider host (winmgmt),
+            # which has real cold-start overhead, especially on first use
+            # after boot; observed as noticeable sluggishness in practice.
+            # Get-PSDrive is a native cmdlet with no WMI round-trip, and
+            # keeps this consistent with the subfolder listing below,
+            # which already switched to PowerShell.
             exitcode, out, err = await _run_exec(
-                session, node_type, vmid, ["cmd", "/c", "wmic", "logicaldisk", "get", "caption"]
+                session,
+                node_type,
+                vmid,
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    "Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root",
+                ],
             )
             if exitcode != 0:
                 raise ListingError(err.strip() or out.strip() or f"Listing failed (exit {exitcode})")
-            names = [ln.strip() for ln in out.splitlines() if ln.strip() and ln.strip().lower() != "caption"]
-            entries = [{"name": n, "path": n + "\\"} for n in names]
+            # Each line is already a root like "C:\" - Get-PSDrive's .Root
+            # includes the trailing separator.
+            roots = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            entries = [{"name": r.rstrip("\\"), "path": r} for r in roots]
             return {"path": None, "parent": None, "separator": sep, "entries": entries}
 
         # PowerShell, not `dir`, because filtering out junctions/symlinked

@@ -845,6 +845,15 @@ entry points at. Two reasons this matters, both raised in review:
     anything else ($ variables, backticks) that the denylist doesn't
     already block for other reasons. Guarded by a regression test
     inspecting the actual `command` array sent to `agent/exec`.
+
+    **Real-world finding (2026-09-02):** the Windows drive list
+    originally used `cmd /c wmic logicaldisk get caption` and was
+    observed as noticeably sluggish on first use. `wmic` is legacy/
+    deprecated and goes through the WMI provider host (`winmgmt`),
+    which has real cold-start overhead, especially right after boot.
+    Switched to PowerShell's `Get-PSDrive -PSProvider FileSystem` (no
+    WMI round-trip), which also makes both the drive-list and
+    subfolder-listing calls consistent on one tool instead of two.
 - **Running-jobs indicator** — a new icon in the top bar between the
   guest/task picker and the user menu (matching the reference
   screenshot's placement), showing a small spinning ring around it

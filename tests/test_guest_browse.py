@@ -85,15 +85,32 @@ async def test_list_directories_linux_subfolder_has_parent(session_data):
 async def test_list_directories_windows_drive_list(session_data):
     _exec_route().mock(return_value=httpx.Response(200, json={"data": {"pid": 7}}))
     _status_route().mock(
-        return_value=httpx.Response(
-            200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "Caption\r\nC:\r\nD:\r\n\r\n"}}
-        )
+        return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "C:\\\r\nD:\\\r\n"}})
     )
     result = await list_directories(session_data, "vm", "133", "windows", None)
     assert result["path"] is None
     assert result["parent"] is None
     assert result["separator"] == "\\"
     assert result["entries"] == [{"name": "C:", "path": "C:\\"}, {"name": "D:", "path": "D:\\"}]
+
+
+@respx.mock
+async def test_drive_list_uses_powershell_not_wmic(session_data):
+    # Regression test: wmic is legacy/deprecated and has real WMI-provider
+    # cold-start overhead (observed as sluggishness in practice) -
+    # Get-PSDrive stays the drive-list mechanism, not a reintroduced wmic
+    # call.
+    exec_route = _exec_route().mock(return_value=httpx.Response(200, json={"data": {"pid": 1}}))
+    _status_route().mock(return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": ""}}))
+    await list_directories(session_data, "vm", "133", "windows", None)
+
+    from urllib.parse import parse_qs
+
+    body = exec_route.calls.last.request.read().decode()
+    command_parts = parse_qs(body)["command"]
+    assert command_parts[0] == "powershell"
+    assert "wmic" not in " ".join(command_parts).lower()
+    assert "Get-PSDrive" in command_parts[-1]
 
 
 @respx.mock
