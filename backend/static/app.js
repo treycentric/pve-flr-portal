@@ -50,6 +50,21 @@ function restoreJobsWidget() {
     // the jobs list modal.
     logDragX: 0,
     logDragY: 0,
+    // Tracks whether the *backdrop itself* (not a descendant) was where
+    // the current mouse-down/up gesture started, so a click-outside
+    // close only fires when both ends of the gesture targeted the
+    // backdrop - not just @click.self, which resolves its target from
+    // wherever the mouseup happens to land. That distinction matters
+    // because dragging the native resize handle to grow a modal (see
+    // .modal-box--resizable) can end with the mouseup landing back on
+    // the backdrop even though the gesture began on the resize handle,
+    // which made resizing larger read as a click-outside and close the
+    // modal - not a regression from any one change, present since
+    // resizing was first added. One shared flag is safe even with two
+    // stacked overlays open at once (job list + log) since the topmost
+    // one's backdrop covers the full viewport, so a mousedown can never
+    // land on the other one's backdrop underneath it.
+    backdropDown: false,
     // Log viewer - a second modal, live-updated by piggybacking on the
     // same poll tick as the job list (below) rather than running its own
     // separate timer.

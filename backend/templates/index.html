@@ -53,7 +53,7 @@
     <span class="restore-jobs-badge" x-show="activeCount > 0" x-cloak x-text="activeCount"></span>
   </button>
 
-  <div class="modal-overlay" x-show="open" x-cloak @click.self="open = false" @keydown.escape.window="open = false">
+  <div class="modal-overlay" x-show="open" x-cloak @mousedown.self="backdropDown = true" @mouseup="if (backdropDown && $event.target === $event.currentTarget) open = false; backdropDown = false" @keydown.escape.window="open = false">
     <div class="modal-box modal-box--resizable" :style="'transform: translate(-50%, -50%) translate(' + dragX + 'px, ' + dragY + 'px)'">
       <div class="modal-header modal-header--draggable" @pointerdown="startDrag($event)">
         <h2>Restore Task</h2>
@@ -93,7 +93,7 @@
     </div>
   </div>
 
-  <div class="modal-overlay modal-overlay--log" x-show="logOpen" x-cloak @click.self="logOpen = false" @keydown.escape.window="logOpen = false">
+  <div class="modal-overlay modal-overlay--log" x-show="logOpen" x-cloak @mousedown.self="backdropDown = true" @mouseup="if (backdropDown && $event.target === $event.currentTarget) logOpen = false; backdropDown = false" @keydown.escape.window="logOpen = false">
     <div class="modal-box modal-box--resizable" :style="'transform: translate(-50%, -50%) translate(' + logDragX + 'px, ' + logDragY + 'px)'">
       <div class="modal-header modal-header--draggable" @pointerdown="startDrag($event, 'logDragX', 'logDragY')">
         <h2>Restore Log<span x-show="logDetail" x-text="' — ' + (logDetail && logDetail.task_name)"></span></h2>

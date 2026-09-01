@@ -925,6 +925,28 @@ entry points at. Two reasons this matters, both raised in review:
   harness driven via claude-in-chrome (drag, then resize larger) before
   committing, per this project's established practice for UI fixes.
 
+  **Real-world finding (2026-09-01):** growing either resizable modal
+  via its native corner resize handle closed it - not a regression from
+  any single change, present since resizing was first added, and only
+  reported once live testing actually exercised it. Root cause:
+  `@click.self="open = false"` closes on any click event whose *target*
+  resolves to the overlay itself - but dragging the native resize handle
+  to grow the box can end with the mouseup landing back on the overlay
+  backdrop (outside the box's pre-resize bounds) even though the
+  gesture began on the resize handle inside the box, and the browser's
+  synthetic `click` event target reflects where the mouseup landed, not
+  where the gesture started. Fixed by replacing `@click.self` with an
+  explicit mousedown/mouseup pair (`backdropDown`, `app.js`) that only
+  closes when *both* ends of the gesture targeted the backdrop itself -
+  a mousedown that started elsewhere (the resize handle, the header) no
+  longer counts, regardless of where the mouseup ends up. One shared
+  `backdropDown` flag across both overlays is safe: when both modals are
+  open the log modal's full-viewport backdrop physically covers the
+  jobs-list modal's, so a mousedown can never actually land on the
+  covered one underneath. Verified in an isolated harness (grow via the
+  resize handle stays open; a genuine backdrop click still closes)
+  before committing, same practice as the fix above.
+
 **Sequencing:**
 1. ~~Empirical verification against a real guest~~ — **done 2026-09-01**,
    see above.
