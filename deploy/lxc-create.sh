@@ -85,7 +85,14 @@ done
 echo "==> Installing pve-flr-portal inside container $CTID"
 pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null"
 pct exec "$CTID" -- bash -c "git clone --depth 1 '${REPO_URL}' /opt/pve-flr-portal"
-pct push "$CTID" "$(dirname "$0")/install.sh" /opt/pve-flr-portal/deploy/install.sh --perms 0755
+# install.sh already exists at this path from the clone above - no need
+# to push a local copy over. That push used to assume "$0" (this
+# script's own path) points at a real file on disk, which is only true
+# when run as `bash deploy/lxc-create.sh` from a local checkout - not
+# when curl-piped (`bash -c "$(curl ...)"`, the invocation this file's
+# own header comment documents first), where "$0" is just "bash" and
+# `dirname "$0"` resolves to "." Confirmed live 2026-09-01: a curl-piped
+# run failed with "failed to open ./install.sh for reading".
 pct exec "$CTID" -- bash /opt/pve-flr-portal/deploy/install.sh
 
 CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
