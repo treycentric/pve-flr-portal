@@ -1296,16 +1296,45 @@ itself.
    two separate values (bind `0.0.0.0` inside the container, advertise
    the host's real published-on IP in the URL), which isn't built.
 
+**Live end-to-end verification (2026-09-01): confirmed working**, first
+real run against a real Proxmox host/guest — LXC container (real
+bare-metal networking, not Docker Desktop; see the Docker-networking
+note above for why that path was abandoned for this test), second NIC
+added via `pct set -netN`, `RESTORE_DATA_NICS` pointed at it, a Windows
+VM on the matching subnet. Every piece of the chain fired correctly in
+one pass: `select_data_nic()` matched the guest's own subnet,
+`detect_fetch_tool()` found `Invoke-WebRequest`, the destination
+directory got created (PowerShell fix from the finding just above),
+`Invoke-WebRequest` pulled all 3.9 MB of a real file over the guest's
+own network in about 8 seconds — versus the many sequential QMP
+round-trips 65 chunks would've needed over Design B — the post-fetch
+existence check passed, mtime restore and checksum verify both
+succeeded. Full job log:
+```
++0.0s Starting restore of 'explorer.exe' -> 'C:\TestRestore\explorer.exe'.
++0.2s Downloaded 3933184 byte(s) from the backup.
++0.2s Content needs 65 chunks (over the single-call size limit).
++0.2s Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).
++0.2s guest-exec available (guest OS family: windows).
++2.9s Confirmed the destination directory exists.
++6.2s Design C: fetching via Invoke-WebRequest over 192.168.10.88 (matches the guest's own subnet).
++14.8s Design C: fetch complete.
++14.8s Restoring the original modified time.
++17.5s Modified time restored.
++17.5s Verifying checksum against the source.
++17.6s Checksum verified - matches the source.
++17.6s Restore completed successfully.
+```
+Not yet covered by this pass: a Linux target guest (only Windows tested
+so far), the Design-B-fallback path when no subnet/tool matches (only
+the success path has been live-confirmed), and `cscript`/multi-subnet
+scenarios (the deferred pieces noted above).
+
 **Not started, remaining:** deploy-level LXC/Docker additional-NIC
 provisioning steps (the `pct set -netN`/Docker Compose `networks:`
 config an admin actually runs), firewall rule examples, and the
 user-facing provisioning documentation (README.md section or
-`docs/network-provisioning.md` — not `docs/dev/`, see above). Live
-end-to-end verification (a real guest actually fetching through a real
-data NIC) is still open — everything above has been unit-tested with
-guest-exec/QGA calls mocked, per this project's established practice for
-this kind of code, but not yet run against a real Proxmox host and
-guest.
+`docs/network-provisioning.md` — not `docs/dev/`, see above).
 
 ## 8. Stack — and why
 
