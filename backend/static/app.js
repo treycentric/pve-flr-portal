@@ -432,6 +432,15 @@ function portalApp(rawSnapshots) {
       this._applySelection(preservedSelection);
     },
 
+    // The number in the dark-blue callout: WHICH of this tick's snapshots
+    // is currently selected, 1-based, matching the row numbers in the list
+    // picker. It is not a count of how many are grouped here -- a lone
+    // snapshot always reads "1", and it only differs from 1 when a
+    // later member of a multi-snapshot group is picked (issue #18).
+    _calloutPosition(group) {
+      return group.items.findIndex((s) => s.volume === this.selectedVolume) + 1;
+    },
+
     // What a click on a marker does (issue #18 callout semantics):
     //  - a lone snapshot selects immediately (and centers on the red line);
     //  - a multi-snapshot callout (the pale-blue numbered circle) opens the
@@ -784,11 +793,7 @@ function portalApp(rawSnapshots) {
 
         if (isSelected) {
           const selected = group.items.find((s) => s.volume === this.selectedVolume);
-          // The dark-blue callout is the CURRENTLY SELECTED snapshot
-          // indicator (issue #18): its number is that snapshot's position
-          // among all snapshots, oldest = 1 -- not a count of how many
-          // share this tick.
-          const posStr = String(this.selectedIndex + 1);
+          const posStr = String(this._calloutPosition(group));
           const tsStr = this._formatTimestamp(selected.time);
           const bubbleBottom = BUBBLE_TOP + BUBBLE_HEIGHT;
           const tailApex = bubbleBottom + 6;

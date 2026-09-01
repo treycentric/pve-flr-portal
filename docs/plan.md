@@ -281,9 +281,12 @@ apart. Every unselected marker carries the small pale-blue numbered pill (a
 lone snapshot shows "1"). Callout semantics: clicking a lone marker
 selects it; clicking a multi-snapshot callout opens the list picker
 *over the callout* (never auto-selects); the dark-blue callout on the
-selected snapshot shows that
-snapshot's 1-based position among all snapshots (not a same-tick count);
-selecting any snapshot pans its bucket onto the red centre line.
+selected snapshot shows *which of that tick's snapshots* is selected —
+1-based, matching the list picker's row numbers, so a lone snapshot
+always reads "1" and the number only differs when a later member of a
+multi-snapshot group is picked (it is **not** a same-tick count, nor a
+global index); selecting any snapshot pans its bucket onto the red
+centre line.
 
 ## 6. Data model
 

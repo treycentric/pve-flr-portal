@@ -130,12 +130,31 @@ test('stepZoom moves between the five levels, clamps at the ends, and resizes th
   assert.equal(a.zoomLevel, 5); // clamped
 });
 
-test('the selected callout number is the snapshot position among all snapshots, not a same-tick count', () => {
+test('the selected callout number is the position within its own tick group, not a count and not a global index', () => {
   const { portalApp } = loadApp();
-  const a = portalApp(snaps);
-  a.selectedVolume = 'v2';
-  // selectedIndex drives the dark-blue callout label (posStr = index + 1).
-  assert.equal(a.selectedIndex + 1, 2);
+  const a = portalApp([
+    { volume: 'a', time: '2026-02-10T08:00:00' },
+    { volume: 'b', time: '2026-02-11T08:00:00' },
+    { volume: 'c', time: '2026-02-11T09:30:00' },
+    { volume: 'd', time: '2026-02-11T20:00:00' },
+  ]);
+  a.viewStart = new Date(2026, 1, 1);
+  a.viewEnd = new Date(2026, 2, 1);
+  const [lone, cluster] = a.groupsInView();
+
+  // A lone snapshot always reads "1", even though it is 1st of 4 overall.
+  a.selectedVolume = 'a';
+  assert.equal(a._calloutPosition(lone), 1);
+
+  // Picking the 3rd of a 3-snapshot day reads "3", not the count and not
+  // its global index (4).
+  a.selectedVolume = 'd';
+  assert.equal(a._calloutPosition(cluster), 3);
+  assert.equal(a.selectedIndex + 1, 4);
+
+  // The first member of the same cluster still reads "1".
+  a.selectedVolume = 'b';
+  assert.equal(a._calloutPosition(cluster), 1);
 });
 
 test('selectedIndex / hasOlder / hasNewer follow selectedVolume', () => {
