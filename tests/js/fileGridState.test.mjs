@@ -114,10 +114,14 @@ test('openRestore resets the modal and stashes the caller-supplied guest/snapsho
   const s = fileGridState();
   s.restoreError = 'stale error';
   s.restoreSubmitted = true;
+  s.restoreMetadata = true;
+  s.restoreVerify = true;
   s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
   assert.equal(s.restoreOpen, true);
   assert.equal(s.restoreDestDir, '');
   assert.equal(s.restoreOverwrite, false);
+  assert.equal(s.restoreMetadata, false);
+  assert.equal(s.restoreVerify, false);
   assert.equal(s.restoreError, null);
   assert.equal(s.restoreSubmitted, false);
   assert.equal(s._guestType, 'qemu');
@@ -182,9 +186,66 @@ test('startRestore posts the expected fields and marks submitted on success', as
   assert.equal(qs.get('snapshot_time'), '2026-08-30T14:48:06Z');
   assert.equal(qs.get('dest_dir'), 'C:\\Windows\\Temp');
   assert.equal(qs.get('overwrite'), 'true');
+  assert.equal(qs.get('restore_metadata'), 'false');
+  assert.equal(qs.get('verify'), 'false');
+  assert.equal(qs.has('source_mtime'), false);
   assert.equal(s.restoreSubmitted, true);
   assert.equal(s.restoreSubmitting, false);
   assert.equal(s.restoreError, null);
+});
+
+test('startRestore includes restore_metadata/verify/source_mtime when set', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'a', name: 'hosts', leaf: true, mtime: 1700000000 })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/etc';
+  s.restoreOverwrite = true;
+  s.restoreMetadata = true;
+  s.restoreVerify = true;
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = opts.body;
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const qs = new URLSearchParams(posted);
+  assert.equal(qs.get('restore_metadata'), 'true');
+  assert.equal(qs.get('verify'), 'true');
+  assert.equal(qs.get('source_mtime'), '1700000000');
+});
+
+test('startRestore omits source_mtime when the selected item has none', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'a', name: 'hosts', leaf: true, mtime: null })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/etc';
+  s.restoreOverwrite = true;
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = opts.body;
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const qs = new URLSearchParams(posted);
+  assert.equal(qs.has('source_mtime'), false);
 });
 
 test('startRestore surfaces the server-provided detail message on failure', async () => {

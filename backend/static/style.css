@@ -291,6 +291,12 @@ body {
   font-size: 12px;
 }
 
+.restore-extra-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .restore-error {
   margin: 0;
   color: #c0392b;

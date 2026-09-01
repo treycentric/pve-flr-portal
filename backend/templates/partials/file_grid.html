@@ -128,7 +128,21 @@
             </label>
           </template>
 
-          <p class="restore-warning">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
+          <template x-if="restoreBrowseAvailable">
+            <div class="restore-extra-options">
+              <label class="restore-checkbox">
+                <input type="checkbox" x-model="restoreMetadata">
+                Restore original modified time
+              </label>
+              <label class="restore-checkbox">
+                <input type="checkbox" x-model="restoreVerify">
+                Verify with checksum after restore
+              </label>
+            </div>
+          </template>
+
+          <p class="restore-warning" x-show="!restoreMetadata">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
+          <p class="restore-warning" x-show="restoreMetadata">The restored file lands owned by root/SYSTEM - only the original modified time is restored (ownership &amp; permissions aren't, since this API doesn't expose that data).</p>
           <label class="restore-checkbox">
             <input type="checkbox" x-model="restoreOverwrite">
             I understand this overwrites the destination file if it already exists.

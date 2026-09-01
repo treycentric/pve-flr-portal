@@ -103,6 +103,13 @@ function fileGridState() {
     restoreOpen: false,
     restoreDestDir: '',
     restoreOverwrite: false,
+    // Both need VM.GuestAgent.Unrestricted (same gate as browsing, hence
+    // reusing restoreBrowseAvailable below rather than a separate flag) -
+    // restoreMetadata only restores mtime, the one piece of metadata
+    // file-restore/list actually exposes (no owner/mode available on any
+    // PVE version).
+    restoreMetadata: false,
+    restoreVerify: false,
     restoreSubmitting: false,
     restoreError: null,
     restoreSubmitted: false,
@@ -135,6 +142,8 @@ function fileGridState() {
       this._snapshotTime = snapshotTime;
       this.restoreDestDir = '';
       this.restoreOverwrite = false;
+      this.restoreMetadata = false;
+      this.restoreVerify = false;
       this.restoreError = null;
       this.restoreSubmitted = false;
       this.restoreBrowseAvailable = browseAvailable;
@@ -206,6 +215,11 @@ function fileGridState() {
         body.set('snapshot_time', this._snapshotTime);
         body.set('dest_dir', this.restoreDestDir);
         body.set('overwrite', this.restoreOverwrite ? 'true' : 'false');
+        body.set('restore_metadata', this.restoreMetadata ? 'true' : 'false');
+        body.set('verify', this.restoreVerify ? 'true' : 'false');
+        if (sel[0].mtime !== null && sel[0].mtime !== undefined) {
+          body.set('source_mtime', String(sel[0].mtime));
+        }
         const resp = await fetch('/api/restore', { method: 'POST', body });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {

@@ -74,3 +74,20 @@ def scratch_filename(job_id: str, chunk: Chunk) -> str:
     """Deterministic, collision-safe per-chunk scratch filename within a
     job's own scratch directory (docs/plan.md §7.5)."""
     return f"{job_id}.part{chunk.index:05d}"
+
+
+def scratch_dir_path(guest_os_family: str | None, job_id: str) -> str:
+    """A per-job scratch directory under the guest's own temp root -
+    `job_id` is a uuid (restore_jobs.RestoreJob.id), so collision with
+    anything else is not a practical concern. Windows uses
+    C:\\Windows\\Temp rather than %TEMP% - the latter varies by user
+    profile, and QGA/guest-exec runs as SYSTEM, whose %TEMP% already
+    resolves to C:\\Windows\\Temp anyway, so this just states it
+    directly rather than depending on an extra env-var lookup."""
+    if guest_os_family == "windows":
+        return f"C:\\Windows\\Temp\\pve-flr-portal-{job_id}"
+    return f"/tmp/pve-flr-portal-{job_id}"
+
+
+def scratch_path_sep(guest_os_family: str | None) -> str:
+    return "\\" if guest_os_family == "windows" else "/"

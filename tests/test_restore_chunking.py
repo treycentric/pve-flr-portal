@@ -1,6 +1,12 @@
 import pytest
 
-from backend.restore_chunking import needs_guest_exec, scratch_filename, split_into_chunks
+from backend.restore_chunking import (
+    needs_guest_exec,
+    scratch_dir_path,
+    scratch_filename,
+    scratch_path_sep,
+    split_into_chunks,
+)
 
 
 def _reassembled_bytes(chunks):
@@ -74,3 +80,20 @@ def test_default_chunk_size_matches_confirmed_server_ceiling():
     from backend.restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 
     assert DEFAULT_CHUNK_SIZE_BYTES == 61440
+
+
+def test_scratch_dir_path_windows():
+    path = scratch_dir_path("windows", "job-123")
+    assert path == "C:\\Windows\\Temp\\pve-flr-portal-job-123"
+
+
+def test_scratch_dir_path_posix_default():
+    assert scratch_dir_path("linux", "job-123") == "/tmp/pve-flr-portal-job-123"
+    assert scratch_dir_path(None, "job-123") == "/tmp/pve-flr-portal-job-123"
+    assert scratch_dir_path("bsd", "job-123") == "/tmp/pve-flr-portal-job-123"
+
+
+def test_scratch_path_sep():
+    assert scratch_path_sep("windows") == "\\"
+    assert scratch_path_sep("linux") == "/"
+    assert scratch_path_sep(None) == "/"

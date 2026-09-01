@@ -230,7 +230,9 @@ async def browse(request: Request, volume: str, filepath: str = "/", session: Se
         leaf = bool(entry.get("leaf", True))
         text = entry.get("text", "")
         entry["download_name"] = text + (".zip" if not leaf else "")
-        entry["item_json"] = json.dumps({"filepath": entry["filepath"], "leaf": leaf, "name": text})
+        entry["item_json"] = json.dumps(
+            {"filepath": entry["filepath"], "leaf": leaf, "name": text, "mtime": entry["mtime"]}
+        )
         entry["type_label"] = _type_label(entry, at_root)
     entries.sort(key=lambda e: (bool(e.get("leaf", True)), e.get("text", "").lower()))
     return templates.TemplateResponse(
@@ -324,15 +326,19 @@ async def restore(
     snapshot_time: str = Form(...),
     dest_dir: str = Form(...),
     overwrite: bool = Form(False),
+    restore_metadata: bool = Form(False),
+    verify: bool = Form(False),
+    source_mtime: int | None = Form(None),
     session: SessionData = Depends(auth.get_session),
 ):
-    """PH.5 content-only restore (docs/plan.md §7.5): submits a background
-    job and returns immediately - the actual agent/file-write call runs
-    out-of-band (restore_runner.run_content_only_restore), independent of
-    this request's lifetime. Only single-chunk files are handled so far;
-    the job itself fails clearly (not this endpoint) if the file turns
-    out to be too large once its content is in hand. `guest_type` is the
-    app-internal "vm"/"ct" value - see restore_capabilities() above."""
+    """PH.5 restore (docs/plan.md §7.5): submits a background job and
+    returns immediately - the actual write (plus, when needed, multi-
+    chunk assembly / metadata restore / verify) runs out-of-band
+    (restore_runner.run_restore), independent of this request's
+    lifetime; the job itself fails clearly (not this endpoint) if
+    something later turns out to need guest-exec but the account lacks
+    it. `guest_type` is the app-internal "vm"/"ct" value - see
+    restore_capabilities() above."""
     if guest_type not in ("vm", "ct"):
         raise HTTPException(status_code=400, detail=f"Unknown guest type: {guest_type}")
     if not overwrite:
@@ -344,6 +350,11 @@ async def restore(
     caps = await guest_agent.get_restore_capabilities(session, guest_type, vmid)
     if not caps.design_a.available:
         raise HTTPException(status_code=403, detail=caps.design_a.reason or "Restore is not available for this guest")
+    if (restore_metadata or verify) and not caps.design_b.available:
+        raise HTTPException(
+            status_code=403,
+            detail=caps.design_b.reason or "Restoring metadata/verifying needs VM.GuestAgent.Unrestricted",
+        )
 
     sep = "\\" if caps.guest_os_family == "windows" else "/"
     destination = dest_dir.rstrip("\\/") + sep + name
@@ -359,8 +370,11 @@ async def restore(
         source_filepath=filepath,
         source=name,
         destination=destination,
+        restore_metadata=restore_metadata,
+        verify=verify,
+        source_mtime=source_mtime,
     )
-    restore_jobs.manager.submit(job, lambda j: restore_runner.run_content_only_restore(j, restore_jobs.manager))
+    restore_jobs.manager.submit(job, lambda j: restore_runner.run_restore(j, restore_jobs.manager))
     return JSONResponse(job.to_dict())
 
 

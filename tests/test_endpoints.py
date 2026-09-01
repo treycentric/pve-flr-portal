@@ -220,7 +220,7 @@ def test_restore_submits_a_queued_job(client, monkeypatch):
         pass
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
-    monkeypatch.setattr(restore_runner, "run_content_only_restore", never_runs)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
 
     resp = client.post("/api/restore", data=_restore_form())
     assert resp.status_code == 200
@@ -262,11 +262,59 @@ def test_restore_uses_posix_separator_for_non_windows_guest(client, monkeypatch)
         pass
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
-    monkeypatch.setattr(restore_runner, "run_content_only_restore", never_runs)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
 
     resp = client.post("/api/restore", data=_restore_form(dest_dir="/etc", name="hosts"))
     assert resp.status_code == 200
     assert resp.json()["destination"] == "/etc/hosts"
+
+
+def test_restore_blocked_when_metadata_requested_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        # design_a available, design_b not - only FileWrite, no Unrestricted
+        return _available_caps(design_a=guest_agent.PathAvailability(True))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.post("/api/restore", data=_restore_form(restore_metadata="true"))
+    assert resp.status_code == 403
+    assert "Unrestricted" in resp.json()["detail"]
+
+
+def test_restore_blocked_when_verify_requested_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_a=guest_agent.PathAvailability(True))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.post("/api/restore", data=_restore_form(verify="true"))
+    assert resp.status_code == 403
+
+
+def test_restore_passes_metadata_verify_and_mtime_through_to_the_job(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(
+            design_a=guest_agent.PathAvailability(True), design_b=guest_agent.PathAvailability(True)
+        )
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    resp = client.post(
+        "/api/restore", data=_restore_form(restore_metadata="true", verify="true", source_mtime="1700000000")
+    )
+    assert resp.status_code == 200
+    job = restore_jobs.manager.get(resp.json()["id"])
+    assert job.restore_metadata is True
+    assert job.verify is True
+    assert job.source_mtime == 1700000000
 
 
 def test_restore_requires_auth():
@@ -285,7 +333,7 @@ def test_restore_jobs_list_returns_submitted_job(client, monkeypatch):
         pass
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
-    monkeypatch.setattr(restore_runner, "run_content_only_restore", never_runs)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
     submitted = client.post("/api/restore", data=_restore_form()).json()
 
     resp = client.get("/api/restore-jobs")
@@ -321,7 +369,7 @@ def test_restore_jobs_cancel_marks_flag_and_returns_job(client, monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
-    monkeypatch.setattr(restore_runner, "run_content_only_restore", hangs)
+    monkeypatch.setattr(restore_runner, "run_restore", hangs)
     submitted = client.post("/api/restore", data=_restore_form()).json()
 
     resp = client.post(f"/api/restore-jobs/{submitted['id']}/cancel")

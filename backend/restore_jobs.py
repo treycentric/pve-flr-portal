@@ -65,6 +65,12 @@ class RestoreJob:
     # support it (docs/plan.md §7.5).
     restore_metadata: bool = False
     verify: bool = False
+    # The source file's original mtime (from file-restore/list, which is
+    # the only piece of metadata that API actually exposes - no uid/gid/
+    # mode field exists on any PVE version, docs/plan.md §7.5). Only
+    # meaningful when restore_metadata is set; None if the frontend
+    # didn't have an mtime to send (e.g. a directory entry).
+    source_mtime: int | None = None
     status: RestoreStatus = RestoreStatus.QUEUED
     error: str | None = None
     started_at: float = field(default_factory=time.time)
@@ -118,6 +124,7 @@ class RestoreJobManager:
         destination: str,
         restore_metadata: bool = False,
         verify: bool = False,
+        source_mtime: int | None = None,
     ) -> RestoreJob:
         # A distinct copy, not the same object the interactive session
         # store points at - see module docstring. Done here, not left to
@@ -138,6 +145,7 @@ class RestoreJobManager:
             destination=destination,
             restore_metadata=restore_metadata,
             verify=verify,
+            source_mtime=source_mtime,
         )
         self._jobs[job.id] = job
         return job

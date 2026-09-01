@@ -600,15 +600,21 @@ a user-facing choice — there's no "pick quick or full" step. Instead,
 whenever `VM.GuestAgent.Unrestricted` is available (regardless of
 whether the content itself needed more than one chunk), the restore
 confirmation offers two independent checkboxes, both defaulting **off**:
-- **Restore metadata** (mtime/owner/mode) — a follow-up `guest-exec`
-  (`touch -d`/`chown`/`chmod`, or `icacls` on Windows) applying what
-  the file-restore listing already returned. This directly answers
-  "doesn't the single-call write path still need guest-exec for
-  mtime/owner/permissions:" — yes, and it's available as an upgrade on
-  top of a single-chunk restore too, not gated behind also needing
-  chunk concatenation. A user with only `FileWrite` (no
-  `Unrestricted`) doesn't see this checkbox at all and gets the
-  content-only fast path.
+- **Restore metadata** — corrected scope, confirmed against the actual
+  API: `file-restore/list`'s response only ever includes `mtime` and
+  `size` (docs/plan.md §3's documented schema — no `uid`/`gid`/`mode`
+  field exists anywhere in it), so this can only restore the original
+  **modified time**, not ownership or permissions as first sketched —
+  that data simply isn't exposed through this API at all, on any PVE
+  version. A follow-up `guest-exec` (`touch -d @<unix-ts>` on
+  Linux/BSD; PowerShell `(Get-Item).LastWriteTime = ...` on Windows,
+  since `cmd` has no built-in for this) applies the `mtime` the
+  file-restore listing already returned. Still answers "doesn't the
+  single-call write path still need guest-exec for this:" — yes, and
+  it's available as an upgrade on top of a single-chunk restore too,
+  not gated behind also needing chunk concatenation. A user with only
+  `FileWrite` (no `Unrestricted`) doesn't see this checkbox at all and
+  gets the content-only fast path.
 - **Verify** — sha256 preferred over a full read-back, per your point.
   The backend computes sha256 over the source bytes while streaming
   them from `file-restore/download` (already has the bytes in hand, no
@@ -889,9 +895,39 @@ entry points at. Two reasons this matters, both raised in review:
    active-job-count badge on the icon, and opens the "Restore Task"
    modal (device/task/restore-ver/source/destination/status/elapsed
    columns, row select, Cancel, matching the reference screenshots).
-6. Multi-chunk write (scratch files + concat) and the metadata/verify
-   checkboxes added to the same endpoint/modal once the content-only
-   path and the job infrastructure are solid.
+6. ~~Multi-chunk write, metadata restore, verify~~ — **done**:
+   `restore_runner.run_restore()` now decides at runtime (after the
+   source content is in hand) whether any of three independent facts
+   — more than one chunk, `restore_metadata` requested, `verify`
+   requested — means guest-exec is needed, re-checks
+   `VM.GuestAgent.Unrestricted` at that point (never assumed from the
+   submission-time check alone), and runs the scratch-file/concat path,
+   the mtime-only metadata restore (`touch -d`/PowerShell
+   `LastWriteTime` — no owner/mode, see the corrected scope above),
+   and/or the sha256 verify (`sha256sum`/`certutil -hashfile`)
+   accordingly. `pve_client.check_path_safe()` gates the destination
+   before it's ever embedded in a shell/PowerShell command string, the
+   same way `guest_browse.py`'s browse paths already were. Scratch-dir
+   cleanup runs in a `finally`, regardless of outcome (done/failed/
+   cancelled) — best-effort, swallows its own failures rather than
+   masking the restore's real result. `guest_browse._run_exec` and
+   `_check_path_safe` were promoted to `pve_client.run_guest_exec()`/
+   `check_path_safe()` first, so both this code and browsing share one
+   implementation. Checkboxes wired into the same modal, gated on
+   `restoreCaps.design_b.available` (the same flag that already gates
+   the directory browser).
+
+   **Unverified live** (no active session at implementation time — the
+   test guest's ticket had expired): the exact `certutil -hashfile`
+   output shape (`_parse_certutil_hash()` assumes a 3-line
+   header/hash/trailer format with space-separated hex byte pairs on
+   line 2), the Windows `copy /b "a"+"b" "dest"` concatenation syntax,
+   and the PowerShell `LastWriteTime` assignment script. All three
+   should be checked against a real Windows guest before relying on
+   this path for anything that matters — unlike the browse feature's
+   `cmd`/`wmic`/`dir`/PowerShell calls, which were live-verified (and,
+   in two cases, corrected after finding real bugs that pure code
+   review hadn't caught) before shipping.
 
 Each step gets its own pytest coverage (chunking/base64 math,
 capability-object construction from fake responses, job lifecycle
