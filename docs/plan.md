@@ -1053,7 +1053,18 @@ is what `docs/archive/plan-phases-0-4.md` §7.4 originally called "Design
 B" — a `file-write` bootstrap + `guest-exec` pull. §7.5's "Revised Design
 A / B split" reused the same labels for a different mechanism (the one
 that shipped). To stop the two ideas colliding under one name, the
-pull-based mechanism is "Design C" everywhere from here on.
+pull-based mechanism is "Design C" everywhere in this doc from here on.
+
+**User-facing name (2026-09-01): "Direct Network Transfer".** "Design C"
+is internal dev-doc jargon and was showing up verbatim in a restore
+job's own log (`_try_design_c()`'s `job.log()` calls) - visible to
+whoever's actually running a restore, not just whoever's reading this
+file. Renamed everywhere user-visible (log lines, the function itself -
+`_try_design_c()` is now `_try_direct_network_transfer()`) to "Direct
+Network Transfer", which describes what's actually happening without
+requiring any QMP/guest-agent background. "Design C" stays as the name
+for this section and in code comments/commit history - only what a user
+actually sees changed.
 
 **Mechanism:**
 1. Backend writes a small bootstrap script into the guest via the
@@ -1329,6 +1340,35 @@ Not yet covered by this pass: a Linux target guest (only Windows tested
 so far), the Design-B-fallback path when no subnet/tool matches (only
 the success path has been live-confirmed), and `cscript`/multi-subnet
 scenarios (the deferred pieces noted above).
+
+**Real-world finding (2026-09-01), first Linux guest attempt — not a
+Design C bug, a pre-existing memory scaling problem:** trying a large
+file against a Linux guest next, the whole `pve-flr-portal.service`
+process got OOM-killed by the kernel (`systemd`: "A process of this
+unit has been killed by the OOM killer") on the LXC container's default
+512 MB memory limit — before the restore ever got far enough to reach
+Direct Network Transfer's eligibility check at all, which is also why
+it "didn't appear to be using" it. Root cause predates this session's
+work entirely: `run_restore()` downloaded the whole source file into
+memory (`content = await response.aread()`), then `split_into_chunks()`
+built a **second, full, separate copy** as a list of every chunk's
+wire-ready (Latin-1) string - roughly doubling peak memory for content
+that Direct Network Transfer doesn't even use in wire-string form at
+all. Fixed by removing that redundant copy: `restore_chunking.py` lost
+`Chunk`/`split_into_chunks()`/`needs_guest_exec()` in favor of a cheap
+`chunk_count()` (arithmetic only, no content touched) and a public
+`bytes_to_wire_str()`; `restore_runner.py`'s `_write_chunks_to_scratch()`
+now slices the already-downloaded bytes and converts one
+`DEFAULT_CHUNK_SIZE_BYTES` piece to its wire string immediately before
+writing it, discarding it right after - at most one chunk's wire string
+alive at a time instead of the whole file's worth. The initial
+`response.aread()` still buffers the full file once (true
+streaming-download without ever buffering the whole file is a bigger,
+separate change, not taken here) - this fix roughly halves peak memory
+for any multi-chunk restore, Direct Network Transfer or not, but a file
+large enough relative to the container's memory limit could still be an
+issue; revisit with a real streaming download if this proves
+insufficient on an actual large-file test.
 
 **Not started, remaining:** deploy-level LXC/Docker additional-NIC
 provisioning steps (the `pct set -netN`/Docker Compose `networks:`

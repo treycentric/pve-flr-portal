@@ -162,6 +162,44 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     assert "Concatenation complete" in log_text
 
 
+async def test_multi_chunk_write_reassembles_to_the_exact_original_bytes(manager, session_data, monkeypatch):
+    # Locks down the byte-fidelity property across the streaming
+    # rewrite (restore_chunking.py's module docstring) - each chunk is
+    # now sliced from the raw content and converted to its wire string
+    # immediately before writing, rather than pre-built as a list of
+    # Chunk objects; this confirms that slicing is still exact and in
+    # order, not just that the right *number* of chunks got written
+    # (which test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up
+    # already covers).
+    content = bytes(range(256)) * 500  # ~128 KB - spans 3 chunks, full byte range
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, content)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    written = []
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        written.append((path, wire_content))
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    # Written in scratch-filename order (part00000, part00001, ...), so
+    # concatenating in list order reassembles the original file exactly.
+    written.sort(key=lambda pw: pw[0])
+    reassembled = b"".join(wire_content.encode("latin-1") for _path, wire_content in written)
+    assert reassembled == content
+
+
 async def test_progress_updates_incrementally_during_multi_chunk_write(manager, session_data, monkeypatch):
     job = _make_job(manager, session_data, destination="/etc/hosts")
     _patch_download(monkeypatch, b"a" * (61440 * 2 + 1))  # 3 chunks
@@ -603,7 +641,7 @@ async def test_design_c_fetch_failure_fails_the_job_rather_than_falling_back(man
 
     await run_restore(job, manager)
     assert job.status == RestoreStatus.FAILED
-    assert "Design C fetch failed" in job.error
+    assert "Direct Network Transfer failed" in job.error
 
 
 # --- cancellation / errors / cleanup ---------------------------------------

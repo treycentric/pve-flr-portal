@@ -9,12 +9,18 @@ caller's `VM.GuestAgent.Unrestricted` grant is re-checked here (never
 trusted from the earlier `/api/restore-capabilities` response used to
 build the confirmation UI).
 
-Whenever more than one chunk would otherwise be needed, `_try_design_c()`
+Whenever more than one chunk would otherwise be needed, `_try_direct_network_transfer()`
 (docs/plan.md §7.6, issue #22) is tried first as a faster alternative to
 the scratch-write+concat path below it - silently, and only when an
 admin has actually configured a data NIC that matches the guest's own
-subnet; every other guest keeps going through the unchanged Design B
-path exactly as before.
+subnet; every other guest keeps going through the unchanged chunked
+guest-agent-write path exactly as before.
+
+Streams the download rather than buffering the whole file into a
+separate wire-ready copy - see restore_chunking.py's module docstring
+for the real memory blow-up this replaced (confirmed live 2026-09-01:
+a large restore OOM-killed a memory-constrained deployment before ever
+reaching the Direct Network Transfer eligibility check).
 """
 import asyncio
 import hashlib
@@ -27,12 +33,12 @@ from . import guest_agent, pve_client, restore_download, restore_network_pull
 from .auth import ensure_fresh_ticket
 from .config import settings
 from .restore_chunking import (
-    Chunk,
-    needs_guest_exec,
+    DEFAULT_CHUNK_SIZE_BYTES,
+    bytes_to_wire_str,
+    chunk_count,
     scratch_dir_path,
     scratch_filename,
     scratch_path_sep,
-    split_into_chunks,
 )
 from .restore_jobs import RestoreJob, RestoreJobManager, RestoreStatus
 
@@ -77,18 +83,29 @@ async def _remove_scratch_dir(job: RestoreJob, guest_os_family: str | None, scra
 
 
 async def _write_chunks_to_scratch(
-    job: RestoreJob, chunks: list[Chunk], guest_os_family: str | None, scratch_dir: str
+    job: RestoreJob, content: bytes, guest_os_family: str | None, scratch_dir: str
 ) -> list[str]:
+    """Writes `content` to the guest as numbered scratch files, one
+    `DEFAULT_CHUNK_SIZE_BYTES` slice at a time - converting each slice to
+    its wire-ready string immediately before writing it and discarding
+    that string right after, rather than pre-building the whole file's
+    worth of wire strings up front (restore_chunking.py's module
+    docstring explains the real memory problem this replaced)."""
     sep = scratch_path_sep(guest_os_family)
     paths = []
-    for chunk in chunks:
+    index = 0
+    for start in range(0, len(content), DEFAULT_CHUNK_SIZE_BYTES):
         if job.cancel_requested:
             break
-        chunk_path = scratch_dir + sep + scratch_filename(job.id, chunk)
+        piece = content[start : start + DEFAULT_CHUNK_SIZE_BYTES]
+        chunk_path = scratch_dir + sep + scratch_filename(job.id, index)
         await ensure_fresh_ticket(job.session)
-        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, chunk_path, chunk.content)
+        await pve_client.write_guest_file(
+            job.session, job.guest_type, job.vmid, chunk_path, bytes_to_wire_str(piece)
+        )
         paths.append(chunk_path)
         job.progress_current += 1
+        index += 1
     return paths
 
 
@@ -147,22 +164,24 @@ async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | Non
         )
 
 
-async def _try_design_c(job: RestoreJob, guest_os_family: str | None) -> bool:
-    """Design C (docs/plan.md §7.6, issue #22): the network-pull path -
-    the guest fetches its own file over its own NIC instead of this app
-    chunking it over the slow QMP/virtio-serial channel. Attempted only
-    as an alternative to Design B's scratch-write+concat (the caller
-    only calls this when more than one chunk would otherwise be needed),
-    and only ever silently: returns False - meaning "not eligible, fall
-    back to Design B" - the moment any prerequisite isn't met (no data
-    NICs configured at all, the common case; the guest's reported
+async def _try_direct_network_transfer(job: RestoreJob, guest_os_family: str | None) -> bool:
+    """Direct Network Transfer (internally "Design C", docs/plan.md
+    §7.6, issue #22 - see that section for why the user-facing name
+    differs from the dev-doc name): the guest fetches its own file over
+    its own NIC instead of this app chunking it over the slow
+    QMP/virtio-serial channel. Attempted only as an alternative to the
+    scratch-write+concat path (the caller only calls this when more than
+    one chunk would otherwise be needed), and only ever silently:
+    returns False - meaning "not eligible, fall back to the chunked
+    guest-agent write path" - the moment any prerequisite isn't met (no
+    data NICs configured at all, the common case; the guest's reported
     subnet doesn't match a configured one; no usable fetch tool found;
     the detected tool can't build a command for this URL). Once truly
     eligible (a NIC AND a tool were both found and a command was built),
     an actual failure during the fetch itself raises rather than falling
-    back - having confidently offered Design C and then had it fail
-    partway is a real problem worth surfacing clearly, not masking by
-    silently retrying via a completely different mechanism.
+    back - having confidently offered Direct Network Transfer and then
+    had it fail partway is a real problem worth surfacing clearly, not
+    masking by silently retrying via a completely different mechanism.
 
     **Why the download URL is plain HTTP, never HTTPS:** every guest
     fetch tool this app might use would otherwise have to be individually
@@ -178,9 +197,10 @@ async def _try_design_c(job: RestoreJob, guest_os_family: str | None) -> bool:
     `detect_fetch_tool()`, but building its command needs a scratch file
     written first (`build_fetch_command()`'s docstring) - that staging,
     and its cleanup, isn't threaded through here yet, so a guest whose
-    *only* usable tool is `cscript` currently falls back to Design B
-    rather than actually using it. Follow-up, not a silent bug: logged
-    clearly below so it's visible in a real job's log if it happens.
+    *only* usable tool is `cscript` currently falls back to the chunked
+    write path rather than actually using it. Follow-up, not a silent
+    bug: logged clearly below so it's visible in a real job's log if it
+    happens.
     """
     data_nics = restore_network_pull.parse_data_nics(settings.restore_data_nics_json)
     if not data_nics:
@@ -189,15 +209,15 @@ async def _try_design_c(job: RestoreJob, guest_os_family: str | None) -> bool:
     guest_ips = await guest_agent.get_guest_ip_addresses(job.session, job.guest_type, job.vmid)
     nic = restore_network_pull.select_data_nic(guest_ips, data_nics)
     if nic is None:
-        job.log("Design C: no configured data NIC matches this guest's reported subnet - using Design B.")
+        job.log("Direct Network Transfer not available: no configured data NIC matches this guest's subnet.")
         return False
 
     tool = await restore_network_pull.detect_fetch_tool(lambda argv: _exec(job, argv), guest_os_family)
     if tool is None:
-        job.log("Design C: no usable fetch tool found in the guest - using Design B.")
+        job.log("Direct Network Transfer not available: no usable fetch tool found in the guest.")
         return False
     if tool == "cscript":
-        job.log("Design C: only cscript was detected, and its script-staging isn't wired up yet - using Design B.")
+        job.log("Direct Network Transfer not available: only cscript was detected, not yet supported.")
         return False
 
     port = settings.restore_data_nic_port or settings.port
@@ -207,15 +227,15 @@ async def _try_design_c(job: RestoreJob, guest_os_family: str | None) -> bool:
     try:
         plan = restore_network_pull.build_fetch_command(tool, url, job.destination, guest_os_family)
     except ValueError as exc:
-        job.log(f"Design C: {tool} can't be used for this download ({exc}) - using Design B.")
+        job.log(f"Direct Network Transfer not available: {tool} can't be used for this download ({exc}).")
         return False
 
-    job.log(f"Design C: fetching via {tool} over {nic.local_ip} (matches the guest's own subnet).")
+    job.log(f"Direct Network Transfer: fetching via {tool} over {nic.local_ip} (matches the guest's own subnet).")
     exitcode, out, err = await _exec(job, plan.exec_argv)
     if exitcode != 0:
-        raise RuntimeError(f"Design C fetch failed via {tool}: {err.strip() or out.strip()}")
+        raise RuntimeError(f"Direct Network Transfer failed via {tool}: {err.strip() or out.strip()}")
     await _verify_destination_exists(job, guest_os_family)
-    job.log("Design C: fetch complete.")
+    job.log("Direct Network Transfer: fetch complete.")
     return True
 
 
@@ -288,14 +308,18 @@ async def _verify_checksum(job: RestoreJob, expected_sha256: str, guest_os_famil
 
 
 async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
-    """Streams the source file from file-restore, then writes it - via a
-    single agent/file-write call when the content fits in one chunk and
-    neither metadata restore nor verify was requested, otherwise via the
-    scratch-file/guest-exec/concatenate path (which also handles the
-    optional metadata/verify steps). Runs as a background asyncio task
-    (docs/plan.md §7.5's session-handling section: job.session is this
-    job's own ticket snapshot, refreshed here independently of the
-    interactive session)."""
+    """Downloads the source file from file-restore, then writes it - via
+    a single agent/file-write call when the content fits in one chunk
+    and neither metadata restore nor verify was requested, otherwise via
+    Direct Network Transfer (when eligible) or the scratch-file/
+    guest-exec/concatenate path (which also handles the optional
+    metadata/verify steps). The chunked write path converts one slice of
+    the already-downloaded bytes to its wire string at a time rather
+    than pre-building the whole file's worth up front - see
+    restore_chunking.py's module docstring for why. Runs as a background
+    asyncio task (docs/plan.md §7.5's session-handling section:
+    job.session is this job's own ticket snapshot, refreshed here
+    independently of the interactive session)."""
     scratch_dir: str | None = None
     guest_os_family: str | None = None
     try:
@@ -317,17 +341,17 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             jobs.mark_cancelled(job.id)
             return
 
-        chunks = split_into_chunks(content)
-        needs_exec = needs_guest_exec(chunks) or job.restore_metadata or job.verify
-        if len(chunks) > 1:
-            job.log(f"Content needs {len(chunks)} chunks (over the single-call size limit).")
+        n_chunks = chunk_count(len(content))
+        needs_exec = n_chunks > 1 or job.restore_metadata or job.verify
+        if n_chunks > 1:
+            job.log(f"Content needs {n_chunks} chunks (over the single-call size limit).")
 
         # Coarse step-count total, known up front so the UI can show a
         # percentage from the start rather than only once work begins -
         # see RestoreJob.progress_total's docstring for what a "unit" is.
         job.progress_total = (
-            (len(chunks) if len(chunks) > 1 else 1)
-            + (1 if len(chunks) > 1 else 0)  # concatenation step
+            (n_chunks if n_chunks > 1 else 1)
+            + (1 if n_chunks > 1 else 0)  # concatenation step
             + (1 if job.restore_metadata else 0)
             + (1 if job.verify else 0)
         )
@@ -336,7 +360,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             job.log("Fits in one call and no metadata/verify requested - writing directly, no guest-exec.")
             await ensure_fresh_ticket(job.session)
             await pve_client.write_guest_file(
-                job.session, job.guest_type, job.vmid, job.destination, chunks[0].content
+                job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(content)
             )
             job.progress_current = 1
             jobs.mark_done(job.id)
@@ -370,28 +394,29 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             jobs.mark_cancelled(job.id)
             return
 
-        if len(chunks) == 1:
+        if n_chunks == 1:
             await ensure_fresh_ticket(job.session)
             await pve_client.write_guest_file(
-                job.session, job.guest_type, job.vmid, job.destination, chunks[0].content
+                job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(content)
             )
             job.progress_current += 1
             job.log("Wrote the file directly (single chunk, exec still needed for a later step).")
-        elif await _try_design_c(job, guest_os_family):
-            # Design C (docs/plan.md §7.6, issue #22): a faster
-            # alternative to the scratch-write+concat path below, only
-            # ever taken when an admin has actually configured a data
-            # NIC that matches this guest's subnet - see _try_design_c's
-            # docstring for the full eligibility chain. Counts as the
-            # same number of progress units the Design B path below
-            # would have used (chunks + concat), so the percentage math
-            # stays consistent with progress_total either way.
-            job.progress_current += len(chunks) + 1
+        elif await _try_direct_network_transfer(job, guest_os_family):
+            # Direct Network Transfer (docs/plan.md §7.6, issue #22): a
+            # faster alternative to the scratch-write+concat path below,
+            # only ever taken when an admin has actually configured a
+            # data NIC that matches this guest's subnet - see
+            # _try_direct_network_transfer's docstring for the full
+            # eligibility chain. Counts as the same number of progress
+            # units the chunked-write path below would have used (chunks
+            # + concat), so the percentage math stays consistent with
+            # progress_total either way.
+            job.progress_current += n_chunks + 1
         else:
             scratch_dir = scratch_dir_path(guest_os_family, job.id)
             job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
             await _create_scratch_dir(job, guest_os_family, scratch_dir)
-            chunk_paths = await _write_chunks_to_scratch(job, chunks, guest_os_family, scratch_dir)
+            chunk_paths = await _write_chunks_to_scratch(job, content, guest_os_family, scratch_dir)
             if job.cancel_requested:
                 jobs.mark_cancelled(job.id)
                 return
