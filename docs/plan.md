@@ -1358,9 +1358,10 @@ succeeded. Full job log:
 +17.6s Checksum verified - matches the source.
 +17.6s Restore completed successfully.
 ```
-Not yet covered by this pass: a Linux target guest (only Windows tested
-so far), the Design-B-fallback path when no subnet/tool matches (only
-the success path has been live-confirmed), and `cscript`/multi-subnet
+Not yet covered by this pass: a Linux target guest (confirmed separately
+below, after the memory/timeout fixes that first live Linux attempt led
+to), the Design-B-fallback path when no subnet/tool matches (only the
+success path has been live-confirmed), and `cscript`/multi-subnet
 scenarios (the deferred pieces noted above).
 
 **Real-world finding (2026-09-01), first Linux guest attempt — not a
@@ -1424,6 +1425,35 @@ checks, fetch-tool detection probes) stays on the fast ~15s default,
 since none of those scale with file size. Locked in with tests
 asserting the actual `timeout_seconds` value reaching `run_guest_exec()`
 for each of the three calls, not just that the code path doesn't crash.
+
+**Live end-to-end verification (2026-09-01), Linux guest: confirmed
+working**, and at real scale - a 706 MB file (740411560 bytes, well
+past anything a buffering approach could have survived on this same
+512 MB container), fetched via `curl` in ~21s and checksum-verified in
+~17s, both comfortably inside the new long-running timeout budget.
+First real proof the memory-streaming and timeout fixes above actually
+solve the problems they were written for, not just that they pass their
+own unit tests. Full job log:
+```
++0.0s Starting restore of '2f3a-linux-x64-4.3.6-...' -> '/home/tljones/test_restore/2f3a-linux-x64-4.3.6-...'.
++0.2s Content needs more than one chunk (over the single-call size limit).
++0.2s Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).
++0.6s guest-exec available (guest OS family: linux).
++1.0s Confirmed the destination directory exists.
++1.6s Direct Network Transfer: fetching via curl over 192.168.10.88 (matches the guest's own subnet).
++22.2s Direct Network Transfer: fetch complete.
++36.2s Downloaded 740411560 byte(s) from the backup.
++36.2s Restoring the original modified time.
++36.6s Modified time restored.
++36.6s Verifying checksum against the source.
++53.7s Checksum verified - matches the source.
++53.7s Restore completed successfully.
+```
+Between this and the earlier Windows/`Invoke-WebRequest` success, both
+fetch-tool families (POSIX and Windows) and both guest OS families are
+now live-confirmed for the success path. Still not covered: the
+fallback path when no subnet/tool matches (only success has been
+live-tested), `cscript`, and genuinely multi-subnet scenarios.
 
 **Not started, remaining:** deploy-level LXC/Docker additional-NIC
 provisioning steps (the `pct set -netN`/Docker Compose `networks:`
