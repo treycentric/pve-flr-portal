@@ -128,6 +128,29 @@ function fileGridState() {
   };
 }
 
+// Five discrete zoom levels (issue #18). Each level fixes the view span
+// and the tick/label scheme (see _ticks* below); it does NOT bound
+// panning -- the user can keep dragging left/right past any snapshot at
+// every level. Spans are approximate (real months/years vary in length)
+// and picked so a readable number of major ticks fills a ~1000px panel.
+// Level 1 is farthest in (minutes), level 5 farthest out (years).
+//
+// Every level shows ~60 minor ticks, so at a typical panel width they land
+// ~18px apart and the every-other-one labels ~36px apart -- enough that a
+// 10px font's 2-4 character labels clear each other. _thinLabels() is the
+// backstop for narrower panels.
+const TIMELINE_MINUTE_MS = 60 * 1000;
+const TIMELINE_HOUR_MS = 60 * TIMELINE_MINUTE_MS;
+const TIMELINE_DAY_MS = 24 * TIMELINE_HOUR_MS;
+const ZOOM_LEVELS = {
+  1: { span: 60 * TIMELINE_MINUTE_MS }, // 1 hour    -- 60 minute minors
+  2: { span: 60 * TIMELINE_HOUR_MS }, // 2.5 days  -- 60 hour minors
+  3: { span: 60 * TIMELINE_DAY_MS }, // 60 days   -- 60 day minors
+  4: { span: 365 * TIMELINE_DAY_MS }, // ~1 year   -- 60 month-fifth minors
+  5: { span: 5 * 365 * TIMELINE_DAY_MS }, // ~5 years  -- 60 month minors
+};
+const DEFAULT_ZOOM_LEVEL = 3;
+
 function portalApp(rawSnapshots) {
   const snapshots = rawSnapshots
     .map((s) => ({ ...s, date: new Date(s.time) }))
@@ -137,6 +160,7 @@ function portalApp(rawSnapshots) {
     // --- timeline state ---
     snapshots,
     selectedVolume: null,
+    zoomLevel: DEFAULT_ZOOM_LEVEL,
     viewStart: null,
     viewEnd: null,
     activeDayKey: null,
@@ -150,6 +174,7 @@ function portalApp(rawSnapshots) {
     _w: 1000,
     _axisY: 60,
     _bubbleY: 12,
+    _bubbleHeight: 22,
 
     // --- browse state ---
     volume: null,
@@ -165,7 +190,7 @@ function portalApp(rawSnapshots) {
         // so a window resize invalidates the whole drawing.
         window.addEventListener('resize', () => this.renderTimeline());
         if (this.snapshots.length) {
-          const span = 1000 * 60 * 60 * 24 * 75; // ~2.5 months, default zoom level
+          const span = ZOOM_LEVELS[this.zoomLevel].span;
           const last = this.snapshots[this.snapshots.length - 1].date.getTime();
           this.viewStart = new Date(last - span / 2);
           this.viewEnd = new Date(last + span / 2);
@@ -180,57 +205,224 @@ function portalApp(rawSnapshots) {
       return ((date - this.viewStart) / total) * this._w;
     },
 
+    // The tick a given instant collapses onto at the current zoom level.
+    // groupsInView() groups snapshots by this and draws each group's marker
+    // at xFor(bucketStart), so it lands exactly on a tick; zooming out
+    // merges snapshots whose buckets coincide, zooming in spreads them
+    // back apart (issue #18).
+    _bucketStart(date) {
+      switch (this.zoomLevel) {
+        case 1: {
+          const d = new Date(date);
+          d.setSeconds(0, 0);
+          return d;
+        }
+        case 2: {
+          const d = new Date(date);
+          d.setMinutes(0, 0, 0);
+          return d;
+        }
+        case 3:
+          return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+        case 4: {
+          const monthStart = new Date(date.getFullYear(), date.getMonth(), 1);
+          const nextMonth = new Date(date.getFullYear(), date.getMonth() + 1, 1);
+          const step = (nextMonth - monthStart) / 5;
+          const k = Math.floor((date - monthStart) / step);
+          return new Date(monthStart.getTime() + k * step);
+        }
+        case 5:
+          return new Date(date.getFullYear(), date.getMonth(), 1);
+        default:
+          return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+      }
+    },
+
+    // Human-readable heading for a bucket, shown as the list-picker title.
+    _bucketLabel(bucketStart) {
+      const d = bucketStart;
+      const pad = (n) => String(n).padStart(2, '0');
+      switch (this.zoomLevel) {
+        case 1:
+        case 2:
+          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        case 4:
+        case 5:
+          return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short' });
+        default:
+          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      }
+    },
+
     groupsInView() {
-      // Group by local calendar day (matching ticksInView) and position each
-      // group's dot at that day's midnight, so it lands exactly on the day's
-      // tick mark rather than at the snapshot's exact time-of-day.
+      // Group by the current zoom level's tick bucket and position each
+      // group's marker at that bucket's start, so it lands exactly on the
+      // tick rather than at the snapshot's exact instant.
       const map = new Map();
       for (const s of this.snapshots) {
         if (s.date < this.viewStart || s.date > this.viewEnd) continue;
-        const dayStart = new Date(s.date.getFullYear(), s.date.getMonth(), s.date.getDate());
-        const key = dayStart.getTime();
-        if (!map.has(key)) map.set(key, { dayStart, items: [] });
+        const bucketStart = this._bucketStart(s.date);
+        const key = bucketStart.getTime();
+        if (!map.has(key)) map.set(key, { bucketStart, items: [] });
         map.get(key).items.push(s);
       }
-      return Array.from(map.values()).map(({ dayStart, items }) => ({
-        key: dayStart.toISOString().slice(0, 10),
+      return Array.from(map.values()).map(({ bucketStart, items }) => ({
+        key: this._bucketLabel(bucketStart),
         items,
-        x: this.xFor(dayStart),
+        x: this.xFor(bucketStart),
       }));
     },
 
+    // Each tick: { x, major, lines }. lines is [] (unlabeled), [str]
+    // (single-line minor label) or [top, bottom] (two-line major label).
     ticksInView() {
-      const msPerDay = 24 * 60 * 60 * 1000;
-      const totalDays = Math.ceil((this.viewEnd - this.viewStart) / msPerDay);
-
-      // Zoomed way out: per-day ticks would be too dense to render usefully.
-      if (totalDays > 120) {
-        const days = [];
-        const count = 6;
-        const total = this.viewEnd - this.viewStart;
-        for (let i = 0; i <= count; i++) {
-          const d = new Date(this.viewStart.getTime() + (total * i) / count);
-          days.push({ x: (i / count) * this._w, label: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }), isMonth: false });
-        }
-        return days;
+      switch (this.zoomLevel) {
+        case 1:
+          return this._thinLabels(this._ticksMinute());
+        case 2:
+          return this._thinLabels(this._ticksHour());
+        case 4:
+          return this._thinLabels(this._ticksMonthFifth());
+        case 5:
+          return this._thinLabels(this._ticksMonth());
+        default:
+          return this._thinLabels(this._ticksDay());
       }
+    },
 
-      const days = [];
-      const cursor = new Date(this.viewStart.getFullYear(), this.viewStart.getMonth(), this.viewStart.getDate());
-      while (cursor <= this.viewEnd) {
-        if (cursor >= this.viewStart) {
-          const isMonthStart = cursor.getDate() === 1;
-          days.push({
-            x: this.xFor(cursor),
-            isMonth: isMonthStart,
-            year: isMonthStart ? cursor.getFullYear() : null,
-            monthAbbr: isMonthStart ? cursor.toLocaleDateString(undefined, { month: 'short' }) : null,
-            label: isMonthStart ? '' : (cursor.getDate() % 2 === 0 ? String(cursor.getDate()) : ''),
+    // Tick labels are plain SVG text with no collision handling of their
+    // own, so on a narrow panel (or right beside a wide two-line major)
+    // neighbouring labels run into each other. Drop the ones that don't
+    // fit: majors are always kept, then minors are taken left-to-right and
+    // any whose estimated box would touch one already kept is unlabeled.
+    // The tick mark itself always stays -- only its text goes.
+    //
+    // Two gaps, because a minor next to a major reads fine much tighter
+    // than two minors next to each other. Without the looser major gap the
+    // last labelled day of a month (28/29/30) -- one day before the next
+    // month's wide two-line major -- gets dropped, which is what "Feb had
+    // no 28" was.
+    _thinLabels(ticks) {
+      const GAP_MINOR = 4; // clear px required between two minor labels
+      const GAP_MAJOR = 0; // minor-vs-major: touching is ok, overlap is not
+      const CHAR_W = 5; // ~10px Open Sans advance per digit/letter
+      const halfWidth = (t) => (Math.max(...t.lines.map((l) => l.length)) * CHAR_W) / 2;
+      const kept = [];
+      for (const t of ticks) {
+        if (t.major && t.lines.length) kept.push({ x: t.x, half: halfWidth(t), major: true });
+      }
+      for (const t of ticks) {
+        if (t.major || !t.lines.length) continue;
+        const half = halfWidth(t);
+        const collides = kept.some((k) => {
+          const gap = k.major ? GAP_MAJOR : GAP_MINOR;
+          return Math.abs(k.x - t.x) < k.half + half + gap;
+        });
+        if (collides) t.lines = [];
+        else kept.push({ x: t.x, half, major: false });
+      }
+      return ticks;
+    },
+
+    // Level 1: every tick a minute, majors every 10 min (HH:MM), even
+    // minors labeled with the 2-digit minute.
+    _ticksMinute() {
+      const ticks = [];
+      const c = new Date(this.viewStart);
+      c.setSeconds(0, 0);
+      while (c <= this.viewEnd) {
+        if (c >= this.viewStart) {
+          const m = c.getMinutes();
+          const major = m % 10 === 0;
+          let lines = [];
+          if (major) lines = [`${c.getHours()}:${String(m).padStart(2, '0')}`];
+          else if (m % 2 === 0) lines = [String(m).padStart(2, '0')];
+          ticks.push({ x: this.xFor(new Date(c)), major, lines });
+        }
+        c.setMinutes(c.getMinutes() + 1);
+      }
+      return ticks;
+    },
+
+    // Level 2: majors at the start of a day (month abbr / day number),
+    // hourly minors with even hours labeled.
+    _ticksHour() {
+      const ticks = [];
+      const c = new Date(this.viewStart);
+      c.setMinutes(0, 0, 0);
+      while (c <= this.viewEnd) {
+        if (c >= this.viewStart) {
+          const h = c.getHours();
+          const major = h === 0;
+          let lines = [];
+          if (major) lines = [c.toLocaleDateString(undefined, { month: 'short' }), String(c.getDate())];
+          else if (h % 2 === 0) lines = [String(h)];
+          ticks.push({ x: this.xFor(new Date(c)), major, lines });
+        }
+        c.setHours(c.getHours() + 1);
+      }
+      return ticks;
+    },
+
+    // Level 3: majors at the start of a month (year / month abbr), daily
+    // minors with even days labeled.
+    _ticksDay() {
+      const ticks = [];
+      const c = new Date(this.viewStart.getFullYear(), this.viewStart.getMonth(), this.viewStart.getDate());
+      while (c <= this.viewEnd) {
+        if (c >= this.viewStart) {
+          const day = c.getDate();
+          const major = day === 1;
+          let lines = [];
+          if (major) lines = [String(c.getFullYear()), c.toLocaleDateString(undefined, { month: 'short' })];
+          else if (day % 2 === 0) lines = [String(day)];
+          ticks.push({ x: this.xFor(new Date(c)), major, lines });
+        }
+        c.setDate(c.getDate() + 1);
+      }
+      return ticks;
+    },
+
+    // Level 4: majors at the start of a month (year / month abbr), one
+    // major every 5 unlabeled minor ticks (each month split into fifths).
+    _ticksMonthFifth() {
+      const ticks = [];
+      const c = new Date(this.viewStart.getFullYear(), this.viewStart.getMonth(), 1);
+      while (c <= this.viewEnd) {
+        const monthStart = new Date(c);
+        const nextMonth = new Date(c.getFullYear(), c.getMonth() + 1, 1);
+        const step = (nextMonth - monthStart) / 5;
+        for (let k = 0; k < 5; k++) {
+          const t = new Date(monthStart.getTime() + k * step);
+          if (t < this.viewStart || t > this.viewEnd) continue;
+          ticks.push({
+            x: this.xFor(t),
+            major: k === 0,
+            lines: k === 0 ? [String(t.getFullYear()), t.toLocaleDateString(undefined, { month: 'short' })] : [],
           });
         }
-        cursor.setDate(cursor.getDate() + 1);
+        c.setMonth(c.getMonth() + 1);
       }
-      return days;
+      return ticks;
+    },
+
+    // Level 5: every minor tick a month, majors at January (year / "Jan"),
+    // even months labeled with the 3-char month name.
+    _ticksMonth() {
+      const ticks = [];
+      const c = new Date(this.viewStart.getFullYear(), this.viewStart.getMonth(), 1);
+      while (c <= this.viewEnd) {
+        if (c >= this.viewStart) {
+          const m = c.getMonth();
+          const major = m === 0;
+          let lines = [];
+          if (major) lines = [String(c.getFullYear()), 'Jan'];
+          else if ((m + 1) % 2 === 0) lines = [c.toLocaleDateString(undefined, { month: 'short' })];
+          ticks.push({ x: this.xFor(new Date(c)), major, lines });
+        }
+        c.setMonth(c.getMonth() + 1);
+      }
+      return ticks;
     },
 
     async selectSnapshot(snapshot) {
@@ -242,9 +434,11 @@ function portalApp(rawSnapshots) {
       if (this.crumbs.length === 0) {
         this.crumbs = [{ label: 'Root', filepath: '/' }];
       }
-      // Center the view on the selected date's midnight (matching where its
-      // dot is actually drawn, per groupsInView) under the fixed center
-      // line, preserving whatever zoom level is currently active.
+      // Center the view on the selected snapshot's tick bucket (matching
+      // where its marker is actually drawn, per groupsInView) under the
+      // fixed red center line, preserving the active zoom level. "Anytime
+      // an actual snapshot is selected it centers on the thick red line"
+      // (issue #18).
       //
       // This pan + repaint happens BEFORE any of the awaits below, so the
       // callout moves to the clicked snapshot the instant it is clicked.
@@ -253,8 +447,7 @@ function portalApp(rawSnapshots) {
       // issues one request per expanded tree node); doing them first made
       // a click look like it had simply done nothing.
       const span = this.viewEnd - this.viewStart;
-      const dayStart = new Date(snapshot.date.getFullYear(), snapshot.date.getMonth(), snapshot.date.getDate());
-      const target = dayStart.getTime();
+      const target = this._bucketStart(snapshot.date).getTime();
       this.viewStart = new Date(target - span / 2);
       this.viewEnd = new Date(target + span / 2);
       this.renderTimeline();
@@ -281,23 +474,26 @@ function portalApp(rawSnapshots) {
       this._applySelection(preservedSelection);
     },
 
-    // What a click on a marker does. Clicking ANY snapshot selects it, so
-    // its small count badge always turns into the full dark-blue callout
-    // (with tail + red connector) at the top -- a day holding several
-    // behaves the same as a day holding one. A multi-snapshot day then
-    // also opens the list so a different one of that day can be picked;
-    // clicking the dark callout again toggles that list.
+    // The number in the dark-blue callout: WHICH of this tick's snapshots
+    // is currently selected, 1-based, matching the row numbers in the list
+    // picker. It is not a count of how many are grouped here -- a lone
+    // snapshot always reads "1", and it only differs from 1 when a
+    // later member of a multi-snapshot group is picked (issue #18).
+    _calloutPosition(group) {
+      return group.items.findIndex((s) => s.volume === this.selectedVolume) + 1;
+    },
+
+    // What a click on a marker does (issue #18 callout semantics):
+    //  - a lone snapshot selects immediately (and centers on the red line);
+    //  - a multi-snapshot callout (the pale-blue numbered circle) opens the
+    //    tall list box anchored over the callout for the user to pick one --
+    //    it does NOT auto-select anything.
     async activateGroup(group) {
-      const alreadySelected = group.items.some((s) => s.volume === this.selectedVolume);
-      if (!alreadySelected) {
-        // Pans the clicked day under the fixed centre line.
-        await this.selectSnapshot(group.items[group.items.length - 1]);
+      if (group.items.length === 1) {
+        await this.selectSnapshot(group.items[0]);
+        return;
       }
-      if (group.items.length > 1) {
-        // The marker is at the centre after the pan, so anchor there
-        // rather than at the pre-pan click position.
-        this.toggleDay(group.key, group.items, this._w / 2);
-      }
+      this.toggleDay(group.key, group.items, group.x);
     },
 
     toggleDay(key, items, screenX) {
@@ -308,17 +504,26 @@ function portalApp(rawSnapshots) {
         this.activeDayKey = key;
         this.activeDayItems = items;
         this.activeDayX = screenX;
-        // Anchor the popup's BOTTOM edge just above the callout band, near
-        // the top of the panel; it grows upward from there (translateY(-100%)
-        // in CSS). Anchoring it near the axis instead would make it expand
-        // back down over the ruler as the list gets longer.
-        this.activeDayTop = this._bubbleY - 4;
+        // Anchor the popup's BOTTOM edge to the BOTTOM of the callout band,
+        // so the picker covers the dark-blue callout it was opened from
+        // rather than floating just above it; it grows upward from there
+        // (translateY(-100%) in CSS). Anchoring it near the axis instead
+        // would make it expand back down over the ruler as the list gets
+        // longer. The picker's z-index (10) beats the toolbar's (2), so the
+        // part that overlaps the toolbar band still paints on top.
+        this.activeDayTop = this._bubbleY + this._bubbleHeight;
       }
     },
 
-    zoom(factor) {
+    // Step between the five discrete zoom levels (delta -1 = zoom in,
+    // +1 = zoom out), clamped at the ends. Only the view span changes;
+    // the center instant is held fixed and panning stays unbounded.
+    stepZoom(delta) {
+      const next = Math.min(5, Math.max(1, this.zoomLevel + delta));
+      if (next === this.zoomLevel) return;
+      this.zoomLevel = next;
       const mid = (this.viewStart.getTime() + this.viewEnd.getTime()) / 2;
-      const half = ((this.viewEnd - this.viewStart) / 2) * factor;
+      const half = ZOOM_LEVELS[next].span / 2;
       this.viewStart = new Date(mid - half);
       this.viewEnd = new Date(mid + half);
       this.renderTimeline();
@@ -540,6 +745,7 @@ function portalApp(rawSnapshots) {
       const BUBBLE_TOP = BUBBLE_Y - AXIS_Y;
       this._axisY = AXIS_Y;
       this._bubbleY = BUBBLE_Y;
+      this._bubbleHeight = BUBBLE_HEIGHT;
 
       const axis = document.createElementNS(NS, 'line');
       axis.setAttribute('x1', '0');
@@ -566,30 +772,33 @@ function portalApp(rawSnapshots) {
         g.setAttribute('transform', `translate(${tick.x},${AXIS_Y})`);
         const line = document.createElementNS(NS, 'line');
         line.setAttribute('y1', '0');
-        line.setAttribute('y2', '-5');
+        line.setAttribute('y2', tick.major ? '-8' : '-5');
         line.setAttribute('class', 'timeline-tick');
         g.appendChild(line);
-        if (tick.isMonth) {
+        // The class follows tick.major (majors are bold), the layout follows
+        // how many lines the level asked for. The two are independent: a
+        // level-1 major is a single bold "11:00", a level-3 major is a
+        // two-line bold year/month.
+        if (tick.lines.length) {
+          const cls = tick.major ? 'timeline-tick-label--major' : 'timeline-tick-label';
           const text = document.createElementNS(NS, 'text');
           text.setAttribute('text-anchor', 'middle');
-          text.setAttribute('class', 'timeline-tick-label--month');
-          const yearSpan = document.createElementNS(NS, 'tspan');
-          yearSpan.setAttribute('x', '0');
-          yearSpan.setAttribute('y', '14');
-          yearSpan.textContent = String(tick.year);
-          const monthSpan = document.createElementNS(NS, 'tspan');
-          monthSpan.setAttribute('x', '0');
-          monthSpan.setAttribute('dy', '11');
-          monthSpan.textContent = tick.monthAbbr;
-          text.appendChild(yearSpan);
-          text.appendChild(monthSpan);
-          g.appendChild(text);
-        } else if (tick.label) {
-          const text = document.createElementNS(NS, 'text');
-          text.setAttribute('y', '14');
-          text.setAttribute('text-anchor', 'middle');
-          text.setAttribute('class', 'timeline-tick-label');
-          text.textContent = tick.label;
+          text.setAttribute('class', cls);
+          if (tick.lines.length === 2) {
+            const topSpan = document.createElementNS(NS, 'tspan');
+            topSpan.setAttribute('x', '0');
+            topSpan.setAttribute('y', '14');
+            topSpan.textContent = tick.lines[0];
+            const botSpan = document.createElementNS(NS, 'tspan');
+            botSpan.setAttribute('x', '0');
+            botSpan.setAttribute('dy', '11');
+            botSpan.textContent = tick.lines[1];
+            text.appendChild(topSpan);
+            text.appendChild(botSpan);
+          } else {
+            text.setAttribute('y', '14');
+            text.textContent = tick.lines[0];
+          }
           g.appendChild(text);
         }
         svg.appendChild(g);
@@ -633,7 +842,7 @@ function portalApp(rawSnapshots) {
 
         if (isSelected) {
           const selected = group.items.find((s) => s.volume === this.selectedVolume);
-          const countStr = String(group.items.length);
+          const posStr = String(this._calloutPosition(group));
           const tsStr = this._formatTimestamp(selected.time);
           const bubbleBottom = BUBBLE_TOP + BUBBLE_HEIGHT;
           const tailApex = bubbleBottom + 6;
@@ -644,7 +853,7 @@ function portalApp(rawSnapshots) {
           text.setAttribute('text-anchor', 'middle');
           text.setAttribute('class', 'timeline-bubble-label');
           const countSpan = document.createElementNS(NS, 'tspan');
-          countSpan.textContent = countStr;
+          countSpan.textContent = posStr;
           const tsSpan = document.createElementNS(NS, 'tspan');
           tsSpan.setAttribute('dx', '8');
           tsSpan.textContent = tsStr;
@@ -680,11 +889,17 @@ function portalApp(rawSnapshots) {
           g.insertBefore(tail, text);
 
         } else {
+          // Unselected marker: the small pale-blue numbered pill + tail. A
+          // lone snapshot still shows its "1"; several collapsed onto one
+          // tick show the count. Clicking a count > 1 opens the list picker
+          // (activateGroup); it never auto-selects (issue #18).
+          // Grows upward from the tail at y=-8 so the tail stays attached
+          // to the dot; the hit area (-26..10) still covers the taller pill.
           const bubble = document.createElementNS(NS, 'rect');
           bubble.setAttribute('x', '-9');
-          bubble.setAttribute('y', '-22');
+          bubble.setAttribute('y', '-25');
           bubble.setAttribute('width', '18');
-          bubble.setAttribute('height', '14');
+          bubble.setAttribute('height', '17');
           bubble.setAttribute('rx', '3');
           bubble.setAttribute('class', 'timeline-bubble');
           g.appendChild(bubble);
@@ -696,7 +911,7 @@ function portalApp(rawSnapshots) {
 
           const count = document.createElementNS(NS, 'text');
           count.setAttribute('x', '0');
-          count.setAttribute('y', '-11.5');
+          count.setAttribute('y', '-13');
           count.setAttribute('text-anchor', 'middle');
           count.setAttribute('class', 'timeline-bubble-label timeline-bubble-label--count');
           count.textContent = String(group.items.length);

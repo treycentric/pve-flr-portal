@@ -256,7 +256,7 @@ service.
 | File grid — Name / Size / Type / Modified time | Standard sortable file listing | Same four columns, sortable client-side once a directory's listing is cached | Full |
 | Restore / Download buttons | Restore writes back to source; Download saves locally | Download works today. Restore stays visibly disabled ("Restore to guest — planned") until PH.5 (see `TODO.md`) | Partial by design |
 | Filter box | Narrows the current folder's listing | Client-side filter over the cached listing | Full |
-| Bottom timeline — dots, count badges, draggable date marker, zoom | Scrub across backup dates, jump to one | Hand-rolled: one dot per indexed snapshot, badge per day at current zoom, click sets active snapshot and re-renders the grid | The reason the project exists — most build effort here |
+| Bottom timeline — dots, count badges, draggable date marker, zoom | Scrub across backup dates, jump to one | Hand-rolled: one dot per snapshot with a small pale-blue numbered pill, snapshots on the same tick collapse into one pill, 5 fixed zoom levels, click a lone marker to select / a multi-snapshot callout to open its list, re-renders the grid | The reason the project exists — most build effort here |
 | Calendar-jump / locate icons | Jump to a date, or re-center on "now" | Same two icons wired to the timeline component | Full, once the timeline exists |
 
 The timeline widget (hand-rolled inline SVG, `backend/static/app.js`
@@ -266,6 +266,41 @@ worth knowing before touching that code again: `Element.setPointerCapture()`
 silently retargeting clicks, a fixed `viewBox` + `preserveAspectRatio="none"`
 distorting every shape/glyph, and an oversized marker hit-area making a
 neighbouring snapshot unclickable.
+
+**Zoom & callout model (issue #18).** Zoom is five discrete levels
+(`ZOOM_LEVELS` in `app.js`), not a continuous factor — level 1 is
+farthest in, level 5 farthest out, default is level 3, and the `+`/`-`
+buttons step between them and clamp at the ends. Each level fixes only
+the view *span* and the tick/label scheme (`ticksInView()` dispatches to
+`_ticksMinute`/`_ticksHour`/`_ticksDay`/`_ticksMonthFifth`/`_ticksMonth`);
+panning stays continuous and unbounded at every level. Every level's span
+is sized to show **~60 minor ticks** (1h / 2.5d / 60d / 1y / 5y), which
+at a typical panel width puts minor ticks ~18px apart and the
+every-other-one labels ~36px apart — the spacing the issue's labelling
+scheme assumes. Because the panel is fluid that isn't guaranteed, so
+`_thinLabels()` is a backstop: it keeps every major label, then takes
+minor labels left-to-right and blanks any whose estimated text box would
+touch one already kept. Only the *text* is dropped, never the tick mark.
+It uses a looser gap for a minor next to a major than for two adjacent
+minors — without that the last labelled day of a month (the 28th/30th,
+one tick before the next month's wide two-line major) got dropped. The
+day ticks themselves are a real calendar walk (`_ticksDay`
+`cursor.setDate(+1)`), so every month already carries exactly its own
+day count of ticks, leap Februaries included — the thinner only ever
+removes *labels*, never changes the tick spacing. Snapshots are
+grouped per level by `_bucketStart()` — the tick a snapshot's instant
+collapses onto — so zooming out merges snapshots whose buckets coincide
+into one pale-blue numbered callout and zooming in spreads them back
+apart. Every unselected marker carries the small pale-blue numbered pill (a
+lone snapshot shows "1"). Callout semantics: clicking a lone marker
+selects it; clicking a multi-snapshot callout opens the list picker
+*over the callout* (never auto-selects); the dark-blue callout on the
+selected snapshot shows *which of that tick's snapshots* is selected —
+1-based, matching the list picker's row numbers, so a lone snapshot
+always reads "1" and the number only differs when a later member of a
+multi-snapshot group is picked (it is **not** a same-tick count, nor a
+global index); selecting any snapshot pans its bucket onto the red
+centre line.
 
 ## 6. Data model
 
