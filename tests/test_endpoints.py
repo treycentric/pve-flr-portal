@@ -359,6 +359,45 @@ def test_restore_jobs_cancel_unknown_job_404s(client):
     assert resp.status_code == 404
 
 
+def test_restore_jobs_detail_returns_log(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    # Mutate the job directly rather than relying on the (monkeypatched,
+    # inert) background task's own scheduling timing.
+    job = restore_jobs.manager.get(submitted["id"])
+    job.log("did a thing")
+
+    resp = client.get(f"/api/restore-jobs/{submitted['id']}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert any("did a thing" in line for line in body["log"])
+    assert body["id"] == submitted["id"]
+
+    # The list endpoint's dict shape stays lean - no log field.
+    assert "log" not in job.to_dict()
+
+
+def test_restore_jobs_detail_unknown_job_404s(client):
+    resp = client.get("/api/restore-jobs/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_restore_jobs_detail_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-jobs/x", follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
 def test_restore_jobs_cancel_marks_flag_and_returns_job(client, monkeypatch):
     from backend import guest_agent, restore_runner
 

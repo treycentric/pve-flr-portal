@@ -163,6 +163,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
     guest_os_family: str | None = None
     try:
         job.status = RestoreStatus.RUNNING
+        job.log(f"Starting restore of {job.source!r} -> {job.destination!r}.")
         await ensure_fresh_ticket(job.session)
 
         client, response = await pve_client.open_download(
@@ -173,6 +174,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         finally:
             await response.aclose()
             await client.aclose()
+        job.log(f"Downloaded {len(content)} byte(s) from the backup.")
 
         if job.cancel_requested:
             jobs.mark_cancelled(job.id)
@@ -180,6 +182,8 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
 
         chunks = split_into_chunks(content)
         needs_exec = needs_guest_exec(chunks) or job.restore_metadata or job.verify
+        if len(chunks) > 1:
+            job.log(f"Content needs {len(chunks)} chunks (over the single-call size limit).")
 
         # Coarse step-count total, known up front so the UI can show a
         # percentage from the start rather than only once work begins -
@@ -192,6 +196,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         )
 
         if not needs_exec:
+            job.log("Fits in one call and no metadata/verify requested - writing directly, no guest-exec.")
             await ensure_fresh_ticket(job.session)
             await pve_client.write_guest_file(
                 job.session, job.guest_type, job.vmid, job.destination, chunks[0].content
@@ -207,6 +212,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         # up front rather than at each individual step.
         pve_client.check_path_safe(job.destination)
 
+        job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
         await ensure_fresh_ticket(job.session)
         caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
         if not caps.design_b.available:
@@ -218,6 +224,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             )
             return
         guest_os_family = caps.guest_os_family
+        job.log(f"guest-exec available (guest OS family: {guest_os_family or 'unknown'}).")
 
         if job.cancel_requested:
             jobs.mark_cancelled(job.id)
@@ -229,26 +236,36 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
                 job.session, job.guest_type, job.vmid, job.destination, chunks[0].content
             )
             job.progress_current += 1
+            job.log("Wrote the file directly (single chunk, exec still needed for a later step).")
         else:
             scratch_dir = scratch_dir_path(guest_os_family, job.id)
+            job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
             await _create_scratch_dir(job, guest_os_family, scratch_dir)
             chunk_paths = await _write_chunks_to_scratch(job, chunks, guest_os_family, scratch_dir)
             if job.cancel_requested:
                 jobs.mark_cancelled(job.id)
                 return
+            job.log(f"Wrote all {len(chunk_paths)} chunk(s) to scratch; concatenating into the destination.")
             await _concat_chunks(job, chunk_paths, guest_os_family)
             job.progress_current += 1
+            job.log("Concatenation complete.")
 
         if job.cancel_requested:
             jobs.mark_cancelled(job.id)
             return
 
         if job.restore_metadata:
-            await _restore_mtime(job, guest_os_family)
+            if job.source_mtime is None:
+                job.log("Restore metadata was requested, but the source had no mtime to apply - skipped.")
+            else:
+                job.log("Restoring the original modified time.")
+                await _restore_mtime(job, guest_os_family)
+                job.log("Modified time restored.")
             job.progress_current += 1
 
         if job.verify:
             job.status = RestoreStatus.VERIFYING
+            job.log("Verifying checksum against the source.")
             expected = hashlib.sha256(content).hexdigest()
             verified = await _verify_checksum(job, expected, guest_os_family)
             job.progress_current += 1
@@ -259,6 +276,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
                     "match the backed-up original.",
                 )
                 return
+            job.log("Checksum verified - matches the source.")
 
         jobs.mark_done(job.id)
     except asyncio.CancelledError:

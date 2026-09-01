@@ -61,6 +61,7 @@
       </div>
       <div class="modal-filter">
         <button type="button" class="btn-outline" :disabled="!selectedId || !selectedCancellable" @click="cancelSelected()">Cancel</button>
+        <button type="button" class="btn-outline" :disabled="!selectedId" @click="openLog()">View Log</button>
       </div>
       <div class="modal-table-wrap">
         <table class="modal-table">
@@ -69,7 +70,7 @@
           </thead>
           <tbody>
             <template x-for="j in jobs" :key="j.id">
-              <tr :class="{ 'is-selected': selectedId === j.id }" @click="selectedId = j.id">
+              <tr :class="{ 'is-selected': selectedId === j.id }" @click="selectedId = j.id" @dblclick="openLog()">
                 <td x-text="j.device"></td>
                 <td x-text="j.task_name"></td>
                 <td x-text="j.restore_version"></td>
@@ -87,6 +88,27 @@
         <span class="modal-count" x-text="jobs.length + ' items'"></span>
         <div class="modal-actions">
           <button type="button" class="btn-outline" @click="open = false">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay modal-overlay--log" x-show="logOpen" x-cloak @click.self="logOpen = false" @keydown.escape.window="logOpen = false">
+    <div class="modal-box modal-box--resizable">
+      <div class="modal-header">
+        <h2>Restore Log<span x-show="logDetail" x-text="' — ' + (logDetail && logDetail.task_name)"></span></h2>
+        <button type="button" class="modal-close" @click="logOpen = false">&times;</button>
+      </div>
+      <div class="restore-log-body" x-ref="logBody">
+        <p x-show="logLoading && !logDetail" class="restore-browse-status">Loading&hellip;</p>
+        <p x-show="logError" class="restore-error" x-text="logError"></p>
+        <p x-show="logDetail && logDetail.error" class="restore-error" x-text="'Error: ' + (logDetail && logDetail.error)"></p>
+        <pre class="restore-log-lines" x-text="logDetail ? logDetail.log.join('\n') : ''"></pre>
+      </div>
+      <div class="modal-footer">
+        <span class="modal-count" x-show="logDetail" x-text="logDetail && formatStatus(logDetail)"></span>
+        <div class="modal-actions">
+          <button type="button" class="btn-outline" @click="logOpen = false">Close</button>
         </div>
       </div>
     </div>

@@ -483,6 +483,31 @@ body {
   text-align: center;
 }
 
+.modal-overlay--log {
+  /* Layers above the Restore Task modal, which can stay open underneath
+     it - both use the same z-index:100 base from .modal-overlay. */
+  z-index: 110;
+}
+
+.restore-log-body {
+  flex: 1;
+  overflow: auto;
+  padding: 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.restore-log-lines {
+  margin: 0;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
 .user-menu-trigger {
   position: relative;
   display: flex;

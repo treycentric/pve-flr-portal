@@ -218,3 +218,102 @@ test('startDrag ignores pointerdown on the close button', () => {
   w.startDrag({ clientX: 0, clientY: 0, target: { closest: (sel) => (sel === '.modal-close' ? {} : null) } });
   assert.equal(win.listenerCount('pointermove'), 0);
 });
+
+// --- log viewer ------------------------------------------------------
+
+function withAlpineStubs(w) {
+  w.$nextTick = (fn) => fn();
+  w.$refs = { logBody: { scrollTop: 0, scrollHeight: 500 } };
+  return w;
+}
+
+test('openLog is a no-op without a selection', () => {
+  const { restoreJobsWidget } = loadApp();
+  const w = withAlpineStubs(restoreJobsWidget());
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('should not fetch without a selected job');
+  };
+  try {
+    w.openLog();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(w.logOpen, false);
+});
+
+test('openLog fetches the selected job’s detail and opens the viewer', async () => {
+  const { restoreJobsWidget } = loadApp();
+  const w = withAlpineStubs(restoreJobsWidget());
+  w.selectedId = 'job-1';
+  let requestedUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'running', log: ['line one', 'line two'] }) };
+  };
+  try {
+    w.openLog();
+    await new Promise((r) => setTimeout(r, 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(requestedUrl, '/api/restore-jobs/job-1');
+  assert.equal(w.logOpen, true);
+  assert.deepEqual(w.logDetail.log, ['line one', 'line two']);
+  // Auto-scrolled to the bottom.
+  assert.equal(w.$refs.logBody.scrollTop, w.$refs.logBody.scrollHeight);
+});
+
+test('refreshLog surfaces the server error detail on failure', async () => {
+  const { restoreJobsWidget } = loadApp();
+  const w = withAlpineStubs(restoreJobsWidget());
+  w.logJobId = 'job-1';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, json: async () => ({ detail: 'No such restore job' }) });
+  try {
+    await w.refreshLog();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(w.logError, 'No such restore job');
+});
+
+test('refresh() piggybacks refreshLog() onto the same poll tick while the log viewer is open', async () => {
+  const { restoreJobsWidget } = loadApp();
+  const w = withAlpineStubs(restoreJobsWidget());
+  w.logOpen = true;
+  w.logJobId = 'job-1';
+  const calledUrls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calledUrls.push(url);
+    if (url === '/api/restore-jobs') return { ok: true, json: async () => [] };
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'running', log: ['still going'] }) };
+  };
+  try {
+    await w.refresh();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calledUrls, ['/api/restore-jobs', '/api/restore-jobs/job-1']);
+  assert.deepEqual(w.logDetail.log, ['still going']);
+});
+
+test('refresh() does not fetch the log when the viewer is closed', async () => {
+  const { restoreJobsWidget } = loadApp();
+  const w = withAlpineStubs(restoreJobsWidget());
+  w.logOpen = false;
+  const calledUrls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calledUrls.push(url);
+    return { ok: true, json: async () => [] };
+  };
+  try {
+    await w.refresh();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calledUrls, ['/api/restore-jobs']);
+});

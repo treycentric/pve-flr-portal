@@ -387,6 +387,18 @@ async def restore_jobs_list(session: SessionData = Depends(auth.get_session)):
     return JSONResponse([job.to_dict() for job in restore_jobs.manager.list_jobs()])
 
 
+@app.get("/api/restore-jobs/{job_id}")
+async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.get_session)):
+    """A single job's full detail, including its step-by-step log
+    (restore_runner.py's job.log() calls) - kept out of the list endpoint
+    above to keep that one light on every poll; fetched on demand when a
+    user opens the log viewer for one specific job."""
+    job = restore_jobs.manager.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such restore job")
+    return JSONResponse(job.to_detail_dict())
+
+
 @app.post("/api/restore-jobs/{job_id}/cancel")
 async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.get_session)):
     job = restore_jobs.manager.get(job_id)

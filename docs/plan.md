@@ -881,6 +881,25 @@ entry points at. Two reasons this matters, both raised in review:
   own Close button and the table's row-selection clicks the same way it
   once broke the timeline's marker clicks).
 
+  **Real-world finding (2026-09-02):** a restore failed with no way to
+  see why - `RestoreJob.error` existed on the backend but the modal
+  never rendered it, and there was no step-by-step trail at all, only
+  the terminal message. Added `RestoreJob.log()` (each call prefixed
+  with elapsed seconds since `started_at`), called at every meaningful
+  step in `restore_runner.py` (download size, chunk-count decision,
+  guest-exec capability check, scratch dir creation, per-phase
+  completion, metadata skip-with-no-mtime, verify result) and
+  automatically by `mark_done`/`mark_failed`/`mark_cancelled` so every
+  job gets a consistent terminal entry regardless of call site. Kept
+  out of the polled list endpoint (`RestoreJob.to_dict()`) to keep that
+  payload light; a new `GET /api/restore-jobs/{id}` returns the full
+  detail (`to_detail_dict()`, list + log) on demand. A "View Log"
+  button (or double-clicking a row) in the Restore Task modal opens a
+  second modal showing it, live-updated by piggybacking on the same 4s
+  poll tick the job list already uses whenever the log viewer is open,
+  rather than running a second timer — auto-scrolls to the bottom on
+  each update.
+
 **Sequencing:**
 1. ~~Empirical verification against a real guest~~ — **done 2026-09-01**,
    see above.

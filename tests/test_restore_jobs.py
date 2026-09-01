@@ -163,6 +163,36 @@ def test_progress_percent_clamped_to_100(manager, session_data):
     assert job.progress_percent == 100
 
 
+def test_log_appends_elapsed_prefixed_lines(manager, session_data):
+    job = _make(manager, session_data)
+    job.log("first")
+    job.log("second")
+    assert len(job.log_lines) == 2
+    assert job.log_lines[0].endswith("first")
+    assert job.log_lines[0].startswith("+")
+    assert job.log_lines[1].endswith("second")
+
+
+def test_to_dict_omits_log_to_dict_includes_log(manager, session_data):
+    job = _make(manager, session_data)
+    job.log("something happened")
+    assert "log" not in job.to_dict()
+    assert job.to_detail_dict()["log"] == job.log_lines
+    assert job.to_detail_dict()["id"] == job.to_dict()["id"]
+
+
+def test_mark_done_failed_cancelled_each_append_a_log_line(manager, session_data):
+    for outcome, marker in [
+        ("done", lambda j: manager.mark_done(j.id)),
+        ("failed", lambda j: manager.mark_failed(j.id, "boom")),
+        ("cancelled", lambda j: manager.mark_cancelled(j.id)),
+    ]:
+        job = _make(manager, session_data)
+        before = len(job.log_lines)
+        marker(job)
+        assert len(job.log_lines) == before + 1, outcome
+
+
 def test_restore_metadata_and_verify_are_independent_opt_ins(manager, session_data):
     # Not a "quick vs full" choice - a job can restore metadata without
     # verifying, verify without restoring metadata, or neither.

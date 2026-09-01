@@ -44,6 +44,14 @@ function restoreJobsWidget() {
     // load so the position persists across repeated opens/closes.
     dragX: 0,
     dragY: 0,
+    // Log viewer - a second modal, live-updated by piggybacking on the
+    // same poll tick as the job list (below) rather than running its own
+    // separate timer.
+    logOpen: false,
+    logJobId: null,
+    logDetail: null,
+    logLoading: false,
+    logError: null,
     get activeCount() {
       return this.jobs.filter((j) => ACTIVE_STATUSES.includes(j.status)).length;
     },
@@ -64,6 +72,7 @@ function restoreJobsWidget() {
         // Transient failure - keep showing the last known list rather
         // than flashing it empty on every hiccup.
       }
+      if (this.logOpen) await this.refreshLog();
     },
     async cancelSelected() {
       if (!this.selectedId || !this.selectedCancellable) return;
@@ -71,6 +80,36 @@ function restoreJobsWidget() {
         await fetch('/api/restore-jobs/' + encodeURIComponent(this.selectedId) + '/cancel', { method: 'POST' });
       } finally {
         await this.refresh();
+      }
+    },
+    openLog() {
+      if (!this.selectedId) return;
+      this.logJobId = this.selectedId;
+      this.logDetail = null;
+      this.logError = null;
+      this.logOpen = true;
+      this.refreshLog();
+    },
+    async refreshLog() {
+      if (!this.logJobId) return;
+      this.logLoading = true;
+      try {
+        const resp = await fetch('/api/restore-jobs/' + encodeURIComponent(this.logJobId));
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.logError = data.detail || 'Could not load this job’s log.';
+          return;
+        }
+        this.logDetail = data;
+        this.logError = null;
+        this.$nextTick(() => {
+          const el = this.$refs.logBody;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      } catch (e) {
+        this.logError = 'Could not load this job’s log: ' + e;
+      } finally {
+        this.logLoading = false;
       }
     },
     formatElapsed(seconds) {

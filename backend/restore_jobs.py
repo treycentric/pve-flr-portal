@@ -84,6 +84,15 @@ class RestoreJob:
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     cancel_requested: bool = False
+    # Step-by-step trail restore_runner.py records as it goes (see log()
+    # below) - what actually happened, not just the terminal error. The
+    # list view (to_dict()) omits this to keep the polled job list light;
+    # to_detail_dict() (a single job, fetched on demand) includes it.
+    log_lines: list[str] = field(default_factory=list)
+
+    def log(self, message: str) -> None:
+        elapsed = round(time.time() - self.started_at, 1)
+        self.log_lines.append(f"+{elapsed}s {message}")
 
     @property
     def elapsed_seconds(self) -> float:
@@ -117,6 +126,9 @@ class RestoreJob:
             "error": self.error,
             "cancellable": self.is_active,
         }
+
+    def to_detail_dict(self) -> dict:
+        return {**self.to_dict(), "log": list(self.log_lines)}
 
 
 class RestoreJobManager:
@@ -195,12 +207,14 @@ class RestoreJobManager:
         if job is not None:
             job.status = RestoreStatus.CANCELLED
             job.finished_at = time.time()
+            job.log("Cancelled.")
 
     def mark_done(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
         if job is not None:
             job.status = RestoreStatus.DONE
             job.finished_at = time.time()
+            job.log("Restore completed successfully.")
 
     def mark_failed(self, job_id: str, error: str) -> None:
         job = self._jobs.get(job_id)
@@ -208,6 +222,7 @@ class RestoreJobManager:
             job.status = RestoreStatus.FAILED
             job.error = error
             job.finished_at = time.time()
+            job.log(f"Failed: {error}")
 
     def clear(self) -> None:
         """Test/dev helper - mirrors auth._sessions.clear()'s role in tests."""
