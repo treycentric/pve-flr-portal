@@ -820,24 +820,31 @@ entry points at. Two reasons this matters, both raised in review:
     PowerShell (`Get-ChildItem -Directory` filtered on the
     `ReparsePoint` attribute) so junctions/symlinked directories are
     excluded from the listing outright rather than merely erroring
-    when clicked — the general fix, not a per-name workaround. The
-    path rides in as PowerShell's `$args[0]` (a separate guest-exec
-    argv element, passed the same way `find`'s path argument already
-    was on the POSIX side) rather than being interpolated into the
-    script string, so this doesn't introduce a new injection surface.
-    A small denylist of known junction names
-    (`_KNOWN_WINDOWS_JUNCTIONS` in `guest_browse.py`) stays as a
-    defensive fallback purely for manual-entry mode, where a user can
-    still type such a path directly — Windows blocks listing into it
-    either way, so the fallback just gives a clearer message than the
-    raw error in that one remaining path. **Unverified live:** the
-    PowerShell listing itself (this specific query/output shape)
-    hasn't been checked against a real guest the way the earlier
-    `cmd`/`wmic`/`dir` calls were — worth confirming output parses
-    cleanly and `ErrorAction Stop`/the `try`/`catch` actually produces
-    a non-zero exit on failure, since PowerShell's exit-code behavior
-    for script errors doesn't always follow the same convention as a
-    native command.
+    when clicked — the general fix, not a per-name workaround. A small
+    denylist of known junction names (`_KNOWN_WINDOWS_JUNCTIONS` in
+    `guest_browse.py`) stays as a defensive fallback purely for
+    manual-entry mode, where a user can still type such a path
+    directly — Windows blocks listing into it either way, so the
+    fallback just gives a clearer message than the raw error in that
+    one remaining path.
+
+    **Real-world finding (2026-09-02), corrected once live-tested:**
+    the first version passed `path` as a *trailing argv element* after
+    `-Command`, expecting PowerShell to bind it to `$args[0]` inside
+    the script — confirmed live that this does not work
+    ("Cannot bind argument to parameter 'LiteralPath' because it is
+    null"). `powershell -Command` appends trailing CLI arguments onto
+    the end of the **command string itself**, not into the script's
+    `$args`, so `$args[0]` was never actually populated. Fixed by
+    embedding `path` directly as a PowerShell single-quoted string
+    literal in the `-Command` script — safe specifically because
+    `_check_path_safe()` (already called earlier in the same function)
+    rejects `'` along with every other shell-metacharacter, so nothing
+    reaching this point can contain a quote to break out of the
+    literal, and a single-quoted PowerShell string doesn't interpret
+    anything else ($ variables, backticks) that the denylist doesn't
+    already block for other reasons. Guarded by a regression test
+    inspecting the actual `command` array sent to `agent/exec`.
 - **Running-jobs indicator** — a new icon in the top bar between the
   guest/task picker and the user menu (matching the reference
   screenshot's placement), showing a small spinning ring around it

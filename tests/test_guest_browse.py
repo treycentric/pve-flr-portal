@@ -114,6 +114,29 @@ async def test_list_directories_windows_subfolder(session_data):
 
 
 @respx.mock
+async def test_windows_subfolder_listing_embeds_path_in_command_not_a_trailing_arg(session_data):
+    # Regression test for the real bug: PowerShell -Command does NOT bind
+    # trailing CLI arguments to $args inside the script - it appends them
+    # to the command *string* instead, so a previous version's
+    # `[..., "-Command", script, path]` shape left $args[0] null. The path
+    # must be embedded in the -Command script itself (safe here because
+    # _check_path_safe already rejects `'`), with no extra trailing
+    # element in the command array.
+    exec_route = _exec_route().mock(return_value=httpx.Response(200, json={"data": {"pid": 1}}))
+    _status_route().mock(
+        return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": ""}})
+    )
+    await list_directories(session_data, "vm", "133", "windows", "C:\\Program Files")
+
+    from urllib.parse import parse_qs
+
+    body = exec_route.calls.last.request.read().decode()
+    command_parts = parse_qs(body)["command"]
+    assert command_parts == ["powershell", "-NoProfile", "-NonInteractive", "-Command", command_parts[-1]]
+    assert "LiteralPath 'C:\\Program Files'" in command_parts[-1]
+
+
+@respx.mock
 async def test_list_directories_nonzero_exit_raises_listing_error(session_data):
     _exec_route().mock(return_value=httpx.Response(200, json={"data": {"pid": 9}}))
     _status_route().mock(

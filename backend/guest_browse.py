@@ -154,21 +154,28 @@ async def list_directories(
         # directories needs the ReparsePoint attribute - `dir /b` (bare
         # names) can't distinguish a real directory from one, and even
         # `dir`'s non-bare <JUNCTION> marker would mean parsing its
-        # locale-dependent date/time columns. `path` rides in as $args[0],
-        # a separate guest-exec argv element, never interpolated into the
-        # script string - same "no shell string-building" approach as
-        # `find`'s argv on the Linux/BSD side.
+        # locale-dependent date/time columns.
+        #
+        # Real-world finding: passing `path` as a trailing argv element
+        # after -Command and referencing it as $args[0] does NOT work -
+        # confirmed live ("Cannot bind argument to parameter 'LiteralPath'
+        # because it is null"). With -Command, PowerShell appends trailing
+        # CLI arguments onto the end of the *command string itself* rather
+        # than binding them to $args inside the script, so $args[0] was
+        # never actually populated. Embedding `path` as a single-quoted
+        # PowerShell string literal instead is safe here specifically
+        # because _check_path_safe() (called above, before this branch)
+        # already rejects `'` along with the other shell-metacharacters -
+        # a single-quoted PowerShell string doesn't interpret anything
+        # else ($ variables, backticks, etc.), so there's nothing left in
+        # an already-validated path that could break out of the literal.
+        script = (
+            f"try {{ Get-ChildItem -LiteralPath '{path}' -Directory -Force -ErrorAction Stop | "
+            "Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | "
+            "Select-Object -ExpandProperty Name } catch { Write-Error $_; exit 1 }"
+        )
         exitcode, out, err = await _run_exec(
-            session,
-            node_type,
-            vmid,
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "try { Get-ChildItem -LiteralPath $args[0] -Directory -Force -ErrorAction Stop | "
-                "Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | "
-                "Select-Object -ExpandProperty Name } catch { Write-Error $_; exit 1 }",
-                path,
-            ],
+            session, node_type, vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
         )
         if exitcode != 0:
             raw = err.strip() or out.strip() or f"Listing failed (exit {exitcode})"
