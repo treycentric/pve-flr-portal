@@ -835,20 +835,27 @@ function portalApp(rawSnapshots) {
           g.insertBefore(tail, text);
 
         } else {
-          // Unselected marker: a pale-blue numbered circle. A lone snapshot
-          // still shows its "1"; several collapsed onto one tick show the
-          // count. Clicking a count > 1 opens the list picker
+          // Unselected marker: the small pale-blue numbered pill + tail. A
+          // lone snapshot still shows its "1"; several collapsed onto one
+          // tick show the count. Clicking a count > 1 opens the list picker
           // (activateGroup); it never auto-selects (issue #18).
-          const badge = document.createElementNS(NS, 'circle');
-          badge.setAttribute('cx', '0');
-          badge.setAttribute('cy', '-16');
-          badge.setAttribute('r', '8');
-          badge.setAttribute('class', 'timeline-bubble');
-          g.appendChild(badge);
+          const bubble = document.createElementNS(NS, 'rect');
+          bubble.setAttribute('x', '-9');
+          bubble.setAttribute('y', '-22');
+          bubble.setAttribute('width', '18');
+          bubble.setAttribute('height', '14');
+          bubble.setAttribute('rx', '3');
+          bubble.setAttribute('class', 'timeline-bubble');
+          g.appendChild(bubble);
+
+          const tail = document.createElementNS(NS, 'polygon');
+          tail.setAttribute('points', '-3,-8 3,-8 0,-4');
+          tail.setAttribute('class', 'timeline-bubble');
+          g.appendChild(tail);
 
           const count = document.createElementNS(NS, 'text');
           count.setAttribute('x', '0');
-          count.setAttribute('y', '-13');
+          count.setAttribute('y', '-11.5');
           count.setAttribute('text-anchor', 'middle');
           count.setAttribute('class', 'timeline-bubble-label timeline-bubble-label--count');
           count.textContent = String(group.items.length);
