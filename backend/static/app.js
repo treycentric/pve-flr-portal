@@ -167,6 +167,7 @@ function portalApp(rawSnapshots) {
     _w: 1000,
     _axisY: 60,
     _bubbleY: 12,
+    _bubbleHeight: 22,
 
     // --- browse state ---
     volume: null,
@@ -462,11 +463,14 @@ function portalApp(rawSnapshots) {
         this.activeDayKey = key;
         this.activeDayItems = items;
         this.activeDayX = screenX;
-        // Anchor the popup's BOTTOM edge just above the callout band, near
-        // the top of the panel; it grows upward from there (translateY(-100%)
-        // in CSS). Anchoring it near the axis instead would make it expand
-        // back down over the ruler as the list gets longer.
-        this.activeDayTop = this._bubbleY - 4;
+        // Anchor the popup's BOTTOM edge to the BOTTOM of the callout band,
+        // so the picker covers the dark-blue callout it was opened from
+        // rather than floating just above it; it grows upward from there
+        // (translateY(-100%) in CSS). Anchoring it near the axis instead
+        // would make it expand back down over the ruler as the list gets
+        // longer. The picker's z-index (10) beats the toolbar's (2), so the
+        // part that overlaps the toolbar band still paints on top.
+        this.activeDayTop = this._bubbleY + this._bubbleHeight;
       }
     },
 
@@ -700,6 +704,7 @@ function portalApp(rawSnapshots) {
       const BUBBLE_TOP = BUBBLE_Y - AXIS_Y;
       this._axisY = AXIS_Y;
       this._bubbleY = BUBBLE_Y;
+      this._bubbleHeight = BUBBLE_HEIGHT;
 
       const axis = document.createElementNS(NS, 'line');
       axis.setAttribute('x1', '0');

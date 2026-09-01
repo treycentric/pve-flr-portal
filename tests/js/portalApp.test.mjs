@@ -157,6 +157,24 @@ test('the selected callout number is the position within its own tick group, not
   assert.equal(a._calloutPosition(cluster), 1);
 });
 
+test('toggleDay anchors the picker over the callout it was opened from, and toggles shut', () => {
+  const { portalApp } = loadApp();
+  const a = portalApp(snaps);
+  a._bubbleY = 12;
+  a._bubbleHeight = 22;
+
+  a.toggleDay('2026-02-11', snaps, 420);
+  assert.equal(a.activeDayKey, '2026-02-11');
+  assert.equal(a.activeDayX, 420);
+  // Bottom edge of the popup == bottom edge of the dark-blue callout, so
+  // the picker covers it rather than floating above it.
+  assert.equal(a.activeDayTop, 34);
+
+  a.toggleDay('2026-02-11', snaps, 420);
+  assert.equal(a.activeDayKey, null);
+  assert.deepEqual(a.activeDayItems, []);
+});
+
 test('selectedIndex / hasOlder / hasNewer follow selectedVolume', () => {
   const { portalApp } = loadApp();
   const a = portalApp(snaps);
