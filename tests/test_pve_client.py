@@ -89,10 +89,39 @@ async def test_write_guest_file_posts_file_and_content(session_data):
 
 
 @respx.mock
-async def test_write_guest_file_raises_on_http_error(session_data):
+async def test_write_guest_file_raises_on_http_error(session_data, monkeypatch):
+    from backend import guest_agent_lock
+
+    monkeypatch.setattr(guest_agent_lock.asyncio, "sleep", lambda *_a, **_kw: _noop())
     respx.post(f"{API}/nodes/localhost/qemu/133/agent/file-write").mock(return_value=httpx.Response(500, text="boom"))
     with pytest.raises(httpx.HTTPStatusError):
         await pve_client.write_guest_file(session_data, "vm", "133", "/etc/x", "hello")
+
+
+async def _noop():
+    return None
+
+
+@respx.mock
+async def test_write_guest_file_retries_a_definite_error_then_succeeds(session_data, monkeypatch):
+    from backend import guest_agent_lock
+
+    monkeypatch.setattr(guest_agent_lock.asyncio, "sleep", lambda *_a, **_kw: _noop())
+    route = respx.post(f"{API}/nodes/localhost/qemu/133/agent/file-write").mock(
+        side_effect=[httpx.Response(500, text="busy"), httpx.Response(200, json={"data": None})]
+    )
+    await pve_client.write_guest_file(session_data, "vm", "133", "/etc/x", "hello")
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_write_guest_file_does_not_retry_on_timeout(session_data):
+    route = respx.post(f"{API}/nodes/localhost/qemu/133/agent/file-write").mock(
+        side_effect=httpx.TimeoutException("timed out")
+    )
+    with pytest.raises(httpx.TimeoutException):
+        await pve_client.write_guest_file(session_data, "vm", "133", "/etc/x", "hello")
+    assert route.call_count == 1
 
 
 @respx.mock

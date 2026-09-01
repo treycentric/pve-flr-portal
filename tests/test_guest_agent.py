@@ -1,7 +1,7 @@
 import httpx
 import respx
 
-from backend import guest_agent
+from backend import guest_agent, guest_agent_lock
 from backend.guest_agent import get_restore_capabilities, parse_capabilities
 
 API = guest_agent._API_ROOT
@@ -137,7 +137,7 @@ def test_guest_os_family_unknown_when_no_osinfo():
 
 @respx.mock
 async def test_get_restore_capabilities_degrades_cleanly_when_agent_info_403s(session_data, monkeypatch):
-    monkeypatch.setattr(guest_agent.asyncio, "sleep", _fake_sleep)  # skip the real retry delay
+    monkeypatch.setattr(guest_agent_lock.asyncio, "sleep", _fake_sleep)  # skip the real retry delay
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
@@ -161,11 +161,10 @@ async def _fake_sleep(*_args, **_kwargs):
 
 
 @respx.mock
-async def test_get_restore_capabilities_retries_agent_info_once_on_timeout(session_data, monkeypatch):
-    # The known qemu-guest-agent quirk this guards against: a slow first
-    # response after being idle - here simulated as a timeout on the
-    # first attempt, succeeding on the retry.
-    monkeypatch.setattr(guest_agent.asyncio, "sleep", _fake_sleep)
+async def test_get_restore_capabilities_retries_agent_info_once_on_definite_http_error(session_data, monkeypatch):
+    # Retry only applies to a *completed* bad response - PVE/QEMU already
+    # finished handling it, so a second attempt is safe.
+    monkeypatch.setattr(guest_agent_lock.asyncio, "sleep", _fake_sleep)
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
@@ -175,7 +174,7 @@ async def test_get_restore_capabilities_retries_agent_info_once_on_timeout(sessi
     respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
     respx.get(f"{API}/nodes/localhost/qemu/133/agent/info").mock(
         side_effect=[
-            httpx.TimeoutException("timed out"),
+            httpx.Response(500, text="temporary error"),
             httpx.Response(200, json={"data": {"supported_commands": []}}),
         ]
     )
@@ -185,6 +184,32 @@ async def test_get_restore_capabilities_retries_agent_info_once_on_timeout(sessi
 
     caps = await get_restore_capabilities(session_data, "vm", "133")
     assert caps.agent_running  # the retry succeeded, so this must not read as "not running"
+
+
+@respx.mock
+async def test_get_restore_capabilities_does_not_retry_after_a_timeout(session_data):
+    # A timeout is ambiguous - qemu-guest-agent only accepts one command
+    # at a time over its virtio-serial channel, and a client-side timeout
+    # doesn't prove the in-guest command was actually abandoned. Sending
+    # a second one anyway risks desyncing the channel, so this must NOT
+    # retry - one attempt, then a clean "unavailable".
+    respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
+        return_value=httpx.Response(200, json={"data": {"agent": "1"}})
+    )
+    respx.get(f"{API}/access/permissions").mock(
+        return_value=httpx.Response(200, json={"data": {"/vms/133": {"VM.GuestAgent.FileWrite": 1}}})
+    )
+    respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
+    route = respx.get(f"{API}/nodes/localhost/qemu/133/agent/info").mock(
+        side_effect=httpx.TimeoutException("timed out")
+    )
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/get-osinfo").mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+
+    caps = await get_restore_capabilities(session_data, "vm", "133")
+    assert not caps.agent_running
+    assert route.call_count == 1  # no retry after an ambiguous failure
 
 
 @respx.mock

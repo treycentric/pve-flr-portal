@@ -73,6 +73,20 @@ def clear_restore_jobs():
     restore_jobs.manager.clear()
 
 
+@pytest.fixture(autouse=True)
+def clear_guest_agent_locks():
+    """asyncio.Lock is bound to the event loop that created it, and tests
+    widely reuse the same vmid ("133") under a fresh event loop per test
+    - a lock left over from a previous test would raise "bound to a
+    different event loop" if reacquired here. Same clear-between-tests
+    convention as sessions/restore jobs above."""
+    from backend import guest_agent_lock
+
+    guest_agent_lock.clear()
+    yield
+    guest_agent_lock.clear()
+
+
 @pytest.fixture
 def api_base():
     from backend.config import settings

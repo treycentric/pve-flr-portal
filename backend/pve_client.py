@@ -16,6 +16,7 @@ import httpx
 
 from .auth import SessionData, pve_headers
 from .config import settings
+from .guest_agent_lock import call_with_retries, guest_agent_command
 
 _BASE = f"https://{settings.pve_host}:8006/api2/json/nodes/localhost/storage/{settings.pve_storage}/file-restore"
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
@@ -97,14 +98,28 @@ async def write_guest_file(session: SessionData, guest_type: str, vmid: str, pat
     (`restore_chunking.py`'s Latin-1 mapping of raw bytes, confirmed live
     against a real guest to round-trip losslessly - NOT base64, which
     this endpoint does not decode). `guest_type` is the app-internal
-    "vm"/"ct" value - translated to PVE's "qemu"/"lxc" node segment here."""
-    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client:
+    "vm"/"ct" value - translated to PVE's "qemu"/"lxc" node segment here.
+    Runs under guest_agent_lock's per-vmid lock (serializes this app's own
+    overlapping requests) and retries via call_with_retries (rides out a
+    legitimate busy response from something else using the same channel -
+    safe to resend here since a repeat of the exact same truncate-and-
+    write is idempotent in effect) - see guest_agent_lock's module
+    docstring for the full rationale on both."""
+    node_type = api_node_type(guest_type)
+
+    async def do_write():
         resp = await client.post(
-            f"{_API_ROOT}/nodes/localhost/{api_node_type(guest_type)}/{vmid}/agent/file-write",
+            f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/file-write",
             data={"file": path, "content": content},
             headers=pve_headers(session),
         )
         resp.raise_for_status()
+
+    async with (
+        guest_agent_command(vmid),
+        httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client,
+    ):
+        await call_with_retries(do_write)
 
 
 async def open_download(

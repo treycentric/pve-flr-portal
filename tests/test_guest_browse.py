@@ -142,3 +142,49 @@ async def test_run_exec_polls_until_exited(session_data, monkeypatch):
 
 async def _noop():
     return None
+
+
+@respx.mock
+async def test_run_exec_retries_the_start_call_on_a_definite_error(session_data, monkeypatch):
+    from backend import guest_agent_lock
+
+    monkeypatch.setattr(guest_browse.asyncio, "sleep", lambda *_: _noop())
+    monkeypatch.setattr(guest_agent_lock.asyncio, "sleep", lambda *_a, **_kw: _noop())
+    start_route = _exec_route()
+    start_route.side_effect = [
+        httpx.Response(500, text="busy"),
+        httpx.Response(200, json={"data": {"pid": 1}}),
+    ]
+    _status_route().mock(
+        return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "ok"}})
+    )
+
+    exitcode, out, _err = await guest_browse._run_exec(session_data, "qemu", "133", ["echo", "hi"])
+    assert exitcode == 0
+    assert out == "ok"
+    assert start_route.call_count == 2
+
+
+@respx.mock
+async def test_run_exec_does_not_retry_start_call_on_timeout(session_data):
+    start_route = _exec_route()
+    start_route.side_effect = httpx.TimeoutException("timed out")
+
+    with pytest.raises(httpx.TimeoutException):
+        await guest_browse._run_exec(session_data, "qemu", "133", ["echo", "hi"])
+    assert start_route.call_count == 1
+
+
+@respx.mock
+async def test_run_exec_tolerates_a_transient_error_mid_poll(session_data, monkeypatch):
+    monkeypatch.setattr(guest_browse.asyncio, "sleep", lambda *_: _noop())
+    _exec_route().mock(return_value=httpx.Response(200, json={"data": {"pid": 5}}))
+    poll_route = _status_route()
+    poll_route.side_effect = [
+        httpx.Response(500, text="transient"),  # bad response mid-poll - must not abort
+        httpx.Response(200, json={"data": {"exited": 0}}),
+        httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "done"}}),
+    ]
+    exitcode, out, _err = await guest_browse._run_exec(session_data, "qemu", "133", ["echo", "hi"])
+    assert exitcode == 0
+    assert out == "done"

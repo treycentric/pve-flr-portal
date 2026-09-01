@@ -577,6 +577,22 @@ arbitrary feature line):
   (the concatenation step alone forces this, independent of whether
   metadata restore is also requested).
 
+  **Compression option for larger transfers** (your suggestion,
+  worth building in from the start here rather than bolting on later):
+  compress the source bytes before chunking - the virtio-serial channel
+  is the actual bottleneck for a multi-chunk restore, so fewer/smaller
+  chunks directly means fewer round-trips and less total wall time, not
+  just less bandwidth. gzip is the practical choice (`gzip.compress()`
+  in the backend; `gunzip`/`Expand-Archive`-adjacent decompression via
+  one more `guest-exec` step after reassembly - Windows lacks a gzip-
+  native cmd/PowerShell one-liner as clean as Linux's `gunzip`, so that
+  side needs its own small check during implementation, not assumed).
+  Only worth it above some size/compressibility threshold - a small or
+  already-compressed file (most binaries, already-compressed formats)
+  isn't worth the extra decompression step's own complexity and
+  failure surface. Not required for Design B's first cut; a natural
+  opt-in refinement once the plain multi-chunk path is solid.
+
 **Metadata restore and verification are independent opt-ins, not tied
 to which write mechanism ends up used.** Design A/B above is an
 internal implementation detail (which mechanism moves the bytes), not
@@ -639,19 +655,57 @@ root.
 | Caller's own privilege | `GET /access/permissions?path=/vms/{vmid}` | Which of the five `VM.GuestAgent.*` grants the logged-in user's ticket carries |
 | PVE version | `GET /version` | PVE 8 only has coarse `VM.Monitor` — no granular `VM.GuestAgent.*` at all, so restore is unavailable regardless of the other checks |
 
-**Real-world finding (2026-09-01):** `agent/info` is on the critical
-path for every restore path's availability, and `qemu-guest-agent` is
-known to answer its first query slowly after being idle — an in-guest
-QGA quirk, not a bug in this app, but one that showed up directly:
-"still enabled" moments earlier, then "not enabled or not responding"
-on the very next check (the browse endpoint always re-verifies
-server-side rather than trusting the earlier capabilities response).
-Two fixes: `_get_agent_json()` now catches `httpx.HTTPError` (the
-common base for both a bad status *and* a timeout/connection error —
-only `HTTPStatusError` was caught before, so a raw timeout used to
-escape uncaught) and gives `agent/info` specifically one short retry
-before giving up; `get-osinfo` (display-only, not gating anything)
-stays single-attempt.
+**Real-world finding (2026-09-01) and the resulting `guest_agent_lock`
+module.** `agent/info` is on the critical path for every restore
+path's availability, and this surfaced two genuine problems in
+practice, not just theory:
+- `qemu-guest-agent` accepts only **one command at a time** over its
+  virtio-serial channel. An early version of this code retried
+  `agent/info` after *any* failure, including a client-side timeout —
+  but a client-side timeout doesn't prove the in-guest command was
+  actually abandoned, so that retry could send a second command while
+  the first was still in flight. That's a known way to desync the
+  channel until the guest's agent is restarted, and is the most likely
+  explanation for an observed regression: capability checks reading
+  "still enabled" moments earlier, then "not enabled or not
+  responding" on every check after (restarting the in-guest service
+  didn't clear it, consistent with a channel-level desync rather than
+  the service actually having stopped).
+- Even without that bug, this app's own requests can still overlap
+  each other (two browser tabs, a capability check landing mid-browse)
+  — a structural problem, not just a retry-specific one.
+
+Fixed with a new `backend/guest_agent_lock.py`, used by every actual
+agent/* call site (`guest_agent.py`'s `agent/info`/`get-osinfo`,
+`pve_client.write_guest_file()`'s `agent/file-write`,
+`guest_browse.py`'s `agent/exec`+`agent/exec-status`) — never the
+plain PVE API calls like `/config` or `/access/permissions`, which
+aren't guest-agent commands and don't share the channel:
+- **`guest_agent_command(vmid)`** — an async context manager holding a
+  per-vmid `asyncio.Lock` for the full request/response cycle of one
+  command, serializing this app's own overlapping requests. Different
+  vmids never block each other.
+- **`call_with_retries()`** — retries only on a *definite*
+  `httpx.HTTPStatusError`, never on a timeout/connection error. The
+  lock only stops overlap from this app; it can't stop something else
+  entirely (a scheduled PBS backup's fs-freeze, another admin's `qm
+  agent` call, the Proxmox web UI) from being mid-command on the same
+  channel — but PVE/QEMU surfaces that legitimate, externally-caused
+  contention as a completed error response, not a timeout, so it's
+  safe to retry. There's no dedicated "is the agent busy" query in the
+  PVE API to check this proactively — the error response on an actual
+  attempt is the only observable signal.
+- **`settings.guest_agent_min_command_gap_seconds`**
+  (`GUEST_AGENT_MIN_COMMAND_GAP_SECONDS`, default `0` = off) — a
+  courtesy setting distinct from the correctness-focused lock above:
+  a minimum gap this app waits between the end of its own previous
+  command on a guest and the start of its next one, so it doesn't
+  monopolize the channel once it's free. Not very consequential for
+  today's single-write restore, but will matter once a multi-chunk
+  restore (§ Design B above) is sending many sequential commands back
+  to back — left off by default since there's no evidence yet of what
+  a typical homelab actually needs; tune it up if a restore is ever
+  observed crowding out other guest-agent users.
 
 Response shape:
 ```json

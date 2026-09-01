@@ -26,6 +26,11 @@ def _int(name: str, default: int) -> int:
     return int(val) if val else default
 
 
+def _float(name: str, default: float) -> float:
+    val = os.environ.get(name)
+    return float(val) if val else default
+
+
 @dataclass(frozen=True)
 class Settings:
     pve_host: str
@@ -42,6 +47,20 @@ class Settings:
     tls_cert_file: str
     tls_key_file: str
 
+    # PH.5: minimum gap this app waits between the *end* of one
+    # guest-agent command and the *start* of its own next one, on the
+    # same guest (docs/plan.md §7.5). guest_agent_lock.py already
+    # prevents this app's own commands from overlapping (correctness);
+    # this is about not monopolizing the channel once it's free - a
+    # scheduled PBS backup's fs-freeze or another admin's `qm agent`
+    # call still needs a turn, especially once a multi-chunk restore is
+    # sending many sequential guest-agent commands back to back.
+    # Defaults to 0 (disabled) since the right value is workload-
+    # dependent and there's no evidence yet of what a typical homelab
+    # needs - tune up via GUEST_AGENT_MIN_COMMAND_GAP_SECONDS if a
+    # restore is observed crowding out other guest-agent users.
+    guest_agent_min_command_gap_seconds: float
+
 
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
@@ -51,4 +70,5 @@ settings = Settings(
     port=_int("PORT", 8008),
     tls_cert_file=_get("TLS_CERT_FILE", "certs/portal.crt"),
     tls_key_file=_get("TLS_KEY_FILE", "certs/portal.key"),
+    guest_agent_min_command_gap_seconds=_float("GUEST_AGENT_MIN_COMMAND_GAP_SECONDS", 0.0),
 )

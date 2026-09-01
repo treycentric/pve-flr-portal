@@ -14,6 +14,7 @@ import httpx
 
 from .auth import SessionData, pve_headers
 from .config import settings
+from .guest_agent_lock import call_with_retries, guest_agent_command
 from .pve_client import api_node_type
 
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
@@ -40,27 +41,52 @@ def _check_path_safe(path: str) -> None:
 
 async def _run_exec(session: SessionData, node_type: str, vmid: str, argv: list[str]) -> tuple[int, str, str]:
     """Runs one guest-exec command to completion (polling exec-status) and
-    returns (exitcode, stdout, stderr)."""
+    returns (exitcode, stdout, stderr). The whole exec-then-poll sequence
+    runs under guest_agent_lock's per-vmid lock (see that module) - the
+    exec-status polls are themselves guest-agent commands sharing the
+    same single-command-at-a-time virtio-serial channel, so nothing else
+    from *this app* may interleave for the full duration, not just the
+    initial POST.
+
+    The initial POST starts a new in-guest command, so - like every other
+    "start something new" call in this app - it only retries via
+    call_with_retries on a definite HTTP error response (something else
+    was legitimately using the channel), never on an ambiguous timeout.
+    Polling exec-status is different: it only ever asks about a pid that
+    already exists, so re-querying it is safe regardless of *why* the
+    previous poll failed - a transient error there just means "try again
+    next tick" rather than "not done yet", reusing the same ~15s budget
+    rather than aborting the whole listing over one bad poll."""
     headers = pve_headers(session)
-    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=20.0) as client:
+
+    async def start():
         resp = await client.post(
             f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/exec",
             data={"command": argv},
             headers=headers,
         )
         resp.raise_for_status()
-        pid = resp.json()["data"]["pid"]
+        return resp.json()["data"]["pid"]
+
+    async with (
+        guest_agent_command(vmid),
+        httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=20.0) as client,
+    ):
+        pid = await call_with_retries(start)
 
         for _ in range(30):  # ~15s of polling - a listing is a fast command
-            status_resp = await client.get(
-                f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/exec-status",
-                params={"pid": pid},
-                headers=headers,
-            )
-            status_resp.raise_for_status()
-            data = status_resp.json()["data"]
-            if data.get("exited"):
-                return data.get("exitcode", -1), data.get("out-data", ""), data.get("err-data", "")
+            try:
+                status_resp = await client.get(
+                    f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/exec-status",
+                    params={"pid": pid},
+                    headers=headers,
+                )
+                status_resp.raise_for_status()
+                data = status_resp.json()["data"]
+                if data.get("exited"):
+                    return data.get("exitcode", -1), data.get("out-data", ""), data.get("err-data", "")
+            except httpx.HTTPError:
+                pass  # transient - try again next tick, see docstring
             await asyncio.sleep(0.5)
         raise ListingError("Directory listing timed out")
 
