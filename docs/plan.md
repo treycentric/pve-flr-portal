@@ -1241,10 +1241,47 @@ itself.
    The rest of the app (UI, PVE API calls) stays HTTPS-only as always —
    this is a narrow, deliberate tradeoff on one specific route, not a
    general relaxation.
-5. **Not started.** Deploy-level: LXC/Docker additional-NIC
-   provisioning, firewall rule examples, and the user-facing
-   provisioning documentation (README.md section or
-   `docs/network-provisioning.md` — not `docs/dev/`, see above).
+5. ~~The actual dual-listener bind~~ — **done**: `run.py` now runs a
+   second, plain-HTTP `uvicorn.Server` per distinct configured data-NIC
+   IP, concurrently with the main HTTPS one, in the *same process* -
+   required, not incidental, since `restore_download`'s token store and
+   `restore_jobs.manager` are both in-memory and process-local, so a
+   guest's fetch has to land in the same process that minted its token
+   (a second `run.py` invocation would have its own empty stores and
+   404 every fetch). Each data listener binds to that NIC's specific IP
+   only, never `0.0.0.0` - binding broadly would defeat the whole point
+   of keeping the data plane separate from the UI/PVE-management
+   listener. Only takes this path when `RESTORE_DATA_NICS` is actually
+   configured; the unconfigured default keeps using plain
+   `uvicorn.run(..., reload=True)` for the familiar auto-reload dev
+   loop, which the multi-`Server` path can't support (uvicorn's
+   `--reload` supervisor wraps `uvicorn.run()`'s single-server
+   entrypoint specifically, not arbitrary concurrent `Server` instances).
+
+   **Docker networking note (live-tested against the real question of
+   how to run this locally):** the data listener binds to a literal IP
+   inside the container's own network namespace - Docker's default
+   bridge/NAT networking doesn't give a container the host's real LAN
+   IP at all, so a `RESTORE_DATA_NICS` entry naming an actual VM-subnet
+   IP would fail to bind. Docker Desktop's host-networking mode (or
+   `macvlan`/`ipvlan` on a native Linux Docker host) resolves this by
+   giving the container the real interface directly, matching how LXC
+   already behaves. Absent that, `local_ip` currently does double duty
+   as both *bind* address and the address embedded in the guest's fetch
+   URL - a NAT'd/port-published deployment would need those split into
+   two separate values (bind `0.0.0.0` inside the container, advertise
+   the host's real published-on IP in the URL), which isn't built.
+
+**Not started, remaining:** deploy-level LXC/Docker additional-NIC
+provisioning steps (the `pct set -netN`/Docker Compose `networks:`
+config an admin actually runs), firewall rule examples, and the
+user-facing provisioning documentation (README.md section or
+`docs/network-provisioning.md` — not `docs/dev/`, see above). Live
+end-to-end verification (a real guest actually fetching through a real
+data NIC) is still open — everything above has been unit-tested with
+guest-exec/QGA calls mocked, per this project's established practice for
+this kind of code, but not yet run against a real Proxmox host and
+guest.
 
 ## 8. Stack — and why
 

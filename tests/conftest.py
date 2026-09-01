@@ -12,6 +12,12 @@ os.environ.setdefault("PVE_HOST", "pve.test.local")
 os.environ.setdefault("PVE_STORAGE", "pbs")
 os.environ.setdefault("PVE_VERIFY_SSL", "false")
 os.environ.setdefault("SESSION_IDLE_TIMEOUT_MINUTES", "30")
+# Design C (docs/plan.md §7.6, issue #22) tests assume this is unconfigured
+# unless a test opts in itself (test_restore_runner.py's _with_data_nics) -
+# pinned here for the same reason as the rest of this block: a developer's
+# own real .env (e.g. while setting up live verification) must never leak
+# into what's supposed to be a hermetic test run.
+os.environ.setdefault("RESTORE_DATA_NICS", "[]")
 
 import time
 from pathlib import Path
