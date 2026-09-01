@@ -103,10 +103,3 @@ wasn't built for.
   factor on their PVE account, `/access/ticket` needs an extra
   round-trip the login flow doesn't do yet (`backend/auth.py`).
   Revisit if/when actually needed by a real user.
-
-## Housekeeping
-
-- [ ] `deploy/lxc-create.sh`'s `pveam` template pin
-  (`debian-12-standard_12.7-1_amd64.tar.zst`) will eventually go stale
-  as Debian ships newer point releases — bump it periodically or make
-  it discover the latest available `debian-12-standard_*` template.

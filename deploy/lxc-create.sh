@@ -14,7 +14,15 @@
 set -euo pipefail
 
 CTID="${CTID:-$(pvesh get /cluster/nextid)}"
-HOSTNAME="${HOSTNAME:-pve-flr-portal}"
+# NOT just HOSTNAME - bash (and most shells) auto-populate that from the
+# *running system's own* hostname, so "${HOSTNAME:-pve-flr-portal}" would
+# silently pick up e.g. the PVE host's own name instead of the intended
+# default the moment this runs anywhere HOSTNAME is already set (which is
+# effectively always - it's not something a clean environment lacks).
+# CT_HOSTNAME avoids the collision. Confirmed live 2026-09-01: an actual
+# run named the container after the PVE host itself ("titan") instead of
+# "pve-flr-portal".
+CT_HOSTNAME="${CT_HOSTNAME:-pve-flr-portal}"
 STORAGE="${STORAGE:-local-lvm}"
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"
 DISK_GB="${DISK_GB:-4}"
@@ -24,20 +32,40 @@ BRIDGE="${BRIDGE:-vmbr0}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"   # or e.g. "10.0.0.50/24,gw=10.0.0.1"
 REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
 
-TEMPLATE="debian-12-standard_12.7-1_amd64.tar.zst"
-
 echo "==> pve-flr-portal LXC setup"
-echo "    CTID=$CTID  HOSTNAME=$HOSTNAME  STORAGE=$STORAGE  DISK=${DISK_GB}G  MEM=${MEMORY_MB}MB"
+echo "    CTID=$CTID  HOSTNAME=$CT_HOSTNAME  STORAGE=$STORAGE  DISK=${DISK_GB}G  MEM=${MEMORY_MB}MB"
+
+# TEMPLATE can still be overridden explicitly (TEMPLATE=debian-12-standard_...
+# bash deploy/lxc-create.sh) for a pinned/offline/reproducible run - but the
+# default now discovers whatever the latest debian-12-standard build
+# actually is, rather than a hardcoded version string that inevitably goes
+# stale as Debian ships point releases (issue #16 - confirmed live
+# 2026-09-01: a run failed outright with "no such template" against the
+# previously pinned 12.7-1, which pveam's catalog had already moved past).
+if [ -z "${TEMPLATE:-}" ]; then
+  echo "==> Looking up the latest debian-12-standard template"
+  pveam update
+  TEMPLATE=$(pveam available --section system \
+    | awk '{print $2}' \
+    | grep '^debian-12-standard_' \
+    | sort -t_ -k2 -V \
+    | tail -1)
+  if [ -z "$TEMPLATE" ]; then
+    echo "Could not find any debian-12-standard template via 'pveam available' -" >&2
+    echo "override TEMPLATE=<exact-name> explicitly and re-run." >&2
+    exit 1
+  fi
+  echo "    Using $TEMPLATE"
+fi
 
 if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
   echo "==> Downloading $TEMPLATE"
-  pveam update
   pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 fi
 
 echo "==> Creating container $CTID"
 pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
-  --hostname "$HOSTNAME" \
+  --hostname "$CT_HOSTNAME" \
   --unprivileged 1 \
   --features nesting=0 \
   --cores "$CORES" \
