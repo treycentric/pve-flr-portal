@@ -55,8 +55,13 @@ def _pve_error_message(exc: httpx.HTTPStatusError) -> str:
     return str(exc)
 
 
-async def _exec(job: RestoreJob, argv: list[str]) -> tuple[int, str, str]:
-    return await pve_client.run_guest_exec(job.session, job.guest_type, job.vmid, argv)
+async def _exec(job: RestoreJob, argv: list[str], timeout_seconds: float | None = None) -> tuple[int, str, str]:
+    """`timeout_seconds` defaults to `run_guest_exec()`'s own ~15s
+    default when omitted - pass `settings.restore_long_running_exec_timeout_seconds`
+    explicitly for a call whose duration scales with file size (see
+    that setting's docstring)."""
+    kwargs = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
+    return await pve_client.run_guest_exec(job.session, job.guest_type, job.vmid, argv, **kwargs)
 
 
 async def _create_scratch_dir(job: RestoreJob, guest_os_family: str | None, scratch_dir: str) -> None:
@@ -279,7 +284,14 @@ async def _try_direct_network_transfer(job: RestoreJob, guest_os_family: str | N
         return False
 
     job.log(f"Direct Network Transfer: fetching via {tool} over {nic.local_ip} (matches the guest's own subnet).")
-    exitcode, out, err = await _exec(job, plan.exec_argv)
+    # The fetch itself scales with file size (and network throughput),
+    # not the ~15s "fast command" default that every other guest-exec
+    # call in this module uses - confirmed live 2026-09-01: the default
+    # timed out mid-fetch on a real file. See
+    # settings.restore_long_running_exec_timeout_seconds's docstring.
+    exitcode, out, err = await _exec(
+        job, plan.exec_argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds
+    )
     if exitcode != 0:
         raise RuntimeError(f"Direct Network Transfer failed via {tool}: {err.strip() or out.strip()}")
     await _verify_destination_exists(job, guest_os_family)
@@ -303,7 +315,9 @@ async def _concat_chunks(job: RestoreJob, chunk_paths: list[str], guest_os_famil
         parts = " ".join(f"'{p}'" for p in chunk_paths)
         command = f"cat {parts} > '{job.destination}'"
         argv = ["sh", "-c", command]
-    exitcode, out, err = await _exec(job, argv)
+    # Scales with total file size, not the ~15s "fast command" default -
+    # see settings.restore_long_running_exec_timeout_seconds's docstring.
+    exitcode, out, err = await _exec(job, argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds)
     if exitcode != 0:
         raise RuntimeError(f"Could not assemble the restored file: {err.strip() or out.strip()}")
 
@@ -342,13 +356,17 @@ def _parse_certutil_hash(out: str) -> str:
 
 
 async def _verify_checksum(job: RestoreJob, expected_sha256: str, guest_os_family: str | None) -> bool:
+    # Hashing time scales with file size, not the ~15s "fast command"
+    # default - see settings.restore_long_running_exec_timeout_seconds's
+    # docstring.
+    timeout = settings.restore_long_running_exec_timeout_seconds
     if guest_os_family == "windows":
-        exitcode, out, err = await _exec(job, ["certutil", "-hashfile", job.destination, "SHA256"])
+        exitcode, out, err = await _exec(job, ["certutil", "-hashfile", job.destination, "SHA256"], timeout)
         if exitcode != 0:
             raise RuntimeError(f"Could not verify the restored file: {err.strip() or out.strip()}")
         actual = _parse_certutil_hash(out)
     else:
-        exitcode, out, err = await _exec(job, ["sha256sum", job.destination])
+        exitcode, out, err = await _exec(job, ["sha256sum", job.destination], timeout)
         if exitcode != 0:
             raise RuntimeError(f"Could not verify the restored file: {err.strip() or out.strip()}")
         actual = out.strip().split()[0].lower() if out.strip() else ""

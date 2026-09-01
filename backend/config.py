@@ -87,6 +87,14 @@ class Settings:
     # _try_design_c().
     restore_data_nic_port: int
 
+    # pve_client.run_guest_exec()'s default ~15s poll budget is sized for
+    # commands that don't scale with file size (mkdir, an exists check).
+    # Confirmed live 2026-09-01: nowhere near enough for one that does -
+    # Direct Network Transfer's actual fetch, or hashing/concatenating a
+    # large file. Used explicitly for just those calls, not as a new
+    # blanket default.
+    restore_long_running_exec_timeout_seconds: float
+
 
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
@@ -100,4 +108,5 @@ settings = Settings(
     restore_data_nics_json=_get("RESTORE_DATA_NICS", "[]"),
     restore_download_token_ttl_seconds=_float("RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS", 120.0),
     restore_data_nic_port=_int("RESTORE_DATA_NIC_PORT", 0),
+    restore_long_running_exec_timeout_seconds=_float("RESTORE_LONG_RUNNING_EXEC_TIMEOUT_SECONDS", 1800.0),
 )

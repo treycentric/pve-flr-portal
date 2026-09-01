@@ -147,7 +147,9 @@ class GuestExecTimeout(RuntimeError):
     pass
 
 
-async def run_guest_exec(session: SessionData, guest_type: str, vmid: str, argv: list[str]) -> tuple[int, str, str]:
+async def run_guest_exec(
+    session: SessionData, guest_type: str, vmid: str, argv: list[str], timeout_seconds: float = 15.0
+) -> tuple[int, str, str]:
     """Runs one guest-exec command to completion (polling exec-status) and
     returns (exitcode, stdout, stderr). `guest_type` is the app-internal
     "vm"/"ct" value, translated here like every other guest-agent call.
@@ -166,7 +168,15 @@ async def run_guest_exec(session: SessionData, guest_type: str, vmid: str, argv:
     already exists, so re-querying it is safe regardless of *why* the
     previous poll failed - a transient error there just means "try again
     next tick" rather than "not done yet", reusing the same overall
-    budget rather than aborting the whole command over one bad poll."""
+    budget rather than aborting the whole command over one bad poll.
+
+    `timeout_seconds` defaults to ~15s - fine for the vast majority of
+    calls this app makes (mkdir, an exists check, listing a directory),
+    which don't scale with file size. Confirmed live 2026-09-01 that this
+    default is nowhere near enough for a command whose duration DOES
+    scale with content size - Direct Network Transfer's actual fetch,
+    or hashing/concatenating a large file - restore_runner.py passes a
+    much longer budget explicitly for exactly those calls."""
     node_type = api_node_type(guest_type)
     headers = pve_headers(session)
 
@@ -185,7 +195,9 @@ async def run_guest_exec(session: SessionData, guest_type: str, vmid: str, argv:
     ):
         pid = await call_with_retries(start)
 
-        for _ in range(30):  # ~15s of polling - listing/writing/hashing are all fast commands
+        poll_interval = 0.5
+        max_polls = max(1, round(timeout_seconds / poll_interval))
+        for _ in range(max_polls):
             try:
                 status_resp = await client.get(
                     f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/exec-status",
@@ -198,7 +210,7 @@ async def run_guest_exec(session: SessionData, guest_type: str, vmid: str, argv:
                     return data.get("exitcode", -1), data.get("out-data", ""), data.get("err-data", "")
             except httpx.HTTPError:
                 pass  # transient - try again next tick, see docstring
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(poll_interval)
         raise GuestExecTimeout("Guest command timed out")
 
 

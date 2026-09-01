@@ -54,6 +54,31 @@ async def test_run_guest_exec_times_out(session_data, monkeypatch):
         await pve_client.run_guest_exec(session_data, "vm", "133", ["echo", "hi"])
 
 
+@respx.mock
+async def test_run_guest_exec_honors_a_longer_explicit_timeout(session_data, monkeypatch):
+    # Confirmed live 2026-09-01: the ~15s default is nowhere near enough
+    # for a command whose duration scales with file size (Direct Network
+    # Transfer's fetch, hashing/concatenating a large file) -
+    # restore_runner.py passes a much longer budget explicitly for those.
+    # This locks in that the parameter actually changes the poll count,
+    # not just that it's accepted.
+    polls = []
+
+    async def _fake_sleep(*_a, **_kw):
+        polls.append(1)
+
+    monkeypatch.setattr(pve_client.asyncio, "sleep", _fake_sleep)
+    respx.post(f"{API}/nodes/localhost/qemu/133/agent/exec").mock(
+        return_value=httpx.Response(200, json={"data": {"pid": 1}})
+    )
+    respx.get(f"{API}/nodes/localhost/qemu/133/agent/exec-status").mock(
+        return_value=httpx.Response(200, json={"data": {"exited": 0}})
+    )
+    with pytest.raises(pve_client.GuestExecTimeout):
+        await pve_client.run_guest_exec(session_data, "vm", "133", ["echo", "hi"], timeout_seconds=5.0)
+    assert len(polls) == 10  # 5.0s / 0.5s poll interval - not the ~15s (30-poll) default
+
+
 async def _noop():
     return None
 

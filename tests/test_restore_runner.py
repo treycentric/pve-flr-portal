@@ -152,7 +152,7 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     async def fake_write(session, guest_type, vmid, path, content):
         written_files.append(path)
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         return 0, "", ""
 
@@ -201,7 +201,7 @@ async def test_multi_chunk_write_reassembles_to_the_exact_original_bytes(manager
     async def fake_write(session, guest_type, vmid, path, wire_content):
         written.append((path, wire_content))
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         return 0, "", ""
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -230,7 +230,7 @@ async def test_progress_updates_incrementally_during_multi_chunk_write(manager, 
     async def fake_write(session, guest_type, vmid, path, content):
         seen_progress.append(job.progress_current)
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         return 0, "", ""
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -263,7 +263,7 @@ async def test_progress_total_includes_metadata_and_verify_units(manager, sessio
     async def fake_write(session, guest_type, vmid, path, content):
         pass
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         if argv[0] == "sha256sum":
             return 0, f"{expected}  /etc/hosts\n", ""
         return 0, "", ""
@@ -288,7 +288,7 @@ async def test_restore_metadata_runs_touch_on_linux(manager, session_data, monke
 
     exec_calls = []
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         return 0, "", ""
 
@@ -315,7 +315,7 @@ async def test_restore_metadata_runs_powershell_on_windows(manager, session_data
 
     exec_calls = []
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         return 0, "", ""
 
@@ -350,7 +350,7 @@ async def test_restore_metadata_without_mtime_is_a_no_op(manager, session_data, 
 
     exec_calls = []
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         # Ensuring the destination directory exists still legitimately
         # runs - only the mtime-setting command itself should be skipped.
         exec_calls.append(argv)
@@ -380,12 +380,15 @@ async def test_verify_success_linux_marks_done(manager, session_data, monkeypatc
     async def fake_write(session, guest_type, vmid, path, content):
         pass
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    verify_call_kwargs = {}
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         # Ensuring the destination directory exists runs first; the
         # checksum verification command is the last exec call.
         if argv[:2] == ["mkdir", "-p"]:
             return 0, "", ""
         assert argv == ["sha256sum", "/etc/hosts"]
+        verify_call_kwargs.update(kwargs)
         return 0, f"{expected}  /etc/hosts\n", ""
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -395,6 +398,11 @@ async def test_verify_success_linux_marks_done(manager, session_data, monkeypatc
     await run_restore(job, manager)
     assert job.status == RestoreStatus.DONE
     assert any("Checksum verified" in line for line in job.log_lines)
+    # Hashing scales with file size - confirmed live 2026-09-01 that the
+    # default ~15s guest-exec budget isn't enough for a large file, so
+    # this call needs the long-running timeout, not the default.
+    long_timeout = restore_runner.settings.restore_long_running_exec_timeout_seconds
+    assert verify_call_kwargs.get("timeout_seconds") == long_timeout
 
 
 async def test_verify_mismatch_marks_failed(manager, session_data, monkeypatch):
@@ -407,7 +415,7 @@ async def test_verify_mismatch_marks_failed(manager, session_data, monkeypatch):
     async def fake_write(session, guest_type, vmid, path, content):
         pass
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         return 0, "0000000000000000000000000000000000000000000000000000000000000000  /etc/hosts\n", ""
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -439,7 +447,7 @@ async def test_verify_windows_parses_certutil_output(manager, session_data, monk
         + "\nCertUtil: -hashfile command completed successfully.\n"
     )
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         # Ensuring the destination directory exists runs first
         # (PowerShell New-Item); the certutil hash check is the last
         # exec call.
@@ -496,7 +504,7 @@ async def test_design_c_unconfigured_falls_back_to_design_b_without_any_extra_ca
 
     exec_calls = []
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         return 0, "", ""
 
@@ -528,7 +536,7 @@ async def test_design_c_no_subnet_match_falls_back_to_design_b(manager, session_
 
     exec_calls = []
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         return 0, "", ""
 
@@ -560,7 +568,7 @@ async def test_design_c_no_fetch_tool_falls_back_to_design_b(manager, session_da
 
     exec_calls = []
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         if argv[:2] == ["sh", "-c"] and "command -v" in argv[2]:
             return 1, "", "not found"  # every fetch-tool probe fails
@@ -594,14 +602,16 @@ async def test_design_c_used_when_nic_and_tool_are_both_available(manager, sessi
         pass
 
     exec_calls = []
+    fetch_call_kwargs = {}
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         if argv[:2] == ["mkdir", "-p"]:
             return 0, "", ""  # _ensure_destination_dir, runs before Design C is even attempted
         if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
             return 0, "/usr/bin/curl", ""  # curl is available - first POSIX candidate
         if argv[0] == "curl":
+            fetch_call_kwargs.update(kwargs)
             return 0, "", ""  # the actual fetch
         if argv[:2] == ["test", "-f"]:
             return 0, "", ""  # _verify_destination_exists
@@ -618,6 +628,11 @@ async def test_design_c_used_when_nic_and_tool_are_both_available(manager, sessi
     assert not any(c[:2] == ["sh", "-c"] and "cat" in (c[2] if len(c) > 2 else "") for c in exec_calls)
     assert any("fetching via curl" in line for line in job.log_lines)
     assert any("fetch complete" in line for line in job.log_lines)
+    # The fetch itself scales with file size/network throughput, not the
+    # ~15s "fast command" default - confirmed live 2026-09-01 that the
+    # default timed out mid-fetch on a real file.
+    long_timeout = restore_runner.settings.restore_long_running_exec_timeout_seconds
+    assert fetch_call_kwargs.get("timeout_seconds") == long_timeout
     # A single-use download token was actually minted for this job -
     # nothing in this fake flow consumes it (the real consumer is the
     # download endpoint itself, exercised separately in test_endpoints.py).
@@ -647,7 +662,7 @@ async def test_design_c_with_verify_hashes_the_drained_stream_correctly(manager,
     async def fake_write(session, guest_type, vmid, path, content):
         pass
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         if argv[:2] == ["mkdir", "-p"]:
             return 0, "", ""
         if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
@@ -688,7 +703,7 @@ async def test_design_c_fetch_failure_fails_the_job_rather_than_falling_back(man
     async def fake_write(session, guest_type, vmid, path, content):
         pass
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         if argv[:2] == ["mkdir", "-p"]:
             return 0, "", ""
         if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
@@ -745,7 +760,7 @@ async def test_cancel_mid_multi_chunk_write_still_cleans_up_scratch(manager, ses
 
     exec_calls = []
 
-    async def fake_exec(session, guest_type, vmid, argv):
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         return 0, "", ""
 
@@ -827,7 +842,7 @@ async def test_scratch_cleanup_failure_does_not_mask_a_successful_restore(manage
     async def fake_write(session, guest_type, vmid, path, content):
         pass
 
-    async def flaky_exec(session, guest_type, vmid, argv):
+    async def flaky_exec(session, guest_type, vmid, argv, **kwargs):
         if argv[:2] == ["rm", "-rf"]:
             raise httpx.TimeoutException("cleanup timed out")
         return 0, "", ""

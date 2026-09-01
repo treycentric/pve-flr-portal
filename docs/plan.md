@@ -1383,6 +1383,26 @@ regardless of file size. Locked in with a test double that raises if
 `aread()` is ever called again, and a byte-fidelity test confirming the
 streamed reassembly is still exact.
 
+**Real-world finding (2026-09-01), immediately after the memory fix
+above:** with memory no longer the blocker, the very next Linux attempt
+failed with "Guest command timed out" - `pve_client.run_guest_exec()`'s
+poll budget is a hardcoded ~15 seconds, sized (per its own original
+comment) for "listing/writing/hashing" - i.e. commands whose duration
+doesn't scale with file size. Direct Network Transfer's actual fetch is
+exactly the opposite: its whole duration IS the file transfer. Fixed by
+adding an optional `timeout_seconds` parameter to `run_guest_exec()`
+(default unchanged at ~15s) and a new
+`RESTORE_LONG_RUNNING_EXEC_TIMEOUT_SECONDS` setting (default 1800s/30
+min), passed explicitly through `restore_runner.py`'s `_exec()` wrapper
+for the three calls whose duration scales with content size: the Direct
+Network Transfer fetch itself, `_verify_checksum()`'s hashing
+(`sha256sum`/`certutil`), and `_concat_chunks()`'s reassembly (`cat`/
+`copy /b`) - every other guest-exec call in this module (mkdir, exists
+checks, fetch-tool detection probes) stays on the fast ~15s default,
+since none of those scale with file size. Locked in with tests
+asserting the actual `timeout_seconds` value reaching `run_guest_exec()`
+for each of the three calls, not just that the code path doesn't crash.
+
 **Not started, remaining:** deploy-level LXC/Docker additional-NIC
 provisioning steps (the `pct set -netN`/Docker Compose `networks:`
 config an admin actually runs), firewall rule examples, and the
