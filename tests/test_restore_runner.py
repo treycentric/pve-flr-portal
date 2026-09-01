@@ -146,10 +146,12 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     assert job.status == RestoreStatus.DONE
     assert len(written_files) == 2  # two chunks for content just over one chunk size
     assert all(f"/tmp/pve-flr-portal-{job.id}" in p for p in written_files)
-    # mkdir, concat (cat ... > dest), rmdir cleanup
-    assert exec_calls[0][:2] == ["mkdir", "-p"]
-    assert exec_calls[1][:2] == ["sh", "-c"]
-    assert "cat" in exec_calls[1][2] and job.destination in exec_calls[1][2]
+    # ensure dest dir, create scratch dir, concat (cat ... > dest), verify
+    # exists, rmdir cleanup
+    concat_call = next(c for c in exec_calls if c[:2] == ["sh", "-c"])
+    assert "cat" in concat_call[2] and job.destination in concat_call[2]
+    assert any(c[:2] == ["test", "-f"] for c in exec_calls)
+    assert exec_calls.count(["mkdir", "-p", "/etc"]) == 1  # dest dir, not just scratch
     assert exec_calls[-1][:2] == ["rm", "-rf"]
     # 2 chunk-write units + 1 concat unit, all complete
     assert (job.progress_total, job.progress_current) == (3, 3)
@@ -287,16 +289,22 @@ async def test_restore_metadata_without_mtime_is_a_no_op(manager, session_data, 
     async def fake_write(session, guest_type, vmid, path, content):
         pass
 
-    async def fail_if_called(*a, **kw):
-        raise AssertionError("no exec command should run when there's no mtime to apply")
+    exec_calls = []
+
+    async def fake_exec(session, guest_type, vmid, argv):
+        # Ensuring the destination directory exists still legitimately
+        # runs - only the mtime-setting command itself should be skipped.
+        exec_calls.append(argv)
+        return 0, "", ""
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
-    monkeypatch.setattr(pve_client, "run_guest_exec", fail_if_called)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
 
     await run_restore(job, manager)
     assert job.status == RestoreStatus.DONE
     assert any("no mtime to apply - skipped" in line for line in job.log_lines)
+    assert not any(c[0] == "touch" for c in exec_calls)
 
 
 async def test_verify_success_linux_marks_done(manager, session_data, monkeypatch):
@@ -314,6 +322,10 @@ async def test_verify_success_linux_marks_done(manager, session_data, monkeypatc
         pass
 
     async def fake_exec(session, guest_type, vmid, argv):
+        # Ensuring the destination directory exists runs first; the
+        # checksum verification command is the last exec call.
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
         assert argv == ["sha256sum", "/etc/hosts"]
         return 0, f"{expected}  /etc/hosts\n", ""
 
@@ -369,6 +381,10 @@ async def test_verify_windows_parses_certutil_output(manager, session_data, monk
     )
 
     async def fake_exec(session, guest_type, vmid, argv):
+        # Ensuring the destination directory exists runs first (cmd
+        # /c mkdir); the certutil hash check is the last exec call.
+        if argv[0] == "cmd":
+            return 0, "", ""
         assert argv[0] == "certutil"
         return 0, certutil_output, ""
 

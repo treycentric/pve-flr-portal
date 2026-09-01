@@ -94,8 +94,8 @@
   </div>
 
   <div class="modal-overlay modal-overlay--log" x-show="logOpen" x-cloak @click.self="logOpen = false" @keydown.escape.window="logOpen = false">
-    <div class="modal-box modal-box--resizable">
-      <div class="modal-header">
+    <div class="modal-box modal-box--resizable" :style="'transform: translate(-50%, -50%) translate(' + logDragX + 'px, ' + logDragY + 'px)'">
+      <div class="modal-header modal-header--draggable" @pointerdown="startDrag($event, 'logDragX', 'logDragY')">
         <h2>Restore Log<span x-show="logDetail" x-text="' — ' + (logDetail && logDetail.task_name)"></span></h2>
         <button type="button" class="modal-close" @click="logOpen = false">&times;</button>
       </div>

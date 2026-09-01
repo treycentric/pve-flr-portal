@@ -44,6 +44,12 @@ function restoreJobsWidget() {
     // load so the position persists across repeated opens/closes.
     dragX: 0,
     dragY: 0,
+    // Same idea, independent offset, for the log viewer modal below -
+    // it's a separate modal_box that can be open at the same time as
+    // (well, actually instead of, but positioned independently from)
+    // the jobs list modal.
+    logDragX: 0,
+    logDragY: 0,
     // Log viewer - a second modal, live-updated by piggybacking on the
     // same poll tick as the job list (below) rather than running its own
     // separate timer.
@@ -125,22 +131,24 @@ function restoreJobsWidget() {
       return pct === null || pct === undefined ? job.status : `${job.status} (${pct}%)`;
     },
 
-    // Dragging the modal by its header. Same window-pointermove/pointerup
+    // Dragging a modal by its header. Same window-pointermove/pointerup
     // pattern as the timeline's drag-to-pan (_bindTimelineDrag) -
     // deliberately no setPointerCapture(), which retargets click/pointerup
     // to the capturing element and would break the header's own Close
     // button and the table's row-selection clicks (see that function's
-    // comment for the full story).
-    startDrag(e) {
+    // comment for the full story). xProp/yProp let the jobs-list modal
+    // and the log modal share this logic while tracking independent
+    // offsets (dragX/dragY vs logDragX/logDragY).
+    startDrag(e, xProp = 'dragX', yProp = 'dragY') {
       if (e.target.closest('.modal-close')) return; // let Close still work
       const startX = e.clientX;
       const startY = e.clientY;
-      const originX = this.dragX;
-      const originY = this.dragY;
+      const originX = this[xProp];
+      const originY = this[yProp];
 
       const onMove = (ev) => {
-        this.dragX = originX + (ev.clientX - startX);
-        this.dragY = originY + (ev.clientY - startY);
+        this[xProp] = originX + (ev.clientX - startX);
+        this[yProp] = originY + (ev.clientY - startY);
       };
       const endDrag = () => {
         window.removeEventListener('pointermove', onMove);

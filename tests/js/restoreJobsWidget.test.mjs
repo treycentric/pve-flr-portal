@@ -194,6 +194,24 @@ test('startDrag tracks pointer movement as a dragX/dragY offset', () => {
   assert.equal(w.dragY, 10); // 20 + (90 - 100)
 });
 
+test('startDrag tracks an independent offset when given xProp/yProp (the log modal)', () => {
+  const win = fakeWindow();
+  const { restoreJobsWidget } = loadApp({ window: win });
+  const w = restoreJobsWidget();
+  w.dragX = 999; // untouched - proves the two offsets don't cross-talk
+  w.dragY = 999;
+  w.logDragX = 10;
+  w.logDragY = 20;
+
+  w.startDrag({ clientX: 100, clientY: 100, target: { closest: () => null } }, 'logDragX', 'logDragY');
+  win.dispatch('pointermove', { clientX: 130, clientY: 90 });
+
+  assert.equal(w.logDragX, 40); // 10 + (130 - 100)
+  assert.equal(w.logDragY, 10); // 20 + (90 - 100)
+  assert.equal(w.dragX, 999);
+  assert.equal(w.dragY, 999);
+});
+
 test('startDrag stops updating after pointerup removes the listeners', () => {
   const win = fakeWindow();
   const { restoreJobsWidget } = loadApp({ window: win });

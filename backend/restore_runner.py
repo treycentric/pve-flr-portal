@@ -11,6 +11,8 @@ build the confirmation UI).
 """
 import asyncio
 import hashlib
+import ntpath
+import posixpath
 
 import httpx
 
@@ -80,6 +82,44 @@ async def _write_chunks_to_scratch(
         paths.append(chunk_path)
         job.progress_current += 1
     return paths
+
+
+async def _ensure_destination_dir(job: RestoreJob, guest_os_family: str | None) -> None:
+    """Creates the destination's parent directory if it doesn't already
+    exist. Confirmed live as a real gap: restoring into a directory that
+    didn't exist yet made the concatenation step (_concat_chunks) report
+    success - `copy /b`'s exit code isn't reliable enough to catch every
+    failure mode - while never actually creating the file, which then
+    failed confusingly two steps later in metadata restore ("Cannot find
+    path ... because it does not exist"), docs/plan.md §7.5. Tolerant of
+    the directory already existing (Windows `mkdir` errors on that;
+    `mkdir -p` doesn't)."""
+    if guest_os_family == "windows":
+        parent = ntpath.dirname(job.destination.rstrip("\\")) or job.destination
+        exitcode, out, err = await _exec(job, ["cmd", "/c", f'if not exist "{parent}" mkdir "{parent}"'])
+    else:
+        parent = posixpath.dirname(job.destination.rstrip("/")) or "/"
+        exitcode, out, err = await _exec(job, ["mkdir", "-p", parent])
+    if exitcode != 0:
+        raise RuntimeError(f"Could not create the destination directory: {err.strip() or out.strip()}")
+
+
+async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | None) -> None:
+    """A direct existence check right after concatenation, because its
+    exit code alone isn't trustworthy enough (see _ensure_destination_dir)
+    - catches a silent failure here, with a clear message, instead of
+    letting it surface confusingly in a later step."""
+    if guest_os_family == "windows":
+        exitcode, out, _err = await _exec(job, ["cmd", "/c", f'if exist "{job.destination}" (echo FOUND)'])
+        exists = "FOUND" in out
+    else:
+        exitcode, _out, _err = await _exec(job, ["test", "-f", job.destination])
+        exists = exitcode == 0
+    if not exists:
+        raise RuntimeError(
+            "Concatenation reported success but the destination file wasn't actually created - "
+            "check that the destination directory exists and is writable."
+        )
 
 
 async def _concat_chunks(job: RestoreJob, chunk_paths: list[str], guest_os_family: str | None) -> None:
@@ -226,6 +266,9 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         guest_os_family = caps.guest_os_family
         job.log(f"guest-exec available (guest OS family: {guest_os_family or 'unknown'}).")
 
+        await _ensure_destination_dir(job, guest_os_family)
+        job.log("Confirmed the destination directory exists.")
+
         if job.cancel_requested:
             jobs.mark_cancelled(job.id)
             return
@@ -247,6 +290,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
                 return
             job.log(f"Wrote all {len(chunk_paths)} chunk(s) to scratch; concatenating into the destination.")
             await _concat_chunks(job, chunk_paths, guest_os_family)
+            await _verify_destination_exists(job, guest_os_family)
             job.progress_current += 1
             job.log("Concatenation complete.")
 

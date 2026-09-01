@@ -900,6 +900,22 @@ entry points at. Two reasons this matters, both raised in review:
   rather than running a second timer — auto-scrolls to the bottom on
   each update.
 
+  **Real-world finding (2026-09-03):** the log modal shipped without
+  its own drag support (only the jobs-list modal had it) and, being
+  the shared `.modal-box--resizable` class, had no explicit `height` —
+  so a long log grew the whole modal window instead of scrolling
+  inside it. Fixed by generalizing `startDrag(e, xProp, yProp)` to take
+  the offset property names instead of hardcoding `dragX`/`dragY`, so
+  the log modal reuses it against its own independent `logDragX`/
+  `logDragY` state; and by giving `.modal-box--resizable` an explicit
+  starting `height` so the flex children that already had `flex: 1;
+  overflow: auto` (`.modal-table-wrap`, `.restore-log-body`) have
+  something concrete to constrain themselves against — without a real
+  height, a `resize: both` box sizes to its content by default, which
+  is what let it grow unbounded. Verified in an isolated Alpine.js
+  harness driven via claude-in-chrome (drag, then resize larger) before
+  committing, per this project's established practice for UI fixes.
+
 **Sequencing:**
 1. ~~Empirical verification against a real guest~~ — **done 2026-09-01**,
    see above.
@@ -950,13 +966,37 @@ entry points at. Two reasons this matters, both raised in review:
    test guest's ticket had expired): the exact `certutil -hashfile`
    output shape (`_parse_certutil_hash()` assumes a 3-line
    header/hash/trailer format with space-separated hex byte pairs on
-   line 2), the Windows `copy /b "a"+"b" "dest"` concatenation syntax,
-   and the PowerShell `LastWriteTime` assignment script. All three
-   should be checked against a real Windows guest before relying on
-   this path for anything that matters — unlike the browse feature's
-   `cmd`/`wmic`/`dir`/PowerShell calls, which were live-verified (and,
-   in two cases, corrected after finding real bugs that pure code
-   review hadn't caught) before shipping.
+   line 2). Should be checked against a real Windows guest before
+   relying on it for anything that matters — unlike the browse
+   feature's `cmd`/`wmic`/`dir`/PowerShell calls, which were
+   live-verified (and, in two cases, corrected after finding real bugs
+   that pure code review hadn't caught) before shipping. The
+   `copy /b`/`LastWriteTime` risk flagged here previously has since
+   been live-tested; see the finding below.
+
+   **Real-world finding (2026-09-03):** restoring into a destination
+   directory that didn't yet exist on the guest (`C:\TestRestore\`, not
+   pre-created) failed confusingly two steps *after* the actual
+   problem: `copy /b "a"+"b" "dest"`'s exit code reported success even
+   though `dest` was never created (its non-existent parent silently
+   swallows the write), so the job sailed through concatenation and
+   only blew up in metadata restore — `Get-Item -LiteralPath 'dest'`
+   raising "Cannot find path ... because it does not exist", then a
+   second, more confusing error ("The property 'LastWriteTime' cannot
+   be found on this object") from the same failed `Get-Item` call.
+   Fixed with two additions to `restore_runner.py`, both guest-OS-aware
+   (`ntpath`/`posixpath` for the parent-directory math): a new
+   `_ensure_destination_dir()` creates the destination's parent
+   directory up front (`cmd /c if not exist ... mkdir`/`mkdir -p`,
+   tolerant of it already existing) before any write happens, and a new
+   `_verify_destination_exists()` runs immediately after concatenation
+   — a direct existence check (`cmd /c if exist ...`/`test -f`) that
+   raises a clear, specific error right there if concatenation silently
+   didn't produce the file, rather than letting the failure surface
+   confusingly in whatever step happens to run next. Confirms the
+   general lesson from the browse feature's `dir`/`wmic` findings
+   above: a Windows shell command's exit code alone is not always
+   trustworthy evidence that it did what it claims.
 
 Each step gets its own pytest coverage (chunking/base64 math,
 capability-object construction from fake responses, job lifecycle

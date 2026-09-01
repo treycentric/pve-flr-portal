@@ -151,6 +151,12 @@ body {
   resize: both;
   min-width: 480px;
   min-height: 320px;
+  /* Without an explicit starting height, a resize:both box sizes itself
+     to its content by default - which meant a long restore log grew the
+     whole modal instead of scrolling inside it (the log body's flex:1 +
+     overflow:auto below only has something to constrain against once
+     the box itself has a real height). */
+  height: 480px;
 }
 
 .modal-header--draggable {
