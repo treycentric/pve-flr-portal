@@ -1620,11 +1620,34 @@ since it completes restore-to-guest rather than standing apart from it.
    `tarfile`/`zstandard` libraries for all three output formats, not
    just internally self-consistent - still not run against a real PVE
    instance or guest.
-3. **Not started.** Wiring into `RestoreJob`/`run_restore()`/
-   `POST /api/restore` (multi-item request body, a target-directory
-   destination instead of a single file path) and the frontend
-   (multi-select UI reusing the existing download multi-select
-   behavior, extending past the current `sel.length !== 1` gate).
+3. ~~Backend wiring~~ — **done**: `RestoreJob` gained an `items:
+   list[BundleItem] | None = None` field - `None` (every job created
+   before this existed, and every ordinary single-file restore
+   submitted today) means the original single-file logic runs
+   unchanged; a non-empty list means a bundle job instead. `run_restore()`
+   is now a two-line dispatcher (`_run_bundle_restore()` vs. the renamed
+   `_run_single_file_restore()`, the latter otherwise byte-for-byte
+   identical to before). `_run_bundle_restore()` checks `design_b`
+   unconditionally (a bundle always needs guest-exec - no Design-A
+   equivalent), probes tar.zst support, builds the bundle, writes it to
+   the guest via the *same* chunked scratch-write+concat mechanism the
+   single-file path already uses (`_concat_chunks()` gained an explicit
+   `dest_path` parameter so it can target a scratch bundle file instead
+   of always `job.destination`), extracts it, then verifies via the
+   embedded manifest - one command, no app-side comparison. Direct
+   Network Transfer isn't wired in for bundles yet (would need the
+   download-token endpoint to serve a local file instead of re-fetching
+   from PVE), so bundle restores always take the chunked-write path for
+   now. `POST /api/restore` accepts `item: list[str]` (the same JSON
+   shape `download_bundle()` already uses) as an alternative to
+   `filepath`/`name` - exactly one of the two must be given. Frontend
+   multi-select UI (extending past `sel.length !== 1`) is the remaining
+   piece of this step, tracked separately below since it didn't fit in
+   the same pass.
+3b. **Not started.** Frontend: multi-select UI reusing the existing
+   download multi-select behavior, extending past the current
+   `sel.length !== 1` gate that currently hides the Restore button
+   entirely for anything but a single file.
 4. **Not started.** Live verification against a real guest - the
    tar.zst capability probe, the fallback rebuild path, and the
    embedded-manifest verify script (both shells) are all unverified

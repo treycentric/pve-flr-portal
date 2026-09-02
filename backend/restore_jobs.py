@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from .auth import SessionData
+from .restore_bundle import BundleItem
 
 
 class RestoreStatus(StrEnum):
@@ -55,9 +56,20 @@ class RestoreJob:
     task_name: str
     snapshot_time: str  # "restore ver." - the backup snapshot this restores from
     source_volume: str  # backup volid, for re-fetching the content to restore
-    source_filepath: str  # opaque file-restore filepath token (docs/plan.md §3)
-    source: str  # display path within the backup
-    destination: str  # dest_dir (+ filename for a single file)
+    source_filepath: str  # opaque file-restore filepath token (docs/plan.md §3) - unused for a bundle job
+    source: str  # display path within the backup, or "N item(s)" for a bundle job
+    destination: str  # single-file job: dest_dir + filename. Bundle job: the target directory itself.
+    # Multi-file/directory restore (docs/plan.md §7.7, issue #24). None
+    # (the default, and every job created before this existed) means an
+    # ordinary single-file job - source_filepath/source/destination keep
+    # their original single-file meaning and restore_runner.py's
+    # original, unchanged, single-file logic runs. A non-empty list
+    # means a bundle job instead: source_filepath is unused,
+    # destination is the target directory the bundle extracts into, and
+    # restore_runner.py runs an entirely separate bundle-restore path -
+    # see docs/plan.md §7.7 for why (a list of BundleItem, not a single
+    # filepath, drives what actually gets fetched from PVE).
+    items: list[BundleItem] | None = None
     # Independent opt-ins, not a "quick vs full" choice - the content
     # write path (single call vs chunk+concat) is decided automatically
     # from size; whether guest-exec ends up needed follows from that PLUS
@@ -152,6 +164,7 @@ class RestoreJobManager:
         source_filepath: str,
         source: str,
         destination: str,
+        items: list[BundleItem] | None = None,
         restore_metadata: bool = False,
         verify: bool = False,
         source_mtime: int | None = None,
@@ -172,6 +185,7 @@ class RestoreJobManager:
             source_volume=source_volume,
             source_filepath=source_filepath,
             source=source,
+            items=items,
             destination=destination,
             restore_metadata=restore_metadata,
             verify=verify,

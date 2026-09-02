@@ -29,7 +29,7 @@ import posixpath
 
 import httpx
 
-from . import guest_agent, pve_client, restore_download, restore_network_pull
+from . import guest_agent, pve_client, restore_bundle, restore_download, restore_network_pull
 from .auth import ensure_fresh_ticket
 from .config import settings
 from .restore_chunking import (
@@ -194,6 +194,24 @@ async def _ensure_destination_dir(job: RestoreJob, guest_os_family: str | None) 
         raise RuntimeError(f"Could not create the destination directory: {err.strip() or out.strip()}")
 
 
+async def _ensure_directory_exists(job: RestoreJob, dir_path: str, guest_os_family: str | None) -> None:
+    """Like `_ensure_destination_dir()` but for a path that's already a
+    directory itself, not a file whose *parent* needs creating - a
+    bundle restore's `job.destination` IS the extraction target
+    directory (docs/plan.md §7.7), unlike a single-file restore's,
+    which is a file path within one. Kept as a separate function rather
+    than adding a flag to `_ensure_destination_dir()` to avoid touching
+    that already-live-tested function's behavior for the single-file
+    path it exists for."""
+    if guest_os_family == "windows":
+        script = f"New-Item -ItemType Directory -Force -Path '{dir_path}' | Out-Null"
+        exitcode, out, err = await _exec(job, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+    else:
+        exitcode, out, err = await _exec(job, ["mkdir", "-p", dir_path])
+    if exitcode != 0:
+        raise RuntimeError(f"Could not create the destination directory: {err.strip() or out.strip()}")
+
+
 async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | None) -> None:
     """A direct existence check right after concatenation, because its
     exit code alone isn't trustworthy enough (see _ensure_destination_dir)
@@ -299,9 +317,11 @@ async def _try_direct_network_transfer(job: RestoreJob, guest_os_family: str | N
     return True
 
 
-async def _concat_chunks(job: RestoreJob, chunk_paths: list[str], guest_os_family: str | None) -> None:
-    """Concatenates already-written scratch chunk files into the final
-    destination, in order. `job.destination` was already validated via
+async def _concat_chunks(job: RestoreJob, chunk_paths: list[str], dest_path: str, guest_os_family: str | None) -> None:
+    """Concatenates already-written scratch chunk files into `dest_path`,
+    in order - the single-file restore path's own final destination
+    (`job.destination`), or a bundle restore's scratch bundle-archive
+    file (docs/plan.md §7.7). `dest_path` must already have passed
     pve_client.check_path_safe() by the caller before this runs - the
     only reason that check exists is to make embedding it in one of
     these shell/PowerShell-interpreted command strings safe; the chunk
@@ -309,11 +329,11 @@ async def _concat_chunks(job: RestoreJob, chunk_paths: list[str], guest_os_famil
     (never user input), so they don't need the same check."""
     if guest_os_family == "windows":
         parts = "+".join(f'"{p}"' for p in chunk_paths)
-        command = f'copy /b {parts} "{job.destination}"'
+        command = f'copy /b {parts} "{dest_path}"'
         argv = ["cmd", "/c", command]
     else:
         parts = " ".join(f"'{p}'" for p in chunk_paths)
-        command = f"cat {parts} > '{job.destination}'"
+        command = f"cat {parts} > '{dest_path}'"
         argv = ["sh", "-c", command]
     # Scales with total file size, not the ~15s "fast command" default -
     # see settings.restore_long_running_exec_timeout_seconds's docstring.
@@ -374,6 +394,164 @@ async def _verify_checksum(job: RestoreJob, expected_sha256: str, guest_os_famil
 
 
 async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
+    """Dispatches to the single-file restore path (unchanged since
+    §7.5/§7.6) or the multi-file/directory bundle restore path (§7.7,
+    issue #24), based on whether `job.items` is set. `job.items` is
+    `None` for every job created before that field existed and for
+    every ordinary single-file restore submitted today, so this is a
+    zero-behavior-change dispatch for the existing path."""
+    if job.items:
+        await _run_bundle_restore(job, jobs)
+    else:
+        await _run_single_file_restore(job, jobs)
+
+
+async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
+    """Multi-file/directory restore (docs/plan.md §7.7, issue #24):
+    builds one bundle from every selected item (`restore_bundle.
+    build_bundle()`), writes it to the guest via the same chunked
+    scratch-write+concat mechanism the single-file path already uses
+    (just targeting a scratch bundle file instead of the final
+    destination), extracts it, then verifies every extracted file
+    against the manifest embedded in the bundle - entirely inside the
+    guest, one command, no app-side per-file hash comparison. Always
+    needs guest-exec (there's no Design-A-equivalent single-call fast
+    path for a bundle); Direct Network Transfer isn't wired in for
+    bundles yet (would need the download-token endpoint to serve a
+    local file instead of re-fetching from PVE - not built, see
+    docs/plan.md §7.7's sequencing) so this always takes the chunked
+    write path today."""
+    scratch_dir: str | None = None
+    guest_os_family: str | None = None
+    tmp_dir_ctx = None
+    try:
+        job.status = RestoreStatus.RUNNING
+        job.log(f"Starting restore of {len(job.items)} item(s) -> {job.destination!r}.")
+        await ensure_fresh_ticket(job.session)
+
+        # Every guest-exec command below embeds job.destination in a
+        # shell/PowerShell-interpreted string (mkdir, extract, verify) -
+        # checked once up front, same discipline as the single-file path.
+        pve_client.check_path_safe(job.destination)
+
+        job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
+        caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
+        if not caps.design_b.available:
+            jobs.mark_failed(
+                job.id,
+                caps.design_b.reason
+                or "Multi-file/directory restore needs guest-exec (VM.GuestAgent.Unrestricted), "
+                "which is not available for this guest.",
+            )
+            return
+        guest_os_family = caps.guest_os_family
+        job.log(f"guest-exec available (guest OS family: {guest_os_family or 'unknown'}).")
+
+        await _ensure_directory_exists(job, job.destination, guest_os_family)
+        job.log("Confirmed the destination directory exists.")
+        if job.cancel_requested:
+            jobs.mark_cancelled(job.id)
+            return
+
+        scratch_dir = scratch_dir_path(guest_os_family, job.id)
+        job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
+        await _create_scratch_dir(job, guest_os_family, scratch_dir)
+        sep = scratch_path_sep(guest_os_family)
+
+        job.log("Checking whether the guest can decompress .tar.zst directly.")
+        probe_path = scratch_dir + sep + f"{job.id}.probe.tar.zst"
+
+        async def _write_fn(path: str, content: str) -> None:
+            await ensure_fresh_ticket(job.session)
+            await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, path, content)
+
+        zst_capable = await restore_bundle.probe_tar_zst_support(_write_fn, lambda argv: _exec(job, argv), probe_path)
+        job.log(f"Guest can decompress .tar.zst directly: {zst_capable}.")
+        if job.cancel_requested:
+            jobs.mark_cancelled(job.id)
+            return
+
+        job.log(f"Building the restore bundle from {len(job.items)} item(s).")
+        output_path, fmt, manifest, tmp_dir_ctx = await restore_bundle.build_bundle(
+            job.session, job.source_volume, job.items, guest_os_family, zst_capable
+        )
+        job.log(f"Bundle built ({fmt.value}, {len(manifest)} file(s)) - writing it to the guest.")
+
+        job.progress_total = 2 + 1 + 1  # placeholder: >=2 write units, +extract, +verify - refined as chunks write
+
+        bundle_ext = {"tarzst": "tar.zst", "targz": "tar.gz", "zip": "zip"}[fmt.value]
+        bundle_guest_path = scratch_dir + sep + f"{job.id}.bundle.{bundle_ext}"
+
+        async def _bundle_pieces():
+            with output_path.open("rb") as f:
+                while piece := f.read(DEFAULT_CHUNK_SIZE_BYTES):
+                    yield piece
+
+        chunk_paths, total_bytes = await _write_chunks_to_scratch(
+            job, guest_os_family, scratch_dir, _bundle_pieces(), None
+        )
+        job.log(f"Wrote the {total_bytes} byte bundle in {len(chunk_paths)} chunk(s); concatenating.")
+        if job.cancel_requested:
+            jobs.mark_cancelled(job.id)
+            return
+
+        job.progress_total = len(chunk_paths) + 1 + 1 + 1  # writes + concat + extract + verify
+        await _concat_chunks(job, chunk_paths, bundle_guest_path, guest_os_family)
+        job.progress_current += 1
+        job.log("Bundle uploaded to the guest.")
+        if job.cancel_requested:
+            jobs.mark_cancelled(job.id)
+            return
+
+        job.log("Extracting the bundle in the guest.")
+        extract_argv = restore_bundle.build_extract_command(fmt, bundle_guest_path, job.destination, guest_os_family)
+        exitcode, out, err = await _exec(
+            job, extract_argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds
+        )
+        if exitcode != 0:
+            raise RuntimeError(f"Could not extract the restore bundle: {err.strip() or out.strip()}")
+        job.progress_current += 1
+        job.log("Extraction complete.")
+        if job.cancel_requested:
+            jobs.mark_cancelled(job.id)
+            return
+
+        job.status = RestoreStatus.VERIFYING
+        job.log("Verifying every restored file against the embedded manifest.")
+        if guest_os_family == "windows":
+            manifest_guest_path = ntpath.join(job.destination, restore_bundle.MANIFEST_NAME)
+        else:
+            manifest_guest_path = posixpath.join(job.destination, restore_bundle.MANIFEST_NAME)
+        verify_argv = restore_bundle.build_verify_command(manifest_guest_path, job.destination, guest_os_family)
+        exitcode, out, err = await _exec(
+            job, verify_argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds
+        )
+        job.progress_current += 1
+        if exitcode != 0:
+            jobs.mark_failed(
+                job.id,
+                "Restore completed but per-file checksum verification failed - one or more files may "
+                "not match the backed-up originals.",
+            )
+            return
+        job.log(f"Checksum verified for all {len(manifest)} restored file(s) - matches the source.")
+
+        jobs.mark_done(job.id)
+    except asyncio.CancelledError:
+        jobs.mark_cancelled(job.id)
+        raise
+    except httpx.HTTPStatusError as exc:
+        jobs.mark_failed(job.id, _pve_error_message(exc))
+    except Exception as exc:  # last-resort guard - a job must never hang "running" forever
+        jobs.mark_failed(job.id, str(exc))
+    finally:
+        if scratch_dir is not None:
+            await _remove_scratch_dir(job, guest_os_family, scratch_dir)
+        if tmp_dir_ctx is not None:
+            tmp_dir_ctx.cleanup()
+
+
+async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
     """Downloads the source file from file-restore, then writes it - via
     a single agent/file-write call when the content fits in one chunk
     and neither metadata restore nor verify was requested, otherwise via
@@ -531,7 +709,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
                         len(chunk_paths) + 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
                     )
                     job.log(f"Wrote all {len(chunk_paths)} chunk(s) to scratch; concatenating into the destination.")
-                    await _concat_chunks(job, chunk_paths, guest_os_family)
+                    await _concat_chunks(job, chunk_paths, job.destination, guest_os_family)
                     await _verify_destination_exists(job, guest_os_family)
                     job.progress_current += 1
                     job.log("Concatenation complete.")

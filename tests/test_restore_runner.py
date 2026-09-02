@@ -4,7 +4,8 @@ from dataclasses import replace as _replace
 import httpx
 import pytest
 
-from backend import guest_agent, pve_client, restore_download, restore_runner
+from backend import guest_agent, pve_client, restore_bundle, restore_download, restore_runner
+from backend.restore_bundle import BundleFormat, BundleItem, ManifestBuilder
 from backend.restore_jobs import RestoreJobManager, RestoreStatus
 from backend.restore_runner import run_restore
 
@@ -853,3 +854,248 @@ async def test_scratch_cleanup_failure_does_not_mask_a_successful_restore(manage
 
     await run_restore(job, manager)
     assert job.status == RestoreStatus.DONE
+
+
+# --- multi-file/directory bundle restore (docs/plan.md §7.7, issue #24) ---
+
+
+def _bundle_job(manager, session_data, **overrides):
+    defaults = dict(
+        items=[
+            BundleItem(filepath="L2V0Yw==", name="etc", leaf=False),
+            BundleItem(filepath="L2hvbWUvZmlsZQ==", name="file", leaf=True),
+        ],
+        source_filepath="",
+        source="2 item(s)",
+        destination="/home/user/restore",
+    )
+    defaults.update(overrides)
+    return _make_job(manager, session_data, **defaults)
+
+
+class _NoopTempDirCtx:
+    def cleanup(self) -> None:
+        pass
+
+
+def _patch_build_bundle(monkeypatch, tmp_path, content: bytes, fmt=BundleFormat.TAR_GZ, manifest_len=2):
+    bundle_path = tmp_path / "bundle.out"
+    bundle_path.write_bytes(content)
+    manifest = ManifestBuilder()
+    for i in range(manifest_len):
+        manifest.add(f"file{i}", "deadbeef")
+
+    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable):
+        return bundle_path, fmt, manifest, _NoopTempDirCtx()
+
+    monkeypatch.setattr(restore_bundle, "build_bundle", fake_build_bundle)
+    return bundle_path
+
+
+async def test_run_restore_dispatches_to_bundle_path_when_items_is_set(manager, session_data, monkeypatch):
+    job = _bundle_job(manager, session_data)
+    calls = []
+
+    async def fake_bundle(j, jobs):
+        calls.append("bundle")
+
+    async def fake_single(j, jobs):
+        calls.append("single")
+
+    monkeypatch.setattr(restore_runner, "_run_bundle_restore", fake_bundle)
+    monkeypatch.setattr(restore_runner, "_run_single_file_restore", fake_single)
+
+    await run_restore(job, manager)
+    assert calls == ["bundle"]
+
+
+async def test_run_restore_dispatches_to_single_file_path_when_items_is_none(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data)  # no items - the ordinary single-file case
+    calls = []
+
+    async def fake_bundle(j, jobs):
+        calls.append("bundle")
+
+    async def fake_single(j, jobs):
+        calls.append("single")
+
+    monkeypatch.setattr(restore_runner, "_run_bundle_restore", fake_bundle)
+    monkeypatch.setattr(restore_runner, "_run_single_file_restore", fake_single)
+
+    await run_restore(job, manager)
+    assert calls == ["single"]
+
+
+async def test_bundle_restore_happy_path(manager, session_data, monkeypatch, tmp_path):
+    job = _bundle_job(manager, session_data, guest_type="ct", vmid="104")
+    content = b"a" * 5000
+    _patch_build_bundle(monkeypatch, tmp_path, content, fmt=BundleFormat.TAR_GZ, manifest_len=2)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    written = []
+    exec_calls = []
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        written.append((path, wire_content))
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_calls.append(argv)
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""  # ensure-dest-dir and create-scratch-dir both use this
+        if argv[0] == "tar" and "-xO" in argv:
+            return 1, "", "tar: unsupported compression"  # zst probe fails -> targz fallback confirmed
+        if argv[:2] == ["sh", "-c"] and "cat" in argv[2]:
+            return 0, "", ""  # concat into the scratch bundle file
+        if argv[:2] == ["tar", "-xf"]:
+            return 0, "", ""  # extraction
+        if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
+            return 0, "All files OK\n", ""  # manifest verify
+        if argv[:2] == ["rm", "-rf"]:
+            return 0, "", ""  # scratch cleanup
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    assert len(written) >= 1  # bundle content chunked to the guest
+    assert any(c[:2] == ["tar", "-xf"] for c in exec_calls)
+    assert any(c[:2] == ["sh", "-c"] and "sha256sum -c" in c[2] for c in exec_calls)
+    log_text = "\n".join(job.log_lines)
+    assert "Starting restore of 2 item(s)" in log_text
+    assert "Bundle built" in log_text
+    assert "Extraction complete" in log_text
+    assert "Checksum verified for all 2 restored file(s)" in log_text
+
+
+async def test_bundle_restore_blocked_without_design_b(manager, session_data, monkeypatch):
+    job = _bundle_job(manager, session_data)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.FAILED
+    assert "Unrestricted" in job.error
+
+
+async def test_bundle_restore_extract_failure_fails_the_job(manager, session_data, monkeypatch, tmp_path):
+    job = _bundle_job(manager, session_data)
+    _patch_build_bundle(monkeypatch, tmp_path, b"content", fmt=BundleFormat.TAR_GZ)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[0] == "tar" and "-xO" in argv:
+            return 1, "", ""
+        if argv[:2] == ["sh", "-c"] and "cat" in argv[2]:
+            return 0, "", ""
+        if argv[:2] == ["tar", "-xf"]:
+            return 1, "", "tar: cannot open bundle"
+        if argv[:2] == ["rm", "-rf"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.FAILED
+    assert "extract" in job.error.lower()
+
+
+async def test_bundle_restore_verify_failure_fails_the_job_not_silently(manager, session_data, monkeypatch, tmp_path):
+    job = _bundle_job(manager, session_data)
+    _patch_build_bundle(monkeypatch, tmp_path, b"content", fmt=BundleFormat.TAR_GZ)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[0] == "tar" and "-xO" in argv:
+            return 1, "", ""
+        if argv[:2] == ["sh", "-c"] and "cat" in argv[2]:
+            return 0, "", ""
+        if argv[:2] == ["tar", "-xf"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
+            return 1, "file0: FAILED\n", ""  # a real mismatch
+        if argv[:2] == ["rm", "-rf"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.FAILED
+    assert "verification failed" in job.error.lower()
+
+
+async def test_bundle_restore_cleans_up_scratch_and_temp_dir_on_failure(manager, session_data, monkeypatch, tmp_path):
+    job = _bundle_job(manager, session_data)
+    bundle_path = tmp_path / "bundle.out"
+    bundle_path.write_bytes(b"content")
+    manifest = ManifestBuilder()
+    manifest.add("f", "abc")
+    cleanup_calls = []
+
+    class _TrackedTempDirCtx:
+        def cleanup(self):
+            cleanup_calls.append(1)
+
+    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable):
+        return bundle_path, BundleFormat.TAR_GZ, manifest, _TrackedTempDirCtx()
+
+    monkeypatch.setattr(restore_bundle, "build_bundle", fake_build_bundle)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    rmdir_calls = []
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[0] == "tar" and "-xO" in argv:
+            return 1, "", ""
+        if argv[:2] == ["sh", "-c"] and "cat" in argv[2]:
+            return 0, "", ""
+        if argv[:2] == ["tar", "-xf"]:
+            raise RuntimeError("guest connection lost mid-extract")
+        if argv[:2] == ["rm", "-rf"]:
+            rmdir_calls.append(argv)
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+    assert job.status == RestoreStatus.FAILED
+    assert len(rmdir_calls) == 1  # scratch dir cleanup still ran
+    assert cleanup_calls == [1]  # local temp dir cleanup still ran

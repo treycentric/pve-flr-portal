@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from backend.restore_bundle import BundleItem
 from backend.restore_jobs import RestoreJobManager, RestoreStatus
 
 
@@ -34,6 +35,23 @@ def test_create_assigns_id_and_queued_status(manager, session_data):
     assert job.id
     assert job.status == RestoreStatus.QUEUED
     assert job.is_active
+
+
+def test_create_defaults_items_to_none_for_an_ordinary_single_file_job(manager, session_data):
+    # None (not an empty list) is the signal restore_runner.py's
+    # dispatcher checks - every job created before this field existed
+    # behaves identically (docs/plan.md §7.7).
+    job = _make(manager, session_data)
+    assert job.items is None
+
+
+def test_create_accepts_items_for_a_bundle_job(manager, session_data):
+    items = [
+        BundleItem(filepath="L2V0Yw==", name="etc", leaf=False),
+        BundleItem(filepath="L2hvbWUvdXNlci9maWxl", name="file", leaf=True),
+    ]
+    job = _make(manager, session_data, items=items, source_filepath="", source="2 item(s)", destination="/restore")
+    assert job.items == items
 
 
 def test_create_snapshots_the_session_independently(manager, session_data):

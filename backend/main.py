@@ -15,7 +15,16 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException
 
-from . import auth, guest_agent, guest_browse, pve_client, restore_download, restore_jobs, restore_runner
+from . import (
+    auth,
+    guest_agent,
+    guest_browse,
+    pve_client,
+    restore_bundle,
+    restore_download,
+    restore_jobs,
+    restore_runner,
+)
 from .auth import SessionData, ensure_fresh_ticket
 from .version import REPO_URL, __version__
 
@@ -318,8 +327,9 @@ async def restore_capabilities(
 @app.post("/api/restore")
 async def restore(
     volume: str = Form(...),
-    filepath: str = Form(...),
-    name: str = Form(...),
+    filepath: str | None = Form(None),
+    name: str | None = Form(None),
+    item: list[str] = Form(default=[]),
     guest_type: str = Form(...),
     vmid: str = Form(...),
     guest_label: str = Form(...),
@@ -338,42 +348,88 @@ async def restore(
     lifetime; the job itself fails clearly (not this endpoint) if
     something later turns out to need guest-exec but the account lacks
     it. `guest_type` is the app-internal "vm"/"ct" value - see
-    restore_capabilities() above."""
+    restore_capabilities() above.
+
+    Multi-file/directory restore (docs/plan.md §7.7, issue #24): pass
+    one or more `item` fields - the same JSON `{filepath, name, leaf}`
+    shape `download_bundle()` already uses for multi-select - instead
+    of `filepath`/`name`. Exactly one of (`filepath` + `name`) or
+    `item[]` must be given."""
     if guest_type not in ("vm", "ct"):
         raise HTTPException(status_code=400, detail=f"Unknown guest type: {guest_type}")
     if not overwrite:
         raise HTTPException(status_code=400, detail="Restore must be explicitly confirmed to overwrite the destination")
 
+    is_bundle = bool(item)
+    if is_bundle and (filepath or name):
+        raise HTTPException(status_code=400, detail="Provide either filepath+name or item[], not both")
+    if not is_bundle and not (filepath and name):
+        raise HTTPException(status_code=400, detail="filepath and name are required for a single-file restore")
+
     # Re-checked server-side regardless of what the UI already showed -
     # the capability response is a UI convenience, never trusted for the
     # actual write (docs/plan.md §7.5).
     caps = await guest_agent.get_restore_capabilities(session, guest_type, vmid)
-    if not caps.design_a.available:
-        raise HTTPException(status_code=403, detail=caps.design_a.reason or "Restore is not available for this guest")
-    if (restore_metadata or verify) and not caps.design_b.available:
-        raise HTTPException(
-            status_code=403,
-            detail=caps.design_b.reason or "Restoring metadata/verifying needs VM.GuestAgent.Unrestricted",
+
+    if is_bundle:
+        # A bundle restore always needs guest-exec (write + extract +
+        # verify) - there's no Design-A-equivalent single-call fast path
+        # for more than one item, so this checks design_b unconditionally
+        # rather than only when restore_metadata/verify were requested.
+        if not caps.design_b.available:
+            raise HTTPException(
+                status_code=403,
+                detail=caps.design_b.reason or "Multi-file/directory restore needs VM.GuestAgent.Unrestricted",
+            )
+        try:
+            items = [restore_bundle.BundleItem(**json.loads(raw)) for raw in item]
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid item entry: {exc}") from None
+
+        destination = dest_dir.rstrip("\\/")
+        job = restore_jobs.manager.create(
+            session=session,
+            guest_type=guest_type,
+            vmid=vmid,
+            guest_label=guest_label,
+            task_name=f"Restore {len(items)} item(s) → {destination}",
+            snapshot_time=snapshot_time,
+            source_volume=volume,
+            source_filepath="",
+            source=f"{len(items)} item(s)",
+            destination=destination,
+            items=items,
+        )
+    else:
+        if not caps.design_a.available:
+            raise HTTPException(
+                status_code=403, detail=caps.design_a.reason or "Restore is not available for this guest"
+            )
+        if (restore_metadata or verify) and not caps.design_b.available:
+            raise HTTPException(
+                status_code=403,
+                detail=caps.design_b.reason or "Restoring metadata/verifying needs VM.GuestAgent.Unrestricted",
+            )
+
+        sep = "\\" if caps.guest_os_family == "windows" else "/"
+        destination = dest_dir.rstrip("\\/") + sep + name
+
+        job = restore_jobs.manager.create(
+            session=session,
+            guest_type=guest_type,
+            vmid=vmid,
+            guest_label=guest_label,
+            task_name=f"Restore {name} → {destination}",
+            snapshot_time=snapshot_time,
+            source_volume=volume,
+            source_filepath=filepath,
+            source=name,
+            destination=destination,
+            restore_metadata=restore_metadata,
+            verify=verify,
+            source_mtime=source_mtime,
         )
 
-    sep = "\\" if caps.guest_os_family == "windows" else "/"
-    destination = dest_dir.rstrip("\\/") + sep + name
-
-    job = restore_jobs.manager.create(
-        session=session,
-        guest_type=guest_type,
-        vmid=vmid,
-        guest_label=guest_label,
-        task_name=f"Restore {name} → {destination}",
-        snapshot_time=snapshot_time,
-        source_volume=volume,
-        source_filepath=filepath,
-        source=name,
-        destination=destination,
-        restore_metadata=restore_metadata,
-        verify=verify,
-        source_mtime=source_mtime,
-    )
     restore_jobs.manager.submit(job, lambda j: restore_runner.run_restore(j, restore_jobs.manager))
     return JSONResponse(job.to_dict())
 

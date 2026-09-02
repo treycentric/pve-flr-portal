@@ -252,6 +252,106 @@ def test_restore_blocked_when_capability_unavailable(client, monkeypatch):
     assert "FileWrite" in resp.json()["detail"]
 
 
+def test_restore_requires_either_filepath_name_or_item(client):
+    resp = client.post("/api/restore", data=_restore_form(filepath=None, name=None))
+    assert resp.status_code == 400
+    assert "required" in resp.json()["detail"]
+
+
+def test_restore_rejects_both_filepath_name_and_item_together(client):
+    form = _restore_form()
+    form["item"] = ['{"filepath": "abc==", "name": "etc", "leaf": false}']
+    resp = client.post("/api/restore", data=form)
+    assert resp.status_code == 400
+    assert "not both" in resp.json()["detail"]
+
+
+def test_restore_bundle_submits_a_queued_job(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    form = _restore_form(filepath=None, name=None, dest_dir="/home/user/restore")
+    form["item"] = [
+        '{"filepath": "L2V0Yw==", "name": "etc", "leaf": false}',
+        '{"filepath": "L2hvbWUvZmlsZQ==", "name": "file", "leaf": true}',
+    ]
+    resp = client.post("/api/restore", data=form)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert body["destination"] == "/home/user/restore"  # no filename appended - it's a bundle target dir
+    assert body["source"] == "2 item(s)"
+
+    job = restore_jobs.manager.get(body["id"])
+    assert job is not None
+    assert len(job.items) == 2
+    assert job.items[0].name == "etc"
+    assert job.items[0].leaf is False
+    assert job.items[1].leaf is True
+
+
+def test_restore_bundle_checks_design_b_not_design_a(client, monkeypatch):
+    # A bundle restore always needs guest-exec - design_a availability
+    # (the single-call fast path) is irrelevant to it.
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(
+            design_a=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"),
+            design_b=guest_agent.PathAvailability(True),
+        )
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    form = _restore_form(filepath=None, name=None)
+    form["item"] = ['{"filepath": "abc==", "name": "f", "leaf": true}']
+
+    from backend import restore_jobs, restore_runner
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    resp = client.post("/api/restore", data=form)
+    assert resp.status_code == 200  # design_a being unavailable doesn't block a bundle restore
+    assert restore_jobs.manager.get(resp.json()["id"]) is not None
+
+
+def test_restore_bundle_blocked_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    form = _restore_form(filepath=None, name=None)
+    form["item"] = ['{"filepath": "abc==", "name": "f", "leaf": true}']
+    resp = client.post("/api/restore", data=form)
+    assert resp.status_code == 403
+    assert "Unrestricted" in resp.json()["detail"]
+
+
+def test_restore_bundle_rejects_invalid_item_json(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    form = _restore_form(filepath=None, name=None)
+    form["item"] = ["not json"]
+    resp = client.post("/api/restore", data=form)
+    assert resp.status_code == 400
+
+
 def test_restore_uses_posix_separator_for_non_windows_guest(client, monkeypatch):
     from backend import guest_agent, restore_runner
 
