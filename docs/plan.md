@@ -1771,6 +1771,26 @@ since it completes restore-to-guest rather than standing apart from it.
    the real write-phase total (chunk count, or the DNT-rescaled 3 units)
    takes over, the same "reassign progress_total per phase" pattern
    already used through the rest of this function.
+
+   **Real-world finding (2026-09-02), immediately after that shipped:**
+   the progress bar (a UI addition made the same day, driven by
+   `progress_percent`) sat frozen at a flat, unmoving "0%" during a real
+   directory restore even while the log clearly showed active downloads
+   ("Downloading 'AppData': 1904640 bytes so far...") - PVE didn't send
+   a `Content-Length` header for that item, so `on_item_progress` never
+   touched `job.progress_current`/`progress_total`, and those stayed at
+   `RestoreJob`'s field defaults (`current=0`, `total=1`) - which
+   `progress_percent` happily computed as a real-looking "0%" rather
+   than recognizing "no total has ever been set." Root cause was the
+   default itself: `progress_total` defaulted to `1`, not `0`, even
+   though `progress_percent`'s own guard (`progress_total <= 0: return
+   None`) was clearly written to treat `<= 0` as "nothing to report
+   yet." Changed the default to `0` - now genuinely unmeasured phases
+   (freshly queued, or downloading an item with no known size) read
+   `None` and the frontend shows no bar at all, rather than a
+   misleadingly precise "0%" indistinguishable from a hang. No call site
+   needed to change: every real progress_total assignment already
+   overwrites the default outright rather than incrementing off it.
 3b. ~~Frontend~~ — **done**: the Restore button's gate/capability check
    now reuses `isSingleFile` (unchanged) to branch between `design_a`
    (a single leaf file - the original fast-path check) and `design_b`

@@ -1097,6 +1097,63 @@ async def test_bundle_restore_logs_and_tracks_progress_during_build(manager, ses
     assert seen_progress == [(1000, 3000), (2000, 3000), (3000, 3000)]
 
 
+async def test_bundle_restore_progress_stays_none_without_content_length(manager, session_data, monkeypatch, tmp_path):
+    # Confirmed live 2026-09-02: PVE doesn't always send a Content-Length
+    # for a directory download - job.progress_percent used to read a
+    # real-looking "0%" (progress_total defaulted to 1) for the whole
+    # build phase in that case, a flat unmoving bar indistinguishable
+    # from a hang even while the log was actively showing bytes
+    # downloaded. Locks in that it reads None (no bar shown) instead.
+    job = _bundle_job(manager, session_data, guest_type="ct", vmid="104")
+    bundle_path = tmp_path / "bundle.out"
+    bundle_path.write_bytes(b"a" * 100)
+    manifest = ManifestBuilder()
+    manifest.add("f", "deadbeef")
+    item = BundleItem(filepath="abc==", name="AppData", leaf=False)
+
+    seen_percent_during_download = []
+
+    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable, on_item_progress=None):
+        if on_item_progress is not None:
+            on_item_progress(item, 1904640, None)  # no Content-Length, same as the live report
+            seen_percent_during_download.append(job.progress_percent)
+        return bundle_path, BundleFormat.TAR_GZ, manifest, _NoopTempDirCtx()
+
+    monkeypatch.setattr(restore_bundle, "build_bundle", fake_build_bundle)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[0] == "tar" and "-xO" in argv:
+            return 1, "", "tar: unsupported compression"
+        if argv[:2] == ["sh", "-c"] and "cat" in argv[2]:
+            return 0, "", ""
+        if argv[:2] == ["tar", "-xf"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
+            return 0, "All files OK\n", ""
+        if argv[:2] == ["rm", "-f"]:
+            return 0, "", ""
+        if argv[:2] == ["rm", "-rf"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    assert seen_percent_during_download == [None]
+
+
 async def test_bundle_restore_uses_direct_network_transfer_when_available(manager, session_data, monkeypatch, tmp_path):
     # 2026-09-02, docs/plan.md §7.7: bundle restore now tries Direct
     # Network Transfer first (same as single-file) instead of always

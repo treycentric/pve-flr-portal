@@ -165,6 +165,20 @@ def test_progress_percent_none_when_not_active(manager, session_data):
     assert job.to_dict()["progress_percent"] is None
 
 
+def test_progress_percent_none_before_any_total_is_set(manager, session_data):
+    # Confirmed live 2026-09-02: progress_total used to default to 1, so
+    # a freshly-started active job (progress_current=0) computed a
+    # real-looking "0%" before restore_runner.py ever set a real total -
+    # e.g. the whole bundle-restore build phase, downloading an item PVE
+    # didn't send a Content-Length for. That renders as a flat, unmoving
+    # 0% progress bar indistinguishable from a hang. None (no bar shown
+    # at all) is the honest signal for "nothing measured yet."
+    job = _make(manager, session_data)
+    assert job.progress_total == 0
+    assert job.progress_percent is None
+    assert job.to_dict()["progress_percent"] is None
+
+
 def test_progress_percent_computed_while_active(manager, session_data):
     job = _make(manager, session_data)
     job.progress_total = 4

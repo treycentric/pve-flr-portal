@@ -89,8 +89,19 @@ class RestoreJob:
     # actual step count is known; the single-call fast path is just
     # total=1). Good enough to show "running (42%)" without the added
     # complexity of tracking partial-chunk upload progress.
+    #
+    # Defaults to 0, not 1: progress_total <= 0 is progress_percent's own
+    # signal for "nothing meaningful to report yet" (returns None, which
+    # the frontend renders as no percentage/bar at all). Confirmed live
+    # 2026-09-02: a default of 1 meant progress_current=0/progress_total=1
+    # computed a real-looking "0%" during any phase that hasn't set a
+    # real total yet - e.g. the bundle-restore build phase downloading an
+    # item PVE didn't send a Content-Length for - which renders as a
+    # flat, unmoving 0% bar indistinguishable from a hang, exactly the
+    # "looks stuck" symptom this project keeps finding and fixing. `None`
+    # (no bar shown) is an honest signal there; a static "0%" is not.
     progress_current: int = 0
-    progress_total: int = 1
+    progress_total: int = 0
     status: RestoreStatus = RestoreStatus.QUEUED
     error: str | None = None
     started_at: float = field(default_factory=time.time)
