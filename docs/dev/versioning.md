@@ -114,48 +114,58 @@ and a preview of the `CHANGELOG.md` entry it would generate. Run this
 any time to see where things stand — it changes nothing.
 
 ```
-python scripts/release.py bump auto      # or: major | minor | patch
+python scripts/release.py bump auto --pr      # or: major | minor | patch
 ```
-Updates `VERSION`, prepends the new section to `CHANGELOG.md`, and
-commits (`chore(release): vX.Y.Z`) — all **locally**, nothing pushed.
-Add `--dry-run` to preview the exact diff without touching anything.
-`auto` uses the same bump-precedence rule as `suggest`; pick
-`major`/`minor`/`patch` explicitly to override it (e.g. a deliberate
-major bump for a docs-driven breaking change that no commit flagged
-with `!`).
+Computes the bump, then — because `main` is protected (see the box
+below) — creates a `release/vX.Y.Z` branch off `origin/main`, writes
+`VERSION` + the new `CHANGELOG.md` section + the `chore(release): vX.Y.Z`
+commit *on that branch*, pushes it, and opens the PR via `gh` (with the
+changelog section as the body). Leaves you back on the branch you
+started from. Add `--dry-run` to print the plan without touching
+anything. `auto` uses the same bump-precedence rule as `suggest`; pick
+`major`/`minor`/`patch` explicitly to override (e.g. a deliberate major
+bump for a docs-driven breaking change no commit flagged with `!`).
 
-> **`bump` also creates a local annotated tag — do not push it.** `main`
-> is protected: direct pushes are rejected and every change lands via a
-> squash-merged PR, which rewrites the commit's hash. The version tag
-> must sit on the commit that actually ends up on `main`, so the tag
-> `bump` made (on the pre-merge commit) is a dead end — `git tag -d
-> vX.Y.Z` it, and create the real tag on the squashed commit (below).
-> Why the automation cares: the next release runs `git describe --tags`
-> to find the previous version, and only tags *reachable from `main`*
-> count — a tag left on an orphaned commit makes the next release
-> double-count every commit since the version before it. (`chore` is an
-> excluded type, so the release commit itself never lands in a changelog
-> or a bump either way.)
-
-Getting the release onto `main` and tagged:
+**Squash-merge that PR**, then:
 
 ```
+python scripts/release.py tag
+```
+Fast-forwards your local `main` from `origin`, checks that its HEAD is
+the `chore(release): vX.Y.Z` commit, then `git tag -a vX.Y.Z` + pushes
+the tag — which fires `.github/workflows/release.yml` (test suite →
+publish the GitHub release from `CHANGELOG.md`). Refuses if HEAD isn't
+the release commit or the tag already exists. `--dry-run` prints the
+plan.
+
+> **Why the two-step dance.** `main` rejects direct pushes; everything
+> lands via a squash-merged PR, which rewrites the commit's hash. The
+> version tag has to sit on the commit that actually ends up on `main`,
+> so `tag` runs *after* the merge, against `main`'s real HEAD. The next
+> release then finds it via `git describe --tags` — a tag left on an
+> orphaned pre-merge commit would make that release double-count every
+> commit since the previous version. (`chore` is an excluded type, so
+> the release commit never lands in a changelog or affects a bump
+> regardless.)
+
+### Doing it without the helpers
+
+Plain `bump` (no `--pr`) still works — it commits on the current branch
+and makes a local tag — but on this repo that tag is a dead end
+(`git tag -d vX.Y.Z` it). The manual equivalent of `--pr` + `tag`:
+
+```
+python scripts/release.py bump auto
 V=v$(cat VERSION)
-git branch "release/$V"           # move the chore(release) commit onto a branch
-git reset --hard origin/main      # (only if you ran bump on main) put main back
-git push -u origin "release/$V"
-gh pr create --fill --base main   # open the PR, then squash-merge it
-git tag -d "$V"                    # discard bump's dead-end tag
-
-# after the squash-merge shows up on main:
-git checkout main && git pull
-git tag "$V" && git push origin "$V"   # <-- pushing the tag fires the Release workflow
+git branch "release/$V" && git reset --hard origin/main && git tag -d "$V"
+git switch "release/$V" && git push -u origin "release/$V"
+gh pr create --fill --base main            # squash-merge it
+git switch main && git pull
+git tag "$V" && git push origin "$V"
 ```
 
-Pushing the tag triggers `.github/workflows/release.yml`, which runs the
-test suite and then publishes the GitHub release automatically. To do
-that step by hand instead (or from any machine with `gh` installed and
-authenticated), once the tag is on `main`:
+To publish the GitHub release by hand instead of via the tag-push
+workflow (the tag must already be on `main`):
 
 ```
 python scripts/release.py release            # tag defaults to v<VERSION>
@@ -171,25 +181,16 @@ releases are always generated the same way.
 ## Full walkthrough
 
 ```
-python scripts/release.py suggest                   # sanity check first
-python scripts/release.py bump auto                  # or major/minor/patch
-git show                                             # review the commit
-
-V=v$(cat VERSION)
-git branch "release/$V"                              # commit -> branch
-git reset --hard origin/main                         # only if bump ran on main
-git push -u origin "release/$V"
-gh pr create --fill --base main                      # then squash-merge the PR
-git tag -d "$V"                                      # drop bump's dead-end tag
-
-git checkout main && git pull                        # pull the squashed commit
-git tag "$V" && git push origin "$V"                 # fires the release workflow
+python scripts/release.py suggest             # sanity check first
+python scripts/release.py bump auto --pr      # opens the release PR
+#   ... review + squash-merge the PR on GitHub ...
+python scripts/release.py tag                 # tags the merged commit -> release workflow
 ```
 
-The tag-push workflow publishes the GitHub release from `CHANGELOG.md`.
-To publish it by hand instead, still push the tag first (CI and
-`release` both expect `vX.Y.Z` to exist on `main`), then run
-`python scripts/release.py release`.
+The tag push triggers `.github/workflows/release.yml`, which runs the
+full test suite (a hard gate) and then publishes the GitHub release
+from the matching `CHANGELOG.md` section. `python scripts/release.py
+release` does that publish step by hand — see the section above.
 
 ## CI
 
