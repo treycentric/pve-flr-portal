@@ -1749,6 +1749,28 @@ since it completes restore-to-guest rather than standing apart from it.
    fabricated a directory's zip content without a self-referencing
    prefix, since that fabricated shape had never actually matched what
    PVE hands back.
+
+   **Real-world finding (2026-09-02), a Windows single-directory
+   restore:** the job log sat at "Building the restore bundle from 1
+   item(s)." for 282 seconds with no further output and
+   `progress_percent` stuck at 0% the entire time - genuinely just slow
+   (a large directory), not hung, but indistinguishable from one: the
+   whole build phase (download each item, add it to the output bundle)
+   had no progress signal at all, unlike the write-to-guest phase, which
+   already had one. Fixed by threading an `on_item_progress` callback
+   (`ItemProgressFn`) through `build_bundle()` ->
+   `_download_item_to_temp_file()`, called after every downloaded chunk
+   with `(item, bytes_so_far, total_bytes_or_None)` - `total_bytes` comes
+   from PVE's `Content-Length` response header when present, `None`
+   otherwise (not guaranteed present; the log/progress tracking
+   degrades gracefully either way). `_run_bundle_restore()` wires a
+   throttled handler (logs on a new item and at most every ~5s while
+   it's downloading, not once per 61440-byte chunk) that also updates
+   `job.progress_current`/`progress_total` to the real byte counts when
+   the total is known - overwritten once the build phase finishes and
+   the real write-phase total (chunk count, or the DNT-rescaled 3 units)
+   takes over, the same "reassign progress_total per phase" pattern
+   already used through the rest of this function.
 3b. ~~Frontend~~ — **done**: the Restore button's gate/capability check
    now reuses `isSingleFile` (unchanged) to branch between `design_a`
    (a single leaf file - the original fast-path check) and `design_b`

@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import ntpath
 import posixpath
+import time
 from pathlib import Path
 
 import httpx
@@ -512,8 +513,40 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             return
 
         job.log(f"Building the restore bundle from {len(job.items)} item(s).")
+
+        # Confirmed live 2026-09-02: this whole build phase (download +
+        # add-to-bundle) had no progress signal at all - a large
+        # single-directory selection looked indistinguishable from a
+        # hang for several minutes. Logs when each item starts, and
+        # periodically (throttled to every ~5s, not every 61440-byte
+        # chunk) while it's downloading; when PVE sends a Content-Length
+        # for the item, job.progress_current/total track real bytes too
+        # (overwritten below once the real total - chunk count or DNT -
+        # is known, same "reassign progress_total per phase" pattern
+        # already used through the rest of this function).
+        progress_state: dict[str, object] = {"item": None, "logged_at": 0.0}
+
+        def _on_item_progress(item: restore_bundle.BundleItem, downloaded: int, total: int | None) -> None:
+            now = time.monotonic()
+            is_new_item = progress_state["item"] is not item
+            if is_new_item:
+                progress_state["item"] = item
+                progress_state["logged_at"] = now
+                size_note = f" ({total} bytes)" if total is not None else ""
+                job.log(f"Downloading {item.name!r}{size_note}...")
+            if total is not None:
+                job.progress_current = downloaded
+                job.progress_total = max(total, 1)
+            if is_new_item or (now - progress_state["logged_at"]) >= 5.0:
+                progress_state["logged_at"] = now
+                if total is not None and not is_new_item:
+                    pct = round(100 * downloaded / total) if total > 0 else 100
+                    job.log(f"Downloading {item.name!r}: {downloaded} / {total} bytes ({pct}%).")
+                elif total is None and not is_new_item:
+                    job.log(f"Downloading {item.name!r}: {downloaded} bytes so far...")
+
         output_path, fmt, manifest, tmp_dir_ctx = await restore_bundle.build_bundle(
-            job.session, job.source_volume, job.items, guest_os_family, zst_capable
+            job.session, job.source_volume, job.items, guest_os_family, zst_capable, _on_item_progress
         )
         bundle_size_bytes = output_path.stat().st_size
         expected_chunks = chunk_count(bundle_size_bytes, DEFAULT_CHUNK_SIZE_BYTES)

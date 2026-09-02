@@ -213,20 +213,43 @@ class _HashingReader:
         return chunk
 
 
-async def _download_item_to_temp_file(session: SessionData, volume: str, item: BundleItem, tmp_dir: Path) -> Path:
+ItemProgressFn = Callable[[BundleItem, int, int | None], None]  # (item, bytes so far, total bytes or None)
+
+
+async def _download_item_to_temp_file(
+    session: SessionData,
+    volume: str,
+    item: BundleItem,
+    tmp_dir: Path,
+    on_progress: ItemProgressFn | None = None,
+) -> Path:
     """Streams one selected item to its own local temp file, one
     DEFAULT_CHUNK_SIZE_BYTES piece at a time - never the whole item in
     memory (the same discipline restore_runner.py's memory fix, §7.6,
     established for a single file, extended here to each item in a
     multi-select bundle). A directory item lands as PVE's own default
     zip encoding of everything under it - no `tar=1` needed; see this
-    module's docstring correction in docs/plan.md §7.7."""
+    module's docstring correction in docs/plan.md §7.7.
+
+    `on_progress`, when given, is called after every chunk with (item,
+    bytes downloaded so far, total bytes if PVE sent a Content-Length
+    header else None) - unthrottled, so the caller decides how often to
+    actually act on it (confirmed live 2026-09-02: this whole download
+    step had no progress signal at all, a large single-directory
+    selection looked indistinguishable from a hang for several
+    minutes)."""
     dest = tmp_dir / f"item-{uuid.uuid4().hex}"
     client, response = await pve_client.open_download(session, volume, item.filepath, tar=False)
     try:
+        content_length_header = response.headers.get("content-length")
+        total = int(content_length_header) if content_length_header is not None else None
+        downloaded = 0
         with dest.open("wb") as f:
             async for piece in response.aiter_bytes(chunk_size=DEFAULT_CHUNK_SIZE_BYTES):
                 f.write(piece)
+                downloaded += len(piece)
+                if on_progress is not None:
+                    on_progress(item, downloaded, total)
     finally:
         await response.aclose()
         await client.aclose()
@@ -391,6 +414,7 @@ async def build_bundle(
     items: list[BundleItem],
     guest_os_family: str | None,
     zst_capable: bool,
+    on_item_progress: ItemProgressFn | None = None,
 ) -> tuple[Path, BundleFormat, ManifestBuilder, tempfile.TemporaryDirectory]:
     """Downloads each selected item (streamed, one piece at a time) to
     its own local temp file and adds it to the output bundle - format
@@ -406,7 +430,14 @@ async def build_bundle(
     since a download has to happen (async) between each item's add.
     Caller owns the returned `TemporaryDirectory`: keep it alive until
     the bundle's been fully sent on to the guest, then let it clean
-    itself up (or use it as a context manager)."""
+    itself up (or use it as a context manager).
+
+    `on_item_progress` - see `_download_item_to_temp_file()`'s
+    docstring - is forwarded to each item's download, unthrottled;
+    added because this whole build phase (download + add-to-bundle) had
+    no progress signal at all, confirmed live 2026-09-02 to look
+    indistinguishable from a hang on a large single-directory
+    selection."""
     fmt = select_bundle_format(guest_os_family, zst_capable)
     tmp_dir_ctx = tempfile.TemporaryDirectory(prefix="pve-flr-portal-bundle-")
     tmp_dir = Path(tmp_dir_ctx.name)
@@ -417,7 +448,7 @@ async def build_bundle(
     writer = await asyncio.to_thread(_open_bundle_writer, output_path, fmt)
     try:
         for item in items:
-            local_path = await _download_item_to_temp_file(session, volume, item, tmp_dir)
+            local_path = await _download_item_to_temp_file(session, volume, item, tmp_dir, on_item_progress)
             try:
                 await asyncio.to_thread(_add_item_to_bundle_writer, writer, item, local_path, manifest)
             finally:

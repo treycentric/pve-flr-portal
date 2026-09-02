@@ -886,7 +886,7 @@ def _patch_build_bundle(monkeypatch, tmp_path, content: bytes, fmt=BundleFormat.
     for i in range(manifest_len):
         manifest.add(f"file{i}", "deadbeef")
 
-    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable):
+    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable, on_item_progress=None):
         return bundle_path, fmt, manifest, _NoopTempDirCtx()
 
     monkeypatch.setattr(restore_bundle, "build_bundle", fake_build_bundle)
@@ -1031,6 +1031,70 @@ async def test_bundle_restore_progress_total_reflects_real_chunk_count_from_the_
     # verify = 13) before the very first chunk was written - not still
     # chasing "+1 ahead of current" and creeping up as chunks land.
     assert seen_totals_during_write == [13] * 10
+
+
+async def test_bundle_restore_logs_and_tracks_progress_during_build(manager, session_data, monkeypatch, tmp_path):
+    # 2026-09-02: the build phase (download + add-to-bundle) had no
+    # progress signal at all - confirmed live to look indistinguishable
+    # from a hang. build_bundle() is faked here to simulate a large
+    # item's download in three chunks via the on_item_progress callback
+    # _run_bundle_restore() passes it.
+    job = _bundle_job(manager, session_data, guest_type="ct", vmid="104")
+    bundle_path = tmp_path / "bundle.out"
+    bundle_path.write_bytes(b"a" * 100)
+    manifest = ManifestBuilder()
+    manifest.add("f", "deadbeef")
+    item = BundleItem(filepath="abc==", name="big.bin", leaf=True)
+
+    seen_progress = []
+
+    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable, on_item_progress=None):
+        if on_item_progress is not None:
+            on_item_progress(item, 1000, 3000)
+            seen_progress.append((job.progress_current, job.progress_total))
+            on_item_progress(item, 2000, 3000)
+            seen_progress.append((job.progress_current, job.progress_total))
+            on_item_progress(item, 3000, 3000)
+            seen_progress.append((job.progress_current, job.progress_total))
+        return bundle_path, BundleFormat.TAR_GZ, manifest, _NoopTempDirCtx()
+
+    monkeypatch.setattr(restore_bundle, "build_bundle", fake_build_bundle)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[0] == "tar" and "-xO" in argv:
+            return 1, "", "tar: unsupported compression"
+        if argv[:2] == ["sh", "-c"] and "cat" in argv[2]:
+            return 0, "", ""
+        if argv[:2] == ["tar", "-xf"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
+            return 0, "All files OK\n", ""
+        if argv[:2] == ["rm", "-f"]:
+            return 0, "", ""
+        if argv[:2] == ["rm", "-rf"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    log_text = "\n".join(job.log_lines)
+    assert "Downloading 'big.bin' (3000 bytes)..." in log_text
+    # job.progress_current/total tracked the item's real bytes while it
+    # was actually downloading, not left frozen at a placeholder.
+    assert seen_progress == [(1000, 3000), (2000, 3000), (3000, 3000)]
 
 
 async def test_bundle_restore_uses_direct_network_transfer_when_available(manager, session_data, monkeypatch, tmp_path):
@@ -1210,7 +1274,7 @@ async def test_bundle_restore_cleans_up_scratch_and_temp_dir_on_failure(manager,
         def cleanup(self):
             cleanup_calls.append(1)
 
-    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable):
+    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable, on_item_progress=None):
         return bundle_path, BundleFormat.TAR_GZ, manifest, _TrackedTempDirCtx()
 
     monkeypatch.setattr(restore_bundle, "build_bundle", fake_build_bundle)

@@ -185,6 +185,7 @@ def test_build_verify_command_windows_uses_get_filehash():
 class _FakeBundleResponse:
     def __init__(self, content: bytes):
         self._content = content
+        self.headers = {}  # PVE not always sending Content-Length is the realistic default
 
     async def aiter_bytes(self, chunk_size: int):
         for start in range(0, len(self._content), chunk_size):
@@ -261,6 +262,72 @@ async def test_build_bundle_zip_contains_every_item_plus_manifest(session_data, 
         assert f"{hashlib.sha256(hosts).hexdigest()}  hosts" in manifest_text
         assert f"{hashlib.sha256(passwd).hexdigest()}  etc/passwd" in manifest_text
         assert f"{hashlib.sha256(shadow).hexdigest()}  etc/shadow" in manifest_text
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_reports_item_progress_with_content_length(session_data, monkeypatch, tmp_path):
+    # 2026-09-02: the build phase (download + add-to-bundle) had no
+    # progress signal at all - confirmed live to look indistinguishable
+    # from a hang on a large single-directory selection. Locks in that
+    # on_item_progress fires with real byte counts, including the final
+    # chunk reaching the item's full declared size.
+    content = b"x" * (61440 + 100)  # spans more than one read
+
+    async def fake_open_download(session, volume, filepath, tar=False):
+        response = _FakeBundleResponse(content)
+        response.headers = {"content-length": str(len(content))}
+        return _FakeBundleClient(), response
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open_download)
+    items = [BundleItem(filepath="abc==", name="big.bin", leaf=True)]
+
+    calls = []
+
+    def on_progress(item, downloaded, total):
+        calls.append((item.name, downloaded, total))
+
+    _output_path, _fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data,
+        "pbs:backup/vm/133/2026-09-01",
+        items,
+        guest_os_family="linux",
+        zst_capable=False,
+        on_item_progress=on_progress,
+    )
+    try:
+        assert len(calls) >= 2  # more than one chunk given the content size
+        assert all(name == "big.bin" and total == len(content) for name, _downloaded, total in calls)
+        assert calls[-1][1] == len(content)  # the last call reports the full size downloaded
+        # Monotonically increasing, never resets or double-counts.
+        assert [c[1] for c in calls] == sorted(c[1] for c in calls)
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_reports_item_progress_without_content_length(session_data, monkeypatch, tmp_path):
+    # PVE doesn't always send Content-Length - the callback still fires
+    # (so the caller can at least log periodically), just with total=None
+    # rather than not firing at all.
+    content = b"y" * 500
+    _patch_bundle_download(monkeypatch, {"abc==": content})
+    items = [BundleItem(filepath="abc==", name="small.bin", leaf=True)]
+
+    calls = []
+
+    def on_progress(item, downloaded, total):
+        calls.append((item.name, downloaded, total))
+
+    _output_path, _fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data,
+        "pbs:backup/vm/133/2026-09-01",
+        items,
+        guest_os_family="linux",
+        zst_capable=False,
+        on_item_progress=on_progress,
+    )
+    try:
+        assert calls == [("small.bin", len(content), None)]
     finally:
         tmp_dir_ctx.cleanup()
 
