@@ -26,27 +26,37 @@ from .config import settings
 class DownloadToken:
     job_id: str
     expires_at: float
+    local_path: str | None = None
+    """Set only for a bundle restore (docs/plan.md §7.7, issue #24):
+    when present, the download endpoint serves this already-built local
+    bundle file directly instead of re-proxying from PVE via
+    job_id/source_volume/source_filepath - a bundle isn't something
+    PVE's file-restore API can hand back as one item, since this app
+    synthesizes it locally from multiple downloaded items."""
 
 
 _tokens: dict[str, DownloadToken] = {}
 
 
-def mint_token(job_id: str, ttl_seconds: float | None = None) -> str:
+def mint_token(job_id: str, ttl_seconds: float | None = None, local_path: str | None = None) -> str:
     """Creates a new single-use token for this job, returning the token
     string. `ttl_seconds` defaults to the configured
     RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS - overridable per call mainly so
-    tests don't need to fight a real clock."""
+    tests don't need to fight a real clock. `local_path` - see
+    DownloadToken's docstring - defaults to None (the ordinary
+    single-file case: proxy from PVE)."""
     ttl = settings.restore_download_token_ttl_seconds if ttl_seconds is None else ttl_seconds
     token = secrets.token_urlsafe(32)
-    _tokens[token] = DownloadToken(job_id=job_id, expires_at=time.time() + ttl)
+    _tokens[token] = DownloadToken(job_id=job_id, expires_at=time.time() + ttl, local_path=local_path)
     return token
 
 
-def consume_token(token: str) -> str | None:
+def consume_token_full(token: str) -> DownloadToken | None:
     """Single-use: looks the token up and immediately removes it,
     regardless of outcome, so a second call with the same token - replay,
-    a retried request, whatever - always gets None. Returns the job_id on
-    a valid, unexpired token; None otherwise. Safe without extra locking:
+    a retried request, whatever - always gets None. Returns the full
+    DownloadToken (job_id and, for a bundle restore, local_path) on a
+    valid, unexpired token; None otherwise. Safe without extra locking:
     this app runs the event loop single-threaded, and there's no `await`
     between the dict lookup and the pop, so nothing can interleave."""
     entry = _tokens.pop(token, None)
@@ -54,7 +64,15 @@ def consume_token(token: str) -> str | None:
         return None
     if time.time() > entry.expires_at:
         return None
-    return entry.job_id
+    return entry
+
+
+def consume_token(token: str) -> str | None:
+    """Same as consume_token_full(), but returns just the job_id - the
+    original, still-used-elsewhere shape for callers that only need
+    that (e.g. every existing test predates local_path)."""
+    entry = consume_token_full(token)
+    return entry.job_id if entry is not None else None
 
 
 def clear() -> None:

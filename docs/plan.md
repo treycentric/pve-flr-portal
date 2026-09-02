@@ -1649,21 +1649,49 @@ since it completes restore-to-guest rather than standing apart from it.
    `_run_single_file_restore()`, the latter otherwise byte-for-byte
    identical to before). `_run_bundle_restore()` checks `design_b`
    unconditionally (a bundle always needs guest-exec - no Design-A
-   equivalent), probes tar.zst support, builds the bundle, writes it to
-   the guest via the *same* chunked scratch-write+concat mechanism the
-   single-file path already uses (`_concat_chunks()` gained an explicit
-   `dest_path` parameter so it can target a scratch bundle file instead
-   of always `job.destination`), extracts it, then verifies via the
-   embedded manifest - one command, no app-side comparison. Direct
-   Network Transfer isn't wired in for bundles yet (would need the
-   download-token endpoint to serve a local file instead of re-fetching
-   from PVE), so bundle restores always take the chunked-write path for
-   now. `POST /api/restore` accepts `item: list[str]` (the same JSON
-   shape `download_bundle()` already uses) as an alternative to
-   `filepath`/`name` - exactly one of the two must be given. Frontend
-   multi-select UI (extending past `sel.length !== 1`) is the remaining
-   piece of this step, tracked separately below since it didn't fit in
-   the same pass.
+   equivalent), probes tar.zst support, builds the bundle, then tries
+   Direct Network Transfer before falling back to the chunked
+   scratch-write+concat mechanism the single-file path already uses
+   (`_concat_chunks()` gained an explicit `dest_path` parameter so it
+   can target a scratch bundle file instead of always
+   `job.destination`), extracts it, then verifies via the embedded
+   manifest - one command, no app-side comparison. `POST /api/restore`
+   accepts `item: list[str]` (the same JSON shape `download_bundle()`
+   already uses) as an alternative to `filepath`/`name` - exactly one of
+   the two must be given. Frontend multi-select UI (extending past
+   `sel.length !== 1`) is the remaining piece of this step, tracked
+   separately below since it didn't fit in the same pass.
+
+   **Real-world finding (2026-09-02):** a live restore of ~1.54GB across
+   3 items projected tens of thousands of chunks at
+   `DEFAULT_CHUNK_SIZE_BYTES` (61440 bytes) - each one a separate
+   `agent/file-write` round trip - and appeared "stuck" at a displayed
+   100% almost immediately (a second, related bug: the old "+1 ahead of
+   current" progress-total placeholder, built for the single-file path's
+   genuinely-unknown-length streaming download, rounds up to 100% after
+   only ~200 chunks regardless of how many actually remain). Fixed two
+   things: (1) `_write_chunks_to_scratch()` gained a `total_bytes_hint`
+   parameter - when the source's real size is already known up front
+   (true for a bundle, already fully materialized on local disk before
+   writing starts, unlike a streaming download), `job.progress_total` is
+   set to the real expected chunk count immediately, not chased upward
+   as chunks land; (2) Direct Network Transfer (§7.6) is now tried for
+   bundles too, the same way it already was for single files - the
+   download-token endpoint (`restore_download.py`) gained an optional
+   `local_path` on `DownloadToken`, set only for a bundle, so
+   `GET /api/restore-downloads/{token}` streams the already-built local
+   bundle file straight off disk instead of re-proxying from PVE (which
+   can't hand back a synthesized multi-item bundle as one item the way
+   it can a single source file). `_try_direct_network_transfer()` gained
+   matching `dest_path`/`local_path` parameters (both `None` for the
+   unchanged single-file case) so the guest fetches into a scratch
+   bundle-file path rather than `job.destination` directly. Silently
+   unavailable (no configured data NIC, no usable fetch tool) still
+   falls straight through to the chunked path, same contract as before -
+   this doesn't remove that fallback, it just gives a bundle restore a
+   real shot at the fast path first, exactly as issue #25's write-up
+   anticipated once the disk-staging fix alone proved insufficient in
+   practice.
 3b. ~~Frontend~~ — **done**: the Restore button's gate/capability check
    now reuses `isSingleFile` (unchanged) to branch between `design_a`
    (a single leaf file - the original fast-path check) and `design_b`

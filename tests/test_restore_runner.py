@@ -6,6 +6,7 @@ import pytest
 
 from backend import guest_agent, pve_client, restore_bundle, restore_download, restore_runner
 from backend.restore_bundle import BundleFormat, BundleItem, ManifestBuilder
+from backend.restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 from backend.restore_jobs import RestoreJobManager, RestoreStatus
 from backend.restore_runner import run_restore
 
@@ -971,6 +972,123 @@ async def test_bundle_restore_happy_path(manager, session_data, monkeypatch, tmp
     assert "Bundle built" in log_text
     assert "Extraction complete" in log_text
     assert "Checksum verified for all 2 restored file(s)" in log_text
+
+
+async def test_bundle_restore_progress_total_reflects_real_chunk_count_from_the_start(
+    manager, session_data, monkeypatch, tmp_path
+):
+    # Confirmed live 2026-09-02: the write-loop's old "+1 ahead of
+    # current" placeholder scheme (built for the single-file path's
+    # genuinely-unknown-length streaming download) rounded up to a
+    # displayed 100% after only ~200 chunks against a several-thousand-
+    # chunk bundle - misreading as stuck a few percent into the real
+    # work. A bundle's size is already known before writing starts, so
+    # progress_total should reflect the true chunk count immediately,
+    # not asymptotically approach 100% early.
+    job = _bundle_job(manager, session_data, guest_type="ct", vmid="104")
+    content = b"a" * (DEFAULT_CHUNK_SIZE_BYTES * 10)  # exactly 10 chunks
+    _patch_build_bundle(monkeypatch, tmp_path, content, fmt=BundleFormat.TAR_GZ, manifest_len=2)
+
+    seen_totals_during_write = []
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        if "probe" not in path:  # skip the earlier tar.zst capability-probe write
+            seen_totals_during_write.append(job.progress_total)
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[0] == "tar" and "-xO" in argv:
+            return 1, "", "tar: unsupported compression"
+        if argv[:2] == ["sh", "-c"] and "cat" in argv[2]:
+            return 0, "", ""
+        if argv[:2] == ["tar", "-xf"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
+            return 0, "All files OK\n", ""
+        if argv[:2] == ["rm", "-rf"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    # The total was already correct (10 writes + concat + extract +
+    # verify = 13) before the very first chunk was written - not still
+    # chasing "+1 ahead of current" and creeping up as chunks land.
+    assert seen_totals_during_write == [13] * 10
+
+
+async def test_bundle_restore_uses_direct_network_transfer_when_available(manager, session_data, monkeypatch, tmp_path):
+    # 2026-09-02, docs/plan.md §7.7: bundle restore now tries Direct
+    # Network Transfer first (same as single-file) instead of always
+    # taking the chunked guest-agent-write path - confirmed live that a
+    # several-thousand-chunk bundle write was impractically slow.
+    job = _bundle_job(manager, session_data, guest_type="ct", vmid="104")
+    content = b"a" * (DEFAULT_CHUNK_SIZE_BYTES * 10)  # >1 chunk, so DNT is even attempted
+    _patch_build_bundle(monkeypatch, tmp_path, content, fmt=BundleFormat.TAR_GZ, manifest_len=2)
+    _with_data_nics(monkeypatch, '[{"cidr": "10.0.5.0/24", "local_ip": "10.0.5.5"}]')
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    written = []
+    fetch_urls = []
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        written.append(path)  # only the tar.zst probe write should land here, never bundle chunks
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[0] == "tar" and "-xO" in argv:
+            return 1, "", "tar: unsupported compression"  # zst probe fails -> targz fallback
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""
+        if argv[0] == "curl":
+            fetch_urls.append(argv[-1])
+            return 0, "", ""  # the actual fetch - a real guest would hit the download-token endpoint
+        if argv[:2] == ["test", "-f"]:
+            return 0, "", ""  # _verify_destination_exists
+        if argv[:2] == ["tar", "-xf"]:
+            return 0, "", ""  # extraction
+        if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
+            return 0, "All files OK\n", ""
+        if argv[:2] == ["rm", "-rf"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call once Direct Network Transfer should have taken over: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    assert len(fetch_urls) == 1
+    assert "/api/restore-downloads/" in fetch_urls[0]
+    # Only the tar.zst capability probe write happens - no bundle chunk
+    # writes at all once Direct Network Transfer takes over.
+    assert written == [next(iter(written))]
+    assert all("probe" in p for p in written)
+    assert any("via Direct Network Transfer" in line for line in job.log_lines)
+    # The minted token carries the bundle's local path, not just a job_id -
+    # the download endpoint needs it to serve the file directly.
+    assert len(restore_download._tokens) == 1
+    minted = next(iter(restore_download._tokens.values()))
+    assert minted.job_id == job.id
+    assert minted.local_path is not None
 
 
 async def test_bundle_restore_blocked_without_design_b(manager, session_data, monkeypatch):

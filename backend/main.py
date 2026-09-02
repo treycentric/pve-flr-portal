@@ -26,6 +26,7 @@ from . import (
     restore_runner,
 )
 from .auth import SessionData, ensure_fresh_ticket
+from .restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 from .version import REPO_URL, __version__
 
 app = FastAPI(title="pve-flr-portal")
@@ -490,13 +491,27 @@ async def restore_download_fetch(token: str):
     Re-streams from PVE using the *job's own* session snapshot, the same
     one restore_runner.py already uses for the rest of that job's work -
     never the requester's, since the requester is the guest, not a
-    logged-in user."""
-    job_id = restore_download.consume_token(token)
-    if job_id is None:
+    logged-in user. Except for a bundle restore's already-built local
+    bundle file (docs/plan.md §7.7, issue #24) - `token.local_path`, set
+    only in that case - which is streamed straight off local disk
+    instead, since a bundle isn't something PVE's file-restore API can
+    hand back as one item."""
+    token_info = restore_download.consume_token_full(token)
+    if token_info is None:
         raise HTTPException(status_code=404, detail="This download link is invalid, already used, or has expired")
-    job = restore_jobs.manager.get(job_id)
+    job = restore_jobs.manager.get(token_info.job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No such restore job")
+
+    if token_info.local_path is not None:
+        local_path = Path(token_info.local_path)
+
+        async def local_body():
+            with local_path.open("rb") as f:
+                while chunk := f.read(DEFAULT_CHUNK_SIZE_BYTES):
+                    yield chunk
+
+        return StreamingResponse(local_body(), media_type="application/octet-stream")
 
     await ensure_fresh_ticket(job.session)
     client, response = await pve_client.open_download(job.session, job.source_volume, job.source_filepath, tar=False)

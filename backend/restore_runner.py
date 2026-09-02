@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import ntpath
 import posixpath
+from pathlib import Path
 
 import httpx
 
@@ -35,6 +36,7 @@ from .config import settings
 from .restore_chunking import (
     DEFAULT_CHUNK_SIZE_BYTES,
     bytes_to_wire_str,
+    chunk_count,
     scratch_dir_path,
     scratch_filename,
     scratch_path_sep,
@@ -120,6 +122,7 @@ async def _write_chunks_to_scratch(
     scratch_dir: str,
     pieces,
     hasher,
+    total_bytes_hint: int | None = None,
 ) -> tuple[list[str], int]:
     """Writes each already-downloaded-but-not-yet-buffered piece from
     `pieces` (an async iterable, `_iter_download_pieces()` below) to the
@@ -135,7 +138,21 @@ async def _write_chunks_to_scratch(
     up-front-buffering approach OOM-killed a memory-constrained
     deployment on a large file, twice - once for the redundant
     wire-string copy, fixed first, and again for the raw-bytes buffer
-    itself, fixed here)."""
+    itself, fixed here).
+
+    `total_bytes_hint`: pass the source's real size when it's already
+    known up front (e.g. a bundle already fully materialized on local
+    disk before this call) so `job.progress_percent` reports real
+    progress against an accurate chunk count from the start, instead of
+    the "+1 ahead of current" placeholder scheme below (kept as the
+    fallback for a genuinely-unknown-length streaming download, where
+    the real count truly isn't known until exhausted). Confirmed live
+    2026-09-02: without this, a several-thousand-chunk bundle write
+    (61440-byte chunks against a 1.5GB+ bundle) rounded up to a
+    displayed 100% after only ~200 chunks - a few percent of the real
+    work - misreading as stuck rather than still genuinely writing."""
+    if total_bytes_hint is not None:
+        job.progress_total = max(job.progress_total, chunk_count(total_bytes_hint, DEFAULT_CHUNK_SIZE_BYTES) + 1)
     sep = scratch_path_sep(guest_os_family)
     paths: list[str] = []
     total = 0
@@ -153,11 +170,12 @@ async def _write_chunks_to_scratch(
         )
         paths.append(chunk_path)
         job.progress_current += 1
-        # Keep the total at least one ahead of current (room for the
-        # trailing concat unit) while the real count is still unknown -
-        # RestoreJob.progress_percent clamps to 100 regardless, but this
-        # avoids it reading a premature 100% mid-write.
-        job.progress_total = max(job.progress_total, job.progress_current + 1)
+        if total_bytes_hint is None:
+            # Keep the total at least one ahead of current (room for the
+            # trailing concat unit) while the real count is still unknown -
+            # RestoreJob.progress_percent clamps to 100 regardless, but this
+            # avoids it reading a premature 100% mid-write.
+            job.progress_total = max(job.progress_total, job.progress_current + 1)
         index += 1
     return paths, total
 
@@ -212,21 +230,24 @@ async def _ensure_directory_exists(job: RestoreJob, dir_path: str, guest_os_fami
         raise RuntimeError(f"Could not create the destination directory: {err.strip() or out.strip()}")
 
 
-async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | None) -> None:
+async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | None, path: str | None = None) -> None:
     """A direct existence check right after concatenation, because its
     exit code alone isn't trustworthy enough (see _ensure_destination_dir)
     - catches a silent failure here, with a clear message, instead of
-    letting it surface confusingly in a later step.
+    letting it surface confusingly in a later step. `path` defaults to
+    `job.destination`; a bundle restore's Direct Network Transfer passes
+    the scratch bundle-file path instead (docs/plan.md §7.7).
 
     Windows uses PowerShell's `Test-Path -LiteralPath`, not `cmd /c if
     exist "X" (...)` - see `_ensure_destination_dir()`'s docstring for
     why `cmd /c` with embedded quotes is being moved away from here."""
+    target = job.destination if path is None else path
     if guest_os_family == "windows":
-        script = f"if (Test-Path -LiteralPath '{job.destination}') {{ Write-Output 'FOUND' }}"
+        script = f"if (Test-Path -LiteralPath '{target}') {{ Write-Output 'FOUND' }}"
         exitcode, out, _err = await _exec(job, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
         exists = "FOUND" in out
     else:
-        exitcode, _out, _err = await _exec(job, ["test", "-f", job.destination])
+        exitcode, _out, _err = await _exec(job, ["test", "-f", target])
         exists = exitcode == 0
     if not exists:
         raise RuntimeError(
@@ -235,7 +256,12 @@ async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | Non
         )
 
 
-async def _try_direct_network_transfer(job: RestoreJob, guest_os_family: str | None) -> bool:
+async def _try_direct_network_transfer(
+    job: RestoreJob,
+    guest_os_family: str | None,
+    dest_path: str | None = None,
+    local_path: Path | None = None,
+) -> bool:
     """Direct Network Transfer (internally "Design C", docs/plan.md
     §7.6, issue #22 - see that section for why the user-facing name
     differs from the dev-doc name): the guest fetches its own file over
@@ -253,6 +279,17 @@ async def _try_direct_network_transfer(job: RestoreJob, guest_os_family: str | N
     back - having confidently offered Direct Network Transfer and then
     had it fail partway is a real problem worth surfacing clearly, not
     masking by silently retrying via a completely different mechanism.
+
+    `dest_path`/`local_path` (docs/plan.md §7.7, issue #24): a bundle
+    restore passes both - `dest_path` is the scratch bundle-file path in
+    the guest to fetch *into* (not `job.destination`, which is the
+    extraction target directory, not a file), and `local_path` is the
+    already-built local bundle file to serve, minted into the download
+    token so the endpoint streams it straight off local disk instead of
+    re-proxying from PVE (which can't hand back a synthesized bundle as
+    one item). Single-file restore leaves both unset - the original
+    behavior, fetching straight to `job.destination` via a token that
+    re-proxies `job.source_volume`/`job.source_filepath` from PVE.
 
     **Why the download URL is plain HTTP, never HTTPS:** every guest
     fetch tool this app might use would otherwise have to be individually
@@ -291,12 +328,13 @@ async def _try_direct_network_transfer(job: RestoreJob, guest_os_family: str | N
         job.log("Direct Network Transfer not available: only cscript was detected, not yet supported.")
         return False
 
+    fetch_dest = job.destination if dest_path is None else dest_path
     port = settings.restore_data_nic_port or settings.port
-    token = restore_download.mint_token(job.id)
+    token = restore_download.mint_token(job.id, local_path=None if local_path is None else str(local_path))
     url = f"http://{nic.local_ip}:{port}/api/restore-downloads/{token}"
 
     try:
-        plan = restore_network_pull.build_fetch_command(tool, url, job.destination, guest_os_family)
+        plan = restore_network_pull.build_fetch_command(tool, url, fetch_dest, guest_os_family)
     except ValueError as exc:
         job.log(f"Direct Network Transfer not available: {tool} can't be used for this download ({exc}).")
         return False
@@ -312,7 +350,7 @@ async def _try_direct_network_transfer(job: RestoreJob, guest_os_family: str | N
     )
     if exitcode != 0:
         raise RuntimeError(f"Direct Network Transfer failed via {tool}: {err.strip() or out.strip()}")
-    await _verify_destination_exists(job, guest_os_family)
+    await _verify_destination_exists(job, guest_os_family, path=fetch_dest)
     job.log("Direct Network Transfer: fetch complete.")
     return True
 
@@ -416,11 +454,13 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
     against the manifest embedded in the bundle - entirely inside the
     guest, one command, no app-side per-file hash comparison. Always
     needs guest-exec (there's no Design-A-equivalent single-call fast
-    path for a bundle); Direct Network Transfer isn't wired in for
-    bundles yet (would need the download-token endpoint to serve a
-    local file instead of re-fetching from PVE - not built, see
-    docs/plan.md §7.7's sequencing) so this always takes the chunked
-    write path today."""
+    path for a bundle). Tries Direct Network Transfer first when the
+    bundle would otherwise need more than one chunk (2026-09-02,
+    docs/plan.md §7.7) - the download-token endpoint serves the already-
+    built local bundle file directly rather than re-proxying from PVE -
+    falling back to the chunked scratch-write+concat path silently
+    whenever it's not eligible (no configured data NIC, no usable fetch
+    tool, etc.), same contract the single-file path already uses."""
     scratch_dir: str | None = None
     guest_os_family: str | None = None
     tmp_dir_ctx = None
@@ -475,30 +515,56 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         output_path, fmt, manifest, tmp_dir_ctx = await restore_bundle.build_bundle(
             job.session, job.source_volume, job.items, guest_os_family, zst_capable
         )
-        job.log(f"Bundle built ({fmt.value}, {len(manifest)} file(s)) - writing it to the guest.")
+        bundle_size_bytes = output_path.stat().st_size
+        expected_chunks = chunk_count(bundle_size_bytes, DEFAULT_CHUNK_SIZE_BYTES)
+        job.log(
+            f"Bundle built ({fmt.value}, {len(manifest)} file(s), {bundle_size_bytes} bytes) - "
+            f"writing it to the guest in {expected_chunks} chunk(s)."
+        )
 
-        job.progress_total = 2 + 1 + 1  # placeholder: >=2 write units, +extract, +verify - refined as chunks write
+        # Already known exactly - the bundle is fully materialized on
+        # local disk at this point, unlike the single-file path's
+        # streaming download whose total length isn't known up front.
+        job.progress_total = expected_chunks + 1 + 1 + 1  # writes + concat + extract + verify
 
         bundle_ext = {"tarzst": "tar.zst", "targz": "tar.gz", "zip": "zip"}[fmt.value]
         bundle_guest_path = scratch_dir + sep + f"{job.id}.bundle.{bundle_ext}"
 
-        async def _bundle_pieces():
-            with output_path.open("rb") as f:
-                while piece := f.read(DEFAULT_CHUNK_SIZE_BYTES):
-                    yield piece
+        # Try Direct Network Transfer first when it'd otherwise take more
+        # than one chunk (2026-09-02, docs/plan.md §7.7) - the guest
+        # fetches the already-built bundle straight from this app's
+        # download-token endpoint over its own NIC, instead of tens of
+        # thousands of individual agent/file-write round trips at
+        # DEFAULT_CHUNK_SIZE_BYTES each. Confirmed live the same day this
+        # was added: a ~1.5GB bundle's chunked write was projected at
+        # tens of thousands of chunks - Design B alone doesn't scale to
+        # bundle-sized payloads the way it does to modest single files.
+        # Silently unavailable (no configured data NIC, no usable fetch
+        # tool, etc.) falls straight through to the chunked path below,
+        # same contract as the single-file path's own use of this.
+        if expected_chunks > 1 and await _try_direct_network_transfer(
+            job, guest_os_family, dest_path=bundle_guest_path, local_path=output_path
+        ):
+            job.progress_current = expected_chunks
+            job.log("Bundle uploaded to the guest via Direct Network Transfer.")
+        else:
+            async def _bundle_pieces():
+                with output_path.open("rb") as f:
+                    while piece := f.read(DEFAULT_CHUNK_SIZE_BYTES):
+                        yield piece
 
-        chunk_paths, total_bytes = await _write_chunks_to_scratch(
-            job, guest_os_family, scratch_dir, _bundle_pieces(), None
-        )
-        job.log(f"Wrote the {total_bytes} byte bundle in {len(chunk_paths)} chunk(s); concatenating.")
-        if job.cancel_requested:
-            jobs.mark_cancelled(job.id)
-            return
+            chunk_paths, total_bytes = await _write_chunks_to_scratch(
+                job, guest_os_family, scratch_dir, _bundle_pieces(), None, total_bytes_hint=bundle_size_bytes
+            )
+            job.log(f"Wrote the {total_bytes} byte bundle in {len(chunk_paths)} chunk(s); concatenating.")
+            if job.cancel_requested:
+                jobs.mark_cancelled(job.id)
+                return
 
-        job.progress_total = len(chunk_paths) + 1 + 1 + 1  # writes + concat + extract + verify
-        await _concat_chunks(job, chunk_paths, bundle_guest_path, guest_os_family)
-        job.progress_current += 1
-        job.log("Bundle uploaded to the guest.")
+            job.progress_total = len(chunk_paths) + 1 + 1 + 1  # writes + concat + extract + verify
+            await _concat_chunks(job, chunk_paths, bundle_guest_path, guest_os_family)
+            job.progress_current += 1
+            job.log("Bundle uploaded to the guest.")
         if job.cancel_requested:
             jobs.mark_cancelled(job.id)
             return

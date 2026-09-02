@@ -788,6 +788,27 @@ def test_restore_download_fetch_requires_no_auth_but_a_valid_token(session_data,
     assert resp.content == b"hello world"
 
 
+def test_restore_download_fetch_serves_local_file_for_a_bundle_restore(session_data, monkeypatch, tmp_path):
+    # 2026-09-02, docs/plan.md §7.7: a bundle's Direct Network Transfer
+    # mints a token with local_path set - the endpoint must stream that
+    # file straight off disk, never touching PVE at all.
+    from backend import restore_download
+
+    job = _make_download_job(session_data)
+    bundle_path = tmp_path / "bundle.tar.gz"
+    bundle_path.write_bytes(b"bundle content" * 100)
+    token = restore_download.mint_token(job.id, ttl_seconds=60, local_path=str(bundle_path))
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("should never call PVE's own download API for a local-path token")
+
+    monkeypatch.setattr(pve_client, "open_download", fail_if_called)
+    with TestClient(main.app) as c:
+        resp = c.get(f"/api/restore-downloads/{token}")
+    assert resp.status_code == 200
+    assert resp.content == b"bundle content" * 100
+
+
 def test_restore_download_fetch_unknown_token_404s():
     with TestClient(main.app) as c:
         resp = c.get("/api/restore-downloads/not-a-real-token")
