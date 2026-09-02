@@ -1312,8 +1312,12 @@ select.login-input {
   fill: var(--text-muted);
 }
 
-.timeline-tick-label--month {
+/* Major ticks, whatever a level calls them: a time at level 1, a day at
+   level 2, a month at 3/4, January at 5. Bold so they read as the ruler's
+   anchors against the minor labels between them. */
+.timeline-tick-label--major {
   font-size: 10px;
+  font-weight: 700;
   fill: var(--link);
 }
 
