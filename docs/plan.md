@@ -1850,7 +1850,9 @@ since it completes restore-to-guest rather than standing apart from it.
    remaining `cmd /c` uses in this codebase (`_create_scratch_dir()`/
    `_remove_scratch_dir()`'s `mkdir`/`rmdir`) are plain argv, not a
    single command string with embedded quotes - a different, unaffected
-   shape - so left as-is.
+   shape - so left as-is. **Confirmed live 2026-09-02, same day:** a
+   repeat of the same Windows bundle restore that hit this bug now
+   succeeds end to end.
 
 ## 8. Stack — and why
 
