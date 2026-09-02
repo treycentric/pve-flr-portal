@@ -953,6 +953,8 @@ async def test_bundle_restore_happy_path(manager, session_data, monkeypatch, tmp
             return 0, "", ""  # extraction
         if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
             return 0, "All files OK\n", ""  # manifest verify
+        if argv[:2] == ["rm", "-f"]:
+            return 0, "", ""  # manifest file cleanup
         if argv[:2] == ["rm", "-rf"]:
             return 0, "", ""  # scratch cleanup
         raise AssertionError(f"unexpected exec call: {argv}")
@@ -967,6 +969,9 @@ async def test_bundle_restore_happy_path(manager, session_data, monkeypatch, tmp
     assert len(written) >= 1  # bundle content chunked to the guest
     assert any(c[:2] == ["tar", "-xf"] for c in exec_calls)
     assert any(c[:2] == ["sh", "-c"] and "sha256sum -c" in c[2] for c in exec_calls)
+    # The manifest is a restore-mechanism artifact, not part of the
+    # original backup - cleaned up after a successful verify.
+    assert any(c[:2] == ["rm", "-f"] and c[2].endswith(restore_bundle.MANIFEST_NAME) for c in exec_calls)
     log_text = "\n".join(job.log_lines)
     assert "Starting restore of 2 item(s)" in log_text
     assert "Bundle built" in log_text
@@ -1009,6 +1014,8 @@ async def test_bundle_restore_progress_total_reflects_real_chunk_count_from_the_
             return 0, "", ""
         if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
             return 0, "All files OK\n", ""
+        if argv[:2] == ["rm", "-f"]:
+            return 0, "", ""  # manifest file cleanup
         if argv[:2] == ["rm", "-rf"]:
             return 0, "", ""
         raise AssertionError(f"unexpected exec call: {argv}")
@@ -1044,11 +1051,14 @@ async def test_bundle_restore_uses_direct_network_transfer_when_available(manage
 
     written = []
     fetch_urls = []
+    manifest_cleanup_calls = []
+    progress_after_fetch = None
 
     async def fake_write(session, guest_type, vmid, path, wire_content):
         written.append(path)  # only the tar.zst probe write should land here, never bundle chunks
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        nonlocal progress_after_fetch
         if argv[:2] == ["mkdir", "-p"]:
             return 0, "", ""
         if argv[0] == "tar" and "-xO" in argv:
@@ -1061,9 +1071,17 @@ async def test_bundle_restore_uses_direct_network_transfer_when_available(manage
         if argv[:2] == ["test", "-f"]:
             return 0, "", ""  # _verify_destination_exists
         if argv[:2] == ["tar", "-xf"]:
+            # Captured here (before the runner's own progress_current += 1
+            # for this step lands) - confirms progress_total was rescaled
+            # to 3 (transfer + extract + verify), not left at
+            # expected_chunks + 3, right after the DNT fetch succeeded.
+            progress_after_fetch = (job.progress_current, job.progress_total)
             return 0, "", ""  # extraction
         if argv[:2] == ["sh", "-c"] and "sha256sum -c" in argv[2]:
             return 0, "All files OK\n", ""
+        if argv[:2] == ["rm", "-f"]:
+            manifest_cleanup_calls.append(argv[-1])
+            return 0, "", ""  # manifest file cleanup
         if argv[:2] == ["rm", "-rf"]:
             return 0, "", ""
         raise AssertionError(f"unexpected exec call once Direct Network Transfer should have taken over: {argv}")
@@ -1083,6 +1101,16 @@ async def test_bundle_restore_uses_direct_network_transfer_when_available(manage
     assert written == [next(iter(written))]
     assert all("probe" in p for p in written)
     assert any("via Direct Network Transfer" in line for line in job.log_lines)
+    # 2026-09-02 fix: progress_total is rescaled to 3 units once DNT
+    # takes over - not expected_chunks + 3, which would make the display
+    # round to 100% the instant the fetch finished, before extraction or
+    # verification had even started.
+    assert progress_after_fetch == (1, 3)
+    assert (job.progress_current, job.progress_total) == (3, 3)
+    # The manifest is a restore-mechanism artifact, not part of the
+    # original backup - cleaned up after a successful verify.
+    assert len(manifest_cleanup_calls) == 1
+    assert manifest_cleanup_calls[0].endswith(restore_bundle.MANIFEST_NAME)
     # The minted token carries the bundle's local path, not just a job_id -
     # the download endpoint needs it to serve the file directly.
     assert len(restore_download._tokens) == 1

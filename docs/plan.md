@@ -1692,6 +1692,40 @@ since it completes restore-to-guest rather than standing apart from it.
    real shot at the fast path first, exactly as issue #25's write-up
    anticipated once the disk-staging fix alone proved insufficient in
    practice.
+
+   **Real-world finding (2026-09-02), immediately after the above
+   shipped:** the "Bundle built (...) - writing it to the guest in N
+   chunk(s)" log line printed unconditionally right after the bundle
+   finished building, before Direct Network Transfer was even attempted
+   - misleading once DNT actually took over and no chunked write
+   happened at all. Fixed by dropping the presumptive chunk-count phrase
+   from that line entirely; the chunk count now only appears in the log
+   line that actually fires on the chunked-write path. Also asked
+   directly whether extraction/verification progress can be measured
+   more finely: no - PVE's `agent/exec-status` only returns output once
+   the guest process has exited, never incrementally while it's still
+   running (confirmed by re-reading `pve_client.run_guest_exec()`'s own
+   polling loop), so there's no live byte-level signal to poll during a
+   single `tar -xf`/`sha256sum -c` call without a materially bigger
+   change (per-item guest-exec calls, or a background process plus a
+   separately-polled progress-marker file) - not pursued given how much
+   faster these phases are than the transfer itself. That question
+   surfaced a real bug in the DNT change above, though: `progress_total`
+   was left at `expected_chunks + 3` even when DNT (not the chunked
+   path) actually ran, so `progress_current` (set to `expected_chunks`
+   to mark "the transfer is done") divided by that total rounded to a
+   displayed 100% the instant the fetch finished - before extraction or
+   verification had even started, the exact "looks done/stuck early"
+   symptom the chunk-count fix was written to prevent, just relocated
+   one phase later. Fixed by rescaling to 3 units (transfer, extract,
+   verify - no separate concat unit, since DNT fetches the whole bundle
+   in one shot) whenever DNT is the path actually taken. Separately,
+   confirmed live that the embedded manifest (`.pve-flr-manifest.sha256`)
+   was left behind in the destination directory permanently after a
+   successful restore - it's a restore-mechanism artifact, not part of
+   the original backup, so it's now removed via one best-effort
+   guest-exec call after verification succeeds (a cleanup failure logs a
+   note but doesn't fail the otherwise-successful restore).
 3b. ~~Frontend~~ — **done**: the Restore button's gate/capability check
    now reuses `isSingleFile` (unchanged) to branch between `design_a`
    (a single leaf file - the original fast-path check) and `design_b`

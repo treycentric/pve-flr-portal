@@ -546,7 +546,19 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         if expected_chunks > 1 and await _try_direct_network_transfer(
             job, guest_os_family, dest_path=bundle_guest_path, local_path=output_path
         ):
-            job.progress_current = expected_chunks
+            # Rescaled to just (transfer, extract, verify) - not
+            # expected_chunks-based like the chunked path below, and no
+            # separate concat unit (DNT fetches the whole bundle in one
+            # shot, nothing to concatenate). Confirmed live 2026-09-02:
+            # leaving progress_total at expected_chunks + 3 here meant
+            # progress_current (set to expected_chunks, standing in for
+            # "the transfer is done") divided by that total rounded to a
+            # displayed 100% the instant the fetch finished - before
+            # extraction or verification had even started, the same
+            # "looks stuck/done early" symptom the chunk-count fix above
+            # was written to prevent, just relocated to this phase.
+            job.progress_current = 1
+            job.progress_total = 3  # transfer + extract + verify
             job.log("Bundle uploaded to the guest via Direct Network Transfer.")
         else:
             async def _bundle_pieces():
@@ -602,6 +614,23 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             )
             return
         job.log(f"Checksum verified for all {len(manifest)} restored file(s) - matches the source.")
+
+        # The manifest is a restore-mechanism artifact, not part of the
+        # original backup - confirmed live 2026-09-02 that it was
+        # otherwise left behind in the destination directory permanently.
+        # Best-effort: verification already succeeded, so a cleanup
+        # failure here shouldn't fail the whole restore, just gets a
+        # log line instead.
+        if guest_os_family == "windows":
+            cleanup_script = f"Remove-Item -LiteralPath '{manifest_guest_path}' -Force -ErrorAction SilentlyContinue"
+            cleanup_argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", cleanup_script]
+        else:
+            cleanup_argv = ["rm", "-f", manifest_guest_path]
+        cleanup_exitcode, _out, cleanup_err = await _exec(job, cleanup_argv)
+        if cleanup_exitcode != 0:
+            job.log(
+                f"Note: could not remove the restore manifest file - harmless, left behind ({cleanup_err.strip()})."
+            )
 
         jobs.mark_done(job.id)
     except asyncio.CancelledError:
