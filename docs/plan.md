@@ -1557,15 +1557,57 @@ the bundle extracts into, rather than one specific file path.
 
 **Not yet decided:** exact wire format for the embedded manifest inside
 each bundle format (trivial for tar - just another entry; zip needs the
-same, just via `zipfile.writestr()`); the precise guest-exec probe for
-"can this tar decompress zstd" (needs live-testing against a real guest
-to land on something reliable, same as every other guest-tool
-assumption in this project); how `RestoreJobManager`/the UI represent
-progress across a multi-file bundle (one coarse "building the bundle /
-transferring / extracting / verifying" sequence, most likely, rather
-than per-file granularity - not yet designed). Filed as a follow-on to
-#5, scoped as an extension of PH.5 rather than a new phase since it
-completes restore-to-guest rather than standing apart from it.
+same, just via `zipfile.writestr()`); how `RestoreJobManager`/the UI
+represent progress across a multi-file bundle (one coarse "building the
+bundle / transferring / extracting / verifying" sequence, most likely,
+rather than per-file granularity - not yet designed). Filed as a
+follow-on to #5, scoped as an extension of PH.5 rather than a new phase
+since it completes restore-to-guest rather than standing apart from it.
+
+**Sequencing (started 2026-09-01):**
+1. ~~Pure, guest-independent pieces~~ — **done**: `backend/restore_bundle.py`
+   - `BundleItem` (the reused `download_bundle()`-style multi-select
+     shape) and `ManifestBuilder` (accumulates one SHA256 per entry,
+     renders `sha256sum -c`-compatible text).
+   - `build_zst_probe_blob()`/`probe_tar_zst_support()`: the tar.zst
+     capability check landed on a real-extraction test, not a
+     `--version`/`--help` string - a tiny, freshly-built known-good
+     `.tar.zst` blob (one file, content `"ok"`) gets written to the
+     guest and actually extracted; only a correct exit code *and*
+     correct content count as capable. Same "don't trust a banner,
+     verify the real behavior" discipline as every other guest-tool
+     assumption in this project.
+   - `select_bundle_format()` (native `.tar.zst` vs `.zip`/`.tar.gz`
+     fallback) and `build_extract_command()`/`build_verify_command()`
+     (the actual per-format guest-exec commands), mirroring
+     `restore_network_pull.py`'s role for Design C.
+   - All fully unit-tested without a live guest (`tests/test_restore_bundle.py`),
+     including a round-trip test that the probe blob is genuinely a
+     valid, extractable `.tar.zst` via the real `zstandard`/`tarfile`
+     libraries, not just internally self-consistent.
+2. **Not started.** The streaming bundle builder itself: given a list of
+   `BundleItem`s, download each from PVE (files directly, directories
+   via `tar=1`, already covering the full recursive tree) and produce
+   one output bundle stream (native `.tar.zst` pass-through, or a
+   server-side-rebuilt `.zip`/`.tar.gz` with the manifest embedded) -
+   without ever buffering the whole thing in memory, the same
+   discipline §7.6's memory fix established for a single file. This is
+   the genuinely hard remaining piece: Python's `tarfile`/`zipfile` are
+   synchronous, blocking APIs, so producing their output as an async
+   stream needs a real bridge (most likely a background thread writing
+   into an `os.pipe()`, with the async side reading the other end) -
+   not yet designed in detail, and worth its own careful pass rather
+   than folding into the same commit as step 1's pure pieces.
+3. **Not started.** Wiring into `RestoreJob`/`run_restore()`/
+   `POST /api/restore` (multi-item request body, a target-directory
+   destination instead of a single file path) and the frontend
+   (multi-select UI reusing the existing download multi-select
+   behavior, extending past the current `sel.length !== 1` gate).
+4. **Not started.** Live verification against a real guest - the
+   tar.zst capability probe, the fallback rebuild path, and the
+   embedded-manifest verify script (both shells) are all unverified
+   live, same caution as everything else in this feature area before
+   it's actually been run against a real guest.
 
 ## 8. Stack — and why
 
