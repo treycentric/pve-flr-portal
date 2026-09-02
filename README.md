@@ -177,6 +177,12 @@ see the top of the script. Already have a container? Run
 `deploy/install.sh` inside it instead. Rationale for LXC over a Debian
 package on the host or a full VM/OVA is in docs/plan.md §10.
 
+The systemd unit's `StateDirectory=` puts the app-state dir
+(`PFR_DATA_DIR`) at `/var/lib/pve-flr-portal`, created and owned by the
+service user. It survives `git pull` redeploys and container reboots,
+but not a container recreate - see docs/plan.md §10 for what to
+preserve when moving/rebuilding the container.
+
 **Docker, mainly for local dev/testing:**
 
 ```
