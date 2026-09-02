@@ -230,3 +230,6 @@ Licensed under the [GNU Affero General Public License v3.0](LICENSE)
 (AGPL-3.0). Because AGPL is copyleft with a network-use clause, anyone
 who runs a modified version of this app as a network service must also
 make that modified source available to its users.
+
+Third-party attribution (the app icon is derived from a WordPress
+Dashicons glyph via SVG Repo) is in [`NOTICE`](NOTICE).

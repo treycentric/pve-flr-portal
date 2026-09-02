@@ -1,0 +1,21 @@
+pve-flr-portal
+Copyright (c) 2026 Trey Jones
+
+This program is free software licensed under the GNU Affero General Public
+License v3.0 (AGPL-3.0). See the LICENSE file for the full text.
+
+--------------------------------------------------------------------------------
+Third-party works included in or derived by this project
+--------------------------------------------------------------------------------
+
+App icon / favicon  (backend/static/assets/logo.png)
+
+    Derived from a WordPress "Dashicons" glyph obtained via SVG Repo, then
+    enhanced significantly from the original artwork.
+
+    Original : "Vectors and icons by WordPress"
+               https://github.com/wordpress/dashicons
+    Source   : SVG Repo
+               https://www.svgrepo.com/
+    License  : GPL (GPL-2.0-or-later) — compatible with this project's
+               AGPL-3.0.
