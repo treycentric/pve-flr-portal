@@ -182,6 +182,38 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     assert "Concatenation complete" in log_text
 
 
+async def test_concat_chunks_windows_uses_powershell_not_cmd_copy(manager, session_data, monkeypatch):
+    # Confirmed live 2026-09-02: cmd /c copy /b "a"+"b" "dest" failed
+    # with "The filename, directory name, or volume label syntax is
+    # incorrect" even against a single, perfectly valid chunk path -
+    # cmd.exe's handling of multiple embedded double-quoted segments on
+    # one /c line is the same unreliable pattern already found and
+    # fixed for _ensure_destination_dir()/_verify_destination_exists()
+    # (docs/plan.md §7.5), just never migrated to this function too.
+    job = _make_job(manager, session_data, destination="C:\\TestRestore\\hosts")
+    exec_calls = []
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_calls.append(argv)
+        return 0, "", ""
+
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await restore_runner._concat_chunks(
+        job, ["C:\\scratch\\chunk-0", "C:\\scratch\\chunk-1"], "C:\\TestRestore\\hosts", "windows"
+    )
+
+    assert len(exec_calls) == 1
+    argv = exec_calls[0]
+    assert argv[0] == "powershell"
+    script = argv[-1]
+    assert "copy /b" not in script  # the old, unreliable cmd.exe approach
+    assert "cmd" not in argv
+    assert "'C:\\scratch\\chunk-0'" in script
+    assert "'C:\\scratch\\chunk-1'" in script
+    assert "'C:\\TestRestore\\hosts'" in script
+
+
 async def test_multi_chunk_write_reassembles_to_the_exact_original_bytes(manager, session_data, monkeypatch):
     # Locks down the byte-fidelity property across the streaming
     # rewrite (restore_chunking.py's module docstring) - each chunk is
@@ -977,6 +1009,55 @@ async def test_bundle_restore_happy_path(manager, session_data, monkeypatch, tmp
     assert "Bundle built" in log_text
     assert "Extraction complete" in log_text
     assert "Checksum verified for all 2 restored file(s)" in log_text
+
+
+async def test_bundle_restore_happy_path_windows_zip_fallback(manager, session_data, monkeypatch, tmp_path):
+    # Confirmed live 2026-09-02: a real Windows multi-item bundle restore
+    # (zip fallback, one chunk) failed at the concat step - "The
+    # filename, directory name, or volume label syntax is incorrect" -
+    # from the old cmd /c copy /b approach. Locks in the PowerShell fix
+    # end to end, not just at the _concat_chunks unit level.
+    job = _bundle_job(manager, session_data, guest_type="vm", vmid="133", destination="C:\\TestRestore")
+    content = b"a" * 2477  # matches the live report's exact bundle size
+    _patch_build_bundle(monkeypatch, tmp_path, content, fmt=BundleFormat.ZIP, manifest_len=6)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="windows")
+
+    exec_calls = []
+
+    async def fake_write(session, guest_type, vmid, path, wire_content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_calls.append(argv)
+        if argv[0] == "cmd":
+            # mkdir/rmdir for the scratch dir - plain argv, no embedded
+            # multi-quote concatenation, so not the pattern this test is
+            # guarding against (see the dedicated _concat_chunks test for
+            # that). Fine as-is.
+            return 0, "", ""
+        if argv[0] == "powershell":
+            script = argv[-1]
+            assert "copy /b" not in script  # the old, unreliable cmd.exe concat approach
+            if "Expand-Archive" in script:
+                return 0, "", ""  # extraction
+            if "Get-FileHash" in script:
+                return 0, "ALL-OK\n", ""  # manifest verify
+            if "Remove-Item" in script:
+                return 0, "", ""  # manifest file cleanup
+            return 0, "", ""  # New-Item (dest dir), [System.IO.File] concat
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    assert any("Expand-Archive" in c[-1] for c in exec_calls if c[0] == "powershell")
+    assert any("Get-FileHash" in c[-1] for c in exec_calls if c[0] == "powershell")
 
 
 async def test_bundle_restore_progress_total_reflects_real_chunk_count_from_the_start(

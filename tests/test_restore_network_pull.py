@@ -155,9 +155,14 @@ def test_build_fetch_command_certutil():
 
 
 def test_build_fetch_command_bitsadmin():
+    # Plain argv, not cmd /c - confirmed live 2026-09-01/2026-09-02 that
+    # cmd.exe's handling of multiple embedded double-quoted segments on
+    # one /c line is unreliable, even against perfectly valid paths.
     plan = build_fetch_command("bitsadmin", URL, DEST_WIN, "windows")
-    assert plan.exec_argv[:2] == ["cmd", "/c"]
-    assert URL in plan.exec_argv[2] and DEST_WIN in plan.exec_argv[2]
+    assert plan.exec_argv[0] == "bitsadmin"
+    assert "cmd" not in plan.exec_argv
+    assert URL in plan.exec_argv
+    assert DEST_WIN in plan.exec_argv
 
 
 def test_build_fetch_command_cscript_requires_a_stage_path():

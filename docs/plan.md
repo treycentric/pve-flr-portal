@@ -1821,6 +1821,37 @@ since it completes restore-to-guest rather than standing apart from it.
    (ownership/permissions) remain deliberately deferred follow-ons, not
    blockers.
 
+   **Real-world finding (2026-09-02), a second Windows bundle
+   restore:** a 4-item selection (small files, single-chunk zip bundle)
+   failed at the concat step - `Could not assemble the restored file:
+   The filename, directory name, or volume label syntax is incorrect` -
+   even with only one chunk to concatenate. Root cause: `_concat_chunks()`
+   still used `cmd /c copy /b "a"+"b" "dest"` for Windows - the exact
+   same unreliable "multiple embedded double-quoted segments on one
+   `cmd /c` line" pattern already found and fixed for
+   `_ensure_destination_dir()`/`_verify_destination_exists()` back on
+   2026-09-01 (docs/plan.md's own §7.5 entry), just never migrated to
+   this function too when that fix landed. Fixed the same way: a small
+   PowerShell script (`[System.IO.File]::Open`/`OpenRead`/`CopyTo`)
+   with single-quoted path literals, replacing `cmd /c copy /b`
+   entirely for Windows concatenation - both the single-file restore
+   path and bundle restore share `_concat_chunks()`, so this fixes both
+   at once. A reminder that "already fixed this exact bug class
+   elsewhere" doesn't mean every call site got the memo - swept the rest
+   of the codebase for the same `cmd /c '<command with 2+ embedded
+   "quoted" segments>'` shape and found one more, not yet live-tested:
+   `restore_network_pull.py`'s `bitsadmin` fetch-tool candidate (Direct
+   Network Transfer, §7.6) built `bitsadmin ... "{url}" "{destination}"`
+   the identical way. Fixed proactively, before it could fail live too -
+   `bitsadmin.exe` is a real executable, so it's invoked as plain argv
+   now (`["bitsadmin", "/transfer", ..., url, destination]`), no
+   `cmd /c` wrapper or quoting involved at all, matching how `certutil`
+   right above it in the same function is already called. The two
+   remaining `cmd /c` uses in this codebase (`_create_scratch_dir()`/
+   `_remove_scratch_dir()`'s `mkdir`/`rmdir`) are plain argv, not a
+   single command string with embedded quotes - a different, unaffected
+   shape - so left as-is.
+
 ## 8. Stack — and why
 
 - **Backend:** Python, FastAPI — one small process, typed surface for a

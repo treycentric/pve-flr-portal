@@ -164,8 +164,18 @@ def build_fetch_command(
     if tool == "certutil":
         return FetchPlan(exec_argv=["certutil", "-urlcache", "-split", "-f", url, destination])
     if tool == "bitsadmin":
-        command = f'bitsadmin /transfer pve-flr-portal-restore /priority normal "{url}" "{destination}"'
-        return FetchPlan(exec_argv=["cmd", "/c", command])
+        # Plain argv, not `cmd /c 'bitsadmin ... "{url}" "{destination}"'`
+        # - the same `cmd /c` "multiple embedded double-quoted segments
+        # on one /c line" pattern already confirmed live (2026-09-01,
+        # 2026-09-02) to be unreliable elsewhere in this project
+        # (_ensure_destination_dir(), _concat_chunks()) even against
+        # perfectly valid paths. bitsadmin.exe is a real executable, so
+        # it can be invoked directly - each argv element reaches it
+        # literally, no cmd.exe quote-parsing involved at all - matching
+        # how `certutil` above is already called.
+        return FetchPlan(
+            exec_argv=["bitsadmin", "/transfer", "pve-flr-portal-restore", "/priority", "normal", url, destination]
+        )
     if tool == "cscript":
         if not stage_path:
             raise ValueError("cscript needs a stage_path to write its .vbs script to")

@@ -365,11 +365,30 @@ async def _concat_chunks(job: RestoreJob, chunk_paths: list[str], dest_path: str
     only reason that check exists is to make embedding it in one of
     these shell/PowerShell-interpreted command strings safe; the chunk
     paths themselves are this module's own generated scratch names
-    (never user input), so they don't need the same check."""
+    (never user input), so they don't need the same check.
+
+    Windows uses a small PowerShell `FileStream`/`CopyTo` script, not
+    `cmd /c copy /b "a"+"b" "dest"` (confirmed live 2026-09-02: even a
+    *single* chunk failed with "The filename, directory name, or volume
+    label syntax is incorrect" against a perfectly valid path) -
+    `cmd.exe`'s handling of multiple embedded double-quoted segments on
+    one `/c` line is exactly the same unreliable pattern already found
+    and fixed for `_ensure_destination_dir()`/`_verify_destination_exists()`
+    (docs/plan.md §7.5), just never migrated here too. Single-quoted
+    PowerShell literals instead, matching that established fix - safe
+    for the same reason: `check_path_safe()` already rejects `'` along
+    with every other shell-metacharacter."""
     if guest_os_family == "windows":
-        parts = "+".join(f'"{p}"' for p in chunk_paths)
-        command = f'copy /b {parts} "{dest_path}"'
-        argv = ["cmd", "/c", command]
+        paths_literal = ", ".join(f"'{p}'" for p in chunk_paths)
+        script = (
+            f"$out = [System.IO.File]::Open('{dest_path}', 'Create'); "
+            "try { "
+            f"foreach ($p in @({paths_literal})) {{ "
+            "$in = [System.IO.File]::OpenRead($p); try { $in.CopyTo($out) } finally { $in.Close() } "
+            "} "
+            "} finally { $out.Close() }"
+        )
+        argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
     else:
         parts = " ".join(f"'{p}'" for p in chunk_paths)
         command = f"cat {parts} > '{dest_path}'"
