@@ -467,6 +467,29 @@ test('browseInto surfaces the server error detail', async () => {
   assert.equal(s.restoreBrowseError, 'guest-exec disabled');
 });
 
+test('restoreBrowseStatusText prioritizes loading, then error, then empty, else null', () => {
+  // 2026-09-02: status messages used to render inside the folder-list
+  // box; moved into the toolbar's path display instead - this getter
+  // is what decides what (if anything) overrides the real path there.
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+
+  s.restoreBrowseLoading = true;
+  s.restoreBrowseError = 'should be hidden by loading';
+  s.restoreBrowseEntries = [];
+  assert.equal(s.restoreBrowseStatusText, 'Loading…');
+
+  s.restoreBrowseLoading = false;
+  assert.equal(s.restoreBrowseStatusText, 'should be hidden by loading');
+
+  s.restoreBrowseError = null;
+  s.restoreBrowseEntries = [];
+  assert.equal(s.restoreBrowseStatusText, 'No subfolders here.');
+
+  s.restoreBrowseEntries = [{ name: 'etc', path: '/etc' }];
+  assert.equal(s.restoreBrowseStatusText, null);
+});
+
 test('browseUp browses into the current parent, including null (top level)', async () => {
   const { fileGridState } = loadApp();
   const s = fileGridState();

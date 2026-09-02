@@ -371,6 +371,10 @@ body {
   color: var(--text-muted);
 }
 
+.restore-browse-path.is-error {
+  color: #c0392b;
+}
+
 .restore-browse-list {
   max-height: 180px;
   overflow-y: auto;
@@ -517,7 +521,8 @@ body {
 .restore-progress {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  width: 160px;
 }
 
 .restore-progress-track {

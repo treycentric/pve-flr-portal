@@ -110,12 +110,9 @@
               <div class="restore-browse-toolbar">
                 <button type="button" class="btn-outline restore-browse-nav" :disabled="restoreBrowseParent === null || restoreBrowseLoading" @click="browseUp()">&uarr; Up</button>
                 <button type="button" class="btn-outline restore-browse-nav" x-show="restoreCaps.guest_os_family === 'windows'" :disabled="restoreBrowseLoading" @click="browseInto(null)">Drives</button>
-                <span class="restore-browse-path" x-text="restoreBrowsePath || 'Select a drive'"></span>
+                <span class="restore-browse-path" :class="{ 'is-error': !restoreBrowseLoading && restoreBrowseError }" x-text="restoreBrowseStatusText || restoreBrowsePath"></span>
               </div>
               <div class="restore-browse-list">
-                <p x-show="restoreBrowseLoading" class="restore-browse-status">Loading&hellip;</p>
-                <p x-show="!restoreBrowseLoading && restoreBrowseError" class="restore-error" x-text="restoreBrowseError"></p>
-                <p x-show="!restoreBrowseLoading && !restoreBrowseError && restoreBrowseEntries.length === 0" class="restore-browse-status">No subfolders here.</p>
                 <template x-for="entry in restoreBrowseEntries" :key="entry.path">
                   <button type="button" class="restore-browse-entry" @click="browseInto(entry.path)">
                     &#128193; <span x-text="entry.name"></span>

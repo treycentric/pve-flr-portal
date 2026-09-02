@@ -222,6 +222,18 @@ function fileGridState() {
     restoreBrowseEntries: [],
     restoreBrowseLoading: false,
     restoreBrowseError: null,
+    // Status messages (loading/error/empty) used to render inside the
+    // folder-list box itself, above the entries - moved into the
+    // toolbar's path display instead so the path/status line stays in
+    // one consistent place rather than the list area's content shifting
+    // around depending on state. null means "show the real path" (the
+    // toolbar falls back to that itself).
+    get restoreBrowseStatusText() {
+      if (this.restoreBrowseLoading) return 'Loading…';
+      if (this.restoreBrowseError) return this.restoreBrowseError;
+      if (this.restoreBrowseEntries.length === 0) return 'No subfolders here.';
+      return null;
+    },
 
     init() {
       this.applySort();

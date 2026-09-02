@@ -103,16 +103,16 @@
         <p x-show="logLoading && !logDetail" class="restore-browse-status">Loading&hellip;</p>
         <p x-show="logError" class="restore-error" x-text="logError"></p>
         <p x-show="logDetail && logDetail.error" class="restore-error" x-text="'Error: ' + (logDetail && logDetail.error)"></p>
+        <pre class="restore-log-lines" x-text="logDetail ? logDetail.log.join('\n') : ''"></pre>
+      </div>
+      <div class="modal-footer">
+        <span class="modal-count" x-show="logDetail" x-text="logDetail && formatStatus(logDetail)"></span>
         <div class="restore-progress" x-show="logDetail && logDetail.progress_percent !== null && logDetail.progress_percent !== undefined">
           <div class="restore-progress-track">
             <div class="restore-progress-fill" :style="'width: ' + (logDetail ? logDetail.progress_percent : 0) + '%'"></div>
           </div>
           <span class="restore-progress-label" x-text="logDetail ? logDetail.progress_percent + '%' : ''"></span>
         </div>
-        <pre class="restore-log-lines" x-text="logDetail ? logDetail.log.join('\n') : ''"></pre>
-      </div>
-      <div class="modal-footer">
-        <span class="modal-count" x-show="logDetail" x-text="logDetail && formatStatus(logDetail)"></span>
         <div class="modal-actions">
           <button type="button" class="btn-outline" @click="logOpen = false">Close</button>
         </div>
