@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See [`docs/dev/versioning.md`](docs/dev/versioning.md) for how entries
 here are generated from commit messages.
 
+## [1.2.0] - 2026-09-02
+
+### Added
+- **theme:** light/dark/proxmox-dark colour themes with admin default (#29) (3c51f36)
+- **deploy:** PFR_DATA_DIR - a provisioned directory for future app state (#30) (262ad87)
+
+### Fixed
+- **auth:** retry realm lookup and fall back to pam/pve, never an empty dropdown (#31) (ebb0d00)
+- **auth:** log the user out on session expiry instead of failing silently (#27) (662c1c5)
+
 ## [1.1.0] - 2026-09-02
 
 ### Added
