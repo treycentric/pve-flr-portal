@@ -31,6 +31,16 @@ def _float(name: str, default: float) -> float:
     return float(val) if val else default
 
 
+_THEMES = ("auto", "light", "dark", "proxmox-dark")
+
+
+def _theme(name: str, default: str) -> str:
+    val = (os.environ.get(name) or default).strip().lower()
+    if val not in _THEMES:
+        raise RuntimeError(f"{name} must be one of {'|'.join(_THEMES)}, got: {val!r}")
+    return val
+
+
 @dataclass(frozen=True)
 class Settings:
     pve_host: str
@@ -95,6 +105,13 @@ class Settings:
     # blanket default.
     restore_long_running_exec_timeout_seconds: float
 
+    # Issue #29: the colour theme a browser gets before the visitor has
+    # made their own choice (stored client-side in localStorage). One of
+    # auto|light|dark; "auto" follows the OS but resolves to dark when
+    # the OS states no preference. Purely a default - a logged-in user
+    # can still switch themes from the user menu.
+    default_theme: str
+
 
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
@@ -109,4 +126,5 @@ settings = Settings(
     restore_download_token_ttl_seconds=_float("RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS", 120.0),
     restore_data_nic_port=_int("RESTORE_DATA_NIC_PORT", 0),
     restore_long_running_exec_timeout_seconds=_float("RESTORE_LONG_RUNNING_EXEC_TIMEOUT_SECONDS", 1800.0),
+    default_theme=_theme("DEFAULT_THEME", "auto"),
 )

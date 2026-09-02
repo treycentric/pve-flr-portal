@@ -26,6 +26,7 @@ from . import (
     restore_runner,
 )
 from .auth import SessionData, ensure_fresh_ticket
+from .config import settings
 from .restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 from .version import REPO_URL, __version__
 
@@ -52,6 +53,10 @@ def _static_version(filename: str) -> int:
 
 
 templates.env.globals["static_version"] = _static_version
+
+# Issue #29: admin-configured default colour theme, surfaced to every
+# template (base.html / login.html both need it in <head> before paint).
+templates.env.globals["default_theme"] = settings.default_theme
 
 
 @app.exception_handler(HTTPException)

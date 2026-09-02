@@ -302,6 +302,30 @@ multi-snapshot group is picked (it is **not** a same-tick count, nor a
 global index); selecting any snapshot pans its bucket onto the red
 centre line.
 
+**Colour theme (issue #29).** Four choices: `light` (default), `dark`
+(our own blue-tinted dark), `proxmox-dark` (patterned on Proxmox VE's
+own dark theme — neutral greys, `#666` borders, deep-blue primary; see
+proxmox-widget-toolkit `src/proxmox-dark/scss/abstracts/_variables.scss`),
+and `auto`. The visitor's own choice lives only in the browser —
+`localStorage` key `pfr_theme`, no session, no new route. Until they
+pick one, the fallback is the admin's `DEFAULT_THEME` env var (same
+four values, default `auto`),
+injected into `<head>` as `window.__PFR_DEFAULT_THEME__` and used by
+both the inline pre-paint script and `app.js`. It resolves to a
+`data-theme` attribute on `<html>`: `auto` follows
+`prefers-color-scheme`, but with no explicit OS preference it resolves
+to **dark** (per the issue). The resolution runs twice on
+purpose — a tiny inline `<script>` in `base.html` / `login.html`
+`<head>` sets the attribute before first paint (no light-to-dark
+flash), then `userMenu` in `app.js` owns it afterwards (the "Color
+Theme" item in the user menu opens a one-dropdown modal; it also
+re-resolves `auto` if the OS preference flips while the page is open).
+`style.css` carries the full light palette on `:root` and overrides it
+under `:root[data-theme="dark"]` and `:root[data-theme="proxmox-dark"]`;
+every colour a theme needs to change is a CSS custom property (the previously-inline greys/whites/
+shadows were pulled out into `--surface-*`, `--row-hover`,
+`--text-emboss`, `--danger*`, `--timeline-*` vars for this).
+
 ## 6. Data model
 
 **Not implemented. As of PH.4 the app has no database.** This section is

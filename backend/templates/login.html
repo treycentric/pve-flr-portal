@@ -5,6 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Log in &mdash; Proxmox File Level Restore Portal</title>
   <link rel="icon" type="image/png" href="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}">
+  {# Theme (issue #29): match base.html - resolve before first paint. #}
+  <script>
+    (function () {
+      var d = "{{ default_theme }}";
+      window.__PFR_DEFAULT_THEME__ = d;
+      try {
+        var t = localStorage.getItem('pfr_theme');
+        if (['light', 'dark', 'proxmox-dark', 'auto'].indexOf(t) === -1) t = d;
+        var resolved = t;
+        if (t === 'auto') {
+          resolved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', resolved);
+      } catch (e) {}
+    })();
+  </script>
   <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css?v={{ static_version('style.css') }}">
 </head>
@@ -23,7 +39,15 @@
       x-data="{ save: false }"
       x-init="$nextTick(() => {
         const saved = JSON.parse(localStorage.getItem('pfr_login') || 'null');
-        if (saved) { $refs.username.value = saved.username; $refs.realm.value = saved.realm; save = true; }
+        if (saved) {
+          $refs.username.value = saved.username || '';
+          // Only restore the realm if it still matches a listed option -
+          // assigning an unknown value leaves the <select> with nothing
+          // selected, and the browser then omits it from the POST.
+          const hasRealm = [...$refs.realm.options].some((o) => o.value === saved.realm);
+          if (hasRealm) $refs.realm.value = saved.realm;
+          save = true;
+        }
       })"
       @submit="
         if (save) { localStorage.setItem('pfr_login', JSON.stringify({ username: $refs.username.value, realm: $refs.realm.value })); }

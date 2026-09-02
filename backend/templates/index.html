@@ -131,8 +131,34 @@
       <svg class="user-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
       <span x-text="identity"></span>
     </div>
+    <button type="button" class="user-dropdown-item" @click="openThemeModal()">Color Theme</button>
     <button type="button" class="user-dropdown-item" @click="open = false; aboutOpen = true">About</button>
     <button type="button" class="user-dropdown-item" @click="logout()">Logout</button>
+  </div>
+
+  <div class="modal-overlay" x-show="themeOpen" x-cloak @click.self="themeOpen = false" @keydown.escape.window="themeOpen = false">
+    <div class="modal-box theme-box">
+      <div class="modal-header">
+        <h2>Color Theme</h2>
+        <button type="button" class="modal-close" @click="themeOpen = false">&times;</button>
+      </div>
+      <div class="theme-body">
+        <label class="theme-label" for="theme-select">Theme</label>
+        <select id="theme-select" class="theme-select" x-model="themeChoice">
+          <option value="auto">Default (auto)</option>
+          <option value="light">Light Theme</option>
+          <option value="dark">Dark Theme</option>
+          <option value="proxmox-dark">Proxmox Dark Theme</option>
+        </select>
+      </div>
+      <div class="modal-footer">
+        <span></span>
+        <div class="modal-actions">
+          <button type="button" class="btn-primary" @click="saveTheme()">OK</button>
+          <button type="button" class="btn-outline" @click="themeOpen = false">Close</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="modal-overlay" x-show="aboutOpen" x-cloak @click.self="aboutOpen = false" @keydown.escape.window="aboutOpen = false">

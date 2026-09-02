@@ -177,11 +177,96 @@ function restoreJobsWidget() {
   };
 }
 
+// Theme (issue #29). The choice is persisted client-side only (no
+// backend, no session) in localStorage under `pfr_theme`, one of
+// 'auto' | 'light' | 'dark'. 'auto' follows the OS, but with no
+// explicit OS preference it resolves to dark. base.html / login.html
+// carry a tiny inline copy of this resolution in <head> so the initial
+// paint is already themed; this module keeps it in sync afterwards.
+const THEME_CHOICES = ['auto', 'light', 'dark', 'proxmox-dark'];
+
+// The admin-configured default (DEFAULT_THEME in .env), injected into
+// <head> by base.html / login.html before this script runs. Used only
+// when the visitor has made no explicit choice of their own.
+function serverDefaultTheme() {
+  try {
+    const d = window.__PFR_DEFAULT_THEME__;
+    if (THEME_CHOICES.includes(d)) return d;
+  } catch (e) {
+    // no window global - fall through
+  }
+  return 'auto';
+}
+
+function readStoredTheme() {
+  try {
+    const t = window.localStorage.getItem('pfr_theme');
+    if (THEME_CHOICES.includes(t)) return t;
+  } catch (e) {
+    // storage unavailable - fall through to the server default
+  }
+  return serverDefaultTheme();
+}
+
+function resolveTheme(choice) {
+  if (THEME_CHOICES.includes(choice) && choice !== 'auto') return choice;
+  try {
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  } catch (e) {
+    return 'dark';
+  }
+}
+
+function applyTheme(choice) {
+  const resolved = resolveTheme(choice);
+  try {
+    document.documentElement.setAttribute('data-theme', resolved);
+  } catch (e) {
+    // No document (tests) - the caller still gets the resolved value.
+  }
+  return resolved;
+}
+
 function userMenu(identity) {
   return {
     identity,
     open: false,
     aboutOpen: false,
+    themeOpen: false,
+    theme: 'auto', // the persisted choice
+    themeChoice: 'auto', // the dropdown's working value while the modal is open
+    init() {
+      this.theme = readStoredTheme();
+      this.themeChoice = this.theme;
+      applyTheme(this.theme);
+      // Re-resolve 'auto' if the OS flips its light/dark preference
+      // while the page is open.
+      try {
+        const mq = window.matchMedia('(prefers-color-scheme: light)');
+        const onChange = () => {
+          if (this.theme === 'auto') applyTheme('auto');
+        };
+        if (mq.addEventListener) mq.addEventListener('change', onChange);
+        else if (mq.addListener) mq.addListener(onChange);
+      } catch (e) {
+        // matchMedia unavailable - 'auto' just stays at its load-time value.
+      }
+    },
+    openThemeModal() {
+      this.open = false;
+      this.themeChoice = this.theme;
+      this.themeOpen = true;
+    },
+    saveTheme() {
+      this.theme = THEME_CHOICES.includes(this.themeChoice) ? this.themeChoice : 'auto';
+      try {
+        window.localStorage.setItem('pfr_theme', this.theme);
+      } catch (e) {
+        // Private mode / storage disabled - the choice still applies for this page.
+      }
+      applyTheme(this.theme);
+      this.themeOpen = false;
+    },
     logout() {
       this.open = false;
       window.location = '/logout';

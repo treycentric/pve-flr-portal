@@ -61,6 +61,20 @@ pays that N times. The app is correct without this — it's purely "stop
 paying the same 3s tax repeatedly." Single SQLite file, no background
 job, per CLAUDE.md's "no extra services" constraint. Est. 1-2 days.
 
+## Server-side per-user preferences store (follow-up to #29)
+
+The colour theme (#29) persists per-browser in `localStorage` today, plus
+an admin-wide `DEFAULT_THEME` env default. Making a user's choice
+*follow them across browsers/devices* needs a small persisted
+`{pve-username -> preferences}` store on the backend — a single JSON
+file written from the request path (same "one file, no background job,
+no service" shape as PH.6), at a configurable path on a mounted volume.
+This is the app's first server-side write, so it also needs the
+persistence/volume story sorted (relates to #14, "move session store
+off in-memory") and a `docs/plan.md` / `CLAUDE.md` amendment recording
+the new persisted state. Deferred out of #29 deliberately to keep that
+change small. **Needs a GitHub issue opened.**
+
 ## Known limitations / tech debt
 
 Detailed in `docs/plan.md` §9.1 ("Scaling & limits") — condensed here
