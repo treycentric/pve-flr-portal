@@ -1644,10 +1644,20 @@ since it completes restore-to-guest rather than standing apart from it.
    multi-select UI (extending past `sel.length !== 1`) is the remaining
    piece of this step, tracked separately below since it didn't fit in
    the same pass.
-3b. **Not started.** Frontend: multi-select UI reusing the existing
-   download multi-select behavior, extending past the current
-   `sel.length !== 1` gate that currently hides the Restore button
-   entirely for anything but a single file.
+3b. ~~Frontend~~ — **done**: the Restore button's gate/capability check
+   now reuses `isSingleFile` (unchanged) to branch between `design_a`
+   (a single leaf file - the original fast-path check) and `design_b`
+   (everything else - multiple items, or a single directory, which
+   always needs guest-exec); `count === 0` is the only case that hides
+   it entirely now, not `!isSingleFile`. The modal's description,
+   metadata/verify checkboxes (hidden for a bundle - mtime is automatic
+   via the archive format, verify always runs, not optional), and
+   warning copy all branch the same way. `startRestore()`'s gate
+   loosened from `sel.length !== 1` to `sel.length < 1` and now sends
+   `item[]` (the same JSON shape `download_bundle()`'s multi-select
+   already builds) instead of `filepath`/`name` whenever the selection
+   isn't a single leaf file - a single selected *directory* correctly
+   takes the bundle path too, not just multiple selections.
 4. **Not started.** Live verification against a real guest - the
    tar.zst capability probe, the fallback rebuild path, and the
    embedded-manifest verify script (both shells) are all unverified

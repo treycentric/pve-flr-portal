@@ -130,7 +130,7 @@ test('openRestore resets the modal and stashes the caller-supplied guest/snapsho
   assert.equal(s._snapshotTime, '2026-08-30T14:48:06Z');
 });
 
-test('startRestore is a no-op without a single selection, dest dir, and confirmed overwrite', async () => {
+test('startRestore is a no-op without any selection, dest dir, and confirmed overwrite', async () => {
   const { fileGridState } = loadApp();
   const s = fileGridState();
   const checked = [checkbox({ filepath: 'a', name: 'hosts', leaf: true })];
@@ -147,6 +147,15 @@ test('startRestore is a no-op without a single selection, dest dir, and confirme
 
     s.restoreDestDir = '/etc';
     s.restoreOverwrite = false;
+    await s.startRestore();
+    assert.equal(s.restoreSubmitted, false);
+
+    // Unlike single-file-only restore before multi-file restore existed
+    // (docs/plan.md §7.7, issue #24), more than one selection is now
+    // valid, not a no-op - only a genuinely empty selection is.
+    s.$refs.tbody.querySelectorAll = () => [];
+    s.restoreDestDir = '/etc';
+    s.restoreOverwrite = true;
     await s.startRestore();
     assert.equal(s.restoreSubmitted, false);
   } finally {
@@ -246,6 +255,73 @@ test('startRestore omits source_mtime when the selected item has none', async ()
 
   const qs = new URLSearchParams(posted);
   assert.equal(qs.has('source_mtime'), false);
+});
+
+test('startRestore posts item[] params for a multi-selection bundle restore, not filepath/name', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [
+    checkbox({ filepath: 'L2V0Yw==', name: 'etc', leaf: false }),
+    checkbox({ filepath: 'L2hvbWUvZmlsZQ==', name: 'file', leaf: true }),
+  ];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'pbs:backup/vm/133/x' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/home/user/restore';
+  s.restoreOverwrite = true;
+  s.restoreMetadata = true; // should be ignored - not sent for a bundle restore
+  s.restoreVerify = true; // same
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = { url, body: opts.body };
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(posted.url, '/api/restore');
+  const qs = new URLSearchParams(posted.body);
+  assert.equal(qs.has('filepath'), false);
+  assert.equal(qs.has('name'), false);
+  assert.equal(qs.has('restore_metadata'), false);
+  assert.equal(qs.has('verify'), false);
+  assert.equal(qs.get('dest_dir'), '/home/user/restore');
+  const items = qs.getAll('item').map((raw) => JSON.parse(raw));
+  assert.deepEqual(items, [
+    { filepath: 'L2V0Yw==', name: 'etc', leaf: false },
+    { filepath: 'L2hvbWUvZmlsZQ==', name: 'file', leaf: true },
+  ]);
+  assert.equal(s.restoreSubmitted, true);
+});
+
+test('startRestore treats a single selected directory as a bundle restore too', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'L2V0Yw==', name: 'etc', leaf: false })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/restore';
+  s.restoreOverwrite = true;
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = opts.body;
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const qs = new URLSearchParams(posted);
+  assert.equal(qs.has('filepath'), false);
+  assert.equal(qs.getAll('item').length, 1);
 });
 
 test('startRestore surfaces the server-provided detail message on failure', async () => {

@@ -299,24 +299,34 @@ function fileGridState() {
     async startRestore() {
       void this.count; // see singleDownloadHref - keeps selectedItems reactive
       const sel = this.selectedItems;
-      if (sel.length !== 1 || !this.restoreDestDir || !this.restoreOverwrite) return;
+      if (sel.length < 1 || !this.restoreDestDir || !this.restoreOverwrite) return;
       this.restoreSubmitting = true;
       this.restoreError = null;
       try {
         const body = new URLSearchParams();
         body.set('volume', this.$refs.form.dataset.volume);
-        body.set('filepath', sel[0].filepath);
-        body.set('name', sel[0].name);
         body.set('guest_type', this._guestType);
         body.set('vmid', this._guestVmid);
         body.set('guest_label', this._guestLabel);
         body.set('snapshot_time', this._snapshotTime);
         body.set('dest_dir', this.restoreDestDir);
         body.set('overwrite', this.restoreOverwrite ? 'true' : 'false');
-        body.set('restore_metadata', this.restoreMetadata ? 'true' : 'false');
-        body.set('verify', this.restoreVerify ? 'true' : 'false');
-        if (sel[0].mtime !== null && sel[0].mtime !== undefined) {
-          body.set('source_mtime', String(sel[0].mtime));
+        if (this.isSingleFile) {
+          // Single-leaf-file restore - unchanged from before multi-file
+          // restore existed (docs/plan.md §7.7, issue #24).
+          body.set('filepath', sel[0].filepath);
+          body.set('name', sel[0].name);
+          body.set('restore_metadata', this.restoreMetadata ? 'true' : 'false');
+          body.set('verify', this.restoreVerify ? 'true' : 'false');
+          if (sel[0].mtime !== null && sel[0].mtime !== undefined) {
+            body.set('source_mtime', String(sel[0].mtime));
+          }
+        } else {
+          // Multi-file/directory bundle restore - restore_metadata/
+          // verify don't apply here (mtime is automatic via the bundle
+          // format; verify always runs, not optional - see the modal's
+          // own copy) so they're deliberately not sent.
+          sel.forEach((it) => body.append('item', JSON.stringify(it)));
         }
         const resp = await fetch('/api/restore', { method: 'POST', body });
         const data = await resp.json().catch(() => ({}));

@@ -4,24 +4,24 @@
       type="button"
       class="btn-outline"
       disabled
-      x-show="!(count > 0 && isSingleFile)"
-      title="Select a single file to restore">Restore</button>
+      x-show="count === 0"
+      title="Select one or more files/folders to restore">Restore</button>
     <button
       type="button"
       class="btn-outline"
       disabled
-      x-show="count > 0 && isSingleFile && !restoreCaps"
+      x-show="count > 0 && !restoreCaps"
       title="Checking restore availability…">Restore</button>
     <button
       type="button"
       class="btn-outline"
       disabled
-      x-show="count > 0 && isSingleFile && restoreCaps && !restoreCaps.design_a.available"
-      :title="restoreCaps.design_a.reason || 'Restore is not available for this guest'">Restore</button>
+      x-show="count > 0 && restoreCaps && !(isSingleFile ? restoreCaps.design_a.available : restoreCaps.design_b.available)"
+      :title="(isSingleFile ? restoreCaps.design_a.reason : restoreCaps.design_b.reason) || 'Restore is not available for this guest'">Restore</button>
     <button
       type="button"
       class="btn-outline"
-      x-show="count > 0 && isSingleFile && restoreCaps && restoreCaps.design_a.available"
+      x-show="count > 0 && restoreCaps && (isSingleFile ? restoreCaps.design_a.available : restoreCaps.design_b.available)"
       @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime, restoreCaps.design_b.available)">Restore</button>
 
     <button type="button" class="btn-outline" disabled x-show="count === 0">Download</button>
@@ -93,7 +93,12 @@
       </div>
       <template x-if="!restoreSubmitted">
         <div class="restore-form">
-          <p>Restores <strong x-text="selectedItems.length ? selectedItems[0].name : ''"></strong> directly into the running guest.</p>
+          <template x-if="isSingleFile">
+            <p>Restores <strong x-text="selectedItems.length ? selectedItems[0].name : ''"></strong> directly into the running guest.</p>
+          </template>
+          <template x-if="!isSingleFile">
+            <p>Restores <strong x-text="selectedItems.length + ' item' + (selectedItems.length === 1 ? '' : 's')"></strong> directly into the running guest, as a bundle extracted into the destination directory below.</p>
+          </template>
 
           <div class="restore-mode-toggle" x-show="restoreBrowseAvailable" role="tablist">
             <button type="button" class="restore-mode-btn" :class="{ 'is-active': restoreBrowsing }" role="tab" :aria-selected="restoreBrowsing" @click="setDestMode('browse')">Browse</button>
@@ -128,7 +133,7 @@
             </label>
           </template>
 
-          <template x-if="restoreBrowseAvailable">
+          <template x-if="restoreBrowseAvailable && isSingleFile">
             <div class="restore-extra-options">
               <label class="restore-checkbox">
                 <input type="checkbox" x-model="restoreMetadata">
@@ -141,8 +146,15 @@
             </div>
           </template>
 
-          <p class="restore-warning" x-show="!restoreMetadata">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
-          <p class="restore-warning" x-show="restoreMetadata">The restored file lands owned by root/SYSTEM - only the original modified time is restored (ownership &amp; permissions aren't, since this API doesn't expose that data).</p>
+          <template x-if="isSingleFile">
+            <p class="restore-warning" x-show="!restoreMetadata">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
+          </template>
+          <template x-if="isSingleFile">
+            <p class="restore-warning" x-show="restoreMetadata">The restored file lands owned by root/SYSTEM - only the original modified time is restored (ownership &amp; permissions aren't, since this API doesn't expose that data).</p>
+          </template>
+          <template x-if="!isSingleFile">
+            <p class="restore-warning">Every file lands owned by root/SYSTEM. Original modified times are preserved automatically; every restored file is checksum-verified against the backup as part of the restore - not optional for a multi-file/folder restore.</p>
+          </template>
           <label class="restore-checkbox">
             <input type="checkbox" x-model="restoreOverwrite">
             I understand this overwrites the destination file if it already exists.
