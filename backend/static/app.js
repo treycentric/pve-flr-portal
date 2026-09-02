@@ -32,6 +32,151 @@ function taskPicker(groups, current) {
   };
 }
 
+function restoreJobsWidget() {
+  const ACTIVE_STATUSES = ['queued', 'running', 'verifying'];
+  const POLL_INTERVAL_MS = 4000;
+  return {
+    open: false,
+    jobs: [],
+    selectedId: null,
+    // Drag offset for the modal (docs/plan.md §7.5's UI section) - an
+    // inline transform on the modal box, reset only on a fresh page
+    // load so the position persists across repeated opens/closes.
+    dragX: 0,
+    dragY: 0,
+    // Same idea, independent offset, for the log viewer modal below -
+    // it's a separate modal_box that can be open at the same time as
+    // (well, actually instead of, but positioned independently from)
+    // the jobs list modal.
+    logDragX: 0,
+    logDragY: 0,
+    // Tracks whether the *backdrop itself* (not a descendant) was where
+    // the current mouse-down/up gesture started, so a click-outside
+    // close only fires when both ends of the gesture targeted the
+    // backdrop - not just @click.self, which resolves its target from
+    // wherever the mouseup happens to land. That distinction matters
+    // because dragging the native resize handle to grow a modal (see
+    // .modal-box--resizable) can end with the mouseup landing back on
+    // the backdrop even though the gesture began on the resize handle,
+    // which made resizing larger read as a click-outside and close the
+    // modal - not a regression from any one change, present since
+    // resizing was first added. One shared flag is safe even with two
+    // stacked overlays open at once (job list + log) since the topmost
+    // one's backdrop covers the full viewport, so a mousedown can never
+    // land on the other one's backdrop underneath it.
+    backdropDown: false,
+    // Log viewer - a second modal, live-updated by piggybacking on the
+    // same poll tick as the job list (below) rather than running its own
+    // separate timer.
+    logOpen: false,
+    logJobId: null,
+    logDetail: null,
+    logLoading: false,
+    logError: null,
+    get activeCount() {
+      return this.jobs.filter((j) => ACTIVE_STATUSES.includes(j.status)).length;
+    },
+    get selectedCancellable() {
+      const job = this.jobs.find((j) => j.id === this.selectedId);
+      return !!job && job.cancellable;
+    },
+    init() {
+      this.refresh();
+      setInterval(() => this.refresh(), POLL_INTERVAL_MS);
+    },
+    async refresh() {
+      try {
+        const resp = await fetch('/api/restore-jobs');
+        if (!resp.ok) return;
+        this.jobs = await resp.json();
+      } catch (e) {
+        // Transient failure - keep showing the last known list rather
+        // than flashing it empty on every hiccup.
+      }
+      if (this.logOpen) await this.refreshLog();
+    },
+    async cancelSelected() {
+      if (!this.selectedId || !this.selectedCancellable) return;
+      try {
+        await fetch('/api/restore-jobs/' + encodeURIComponent(this.selectedId) + '/cancel', { method: 'POST' });
+      } finally {
+        await this.refresh();
+      }
+    },
+    openLog() {
+      if (!this.selectedId) return;
+      this.logJobId = this.selectedId;
+      this.logDetail = null;
+      this.logError = null;
+      this.logOpen = true;
+      this.refreshLog();
+    },
+    async refreshLog() {
+      if (!this.logJobId) return;
+      this.logLoading = true;
+      try {
+        const resp = await fetch('/api/restore-jobs/' + encodeURIComponent(this.logJobId));
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.logError = data.detail || 'Could not load this job’s log.';
+          return;
+        }
+        this.logDetail = data;
+        this.logError = null;
+        this.$nextTick(() => {
+          const el = this.$refs.logBody;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      } catch (e) {
+        this.logError = 'Could not load this job’s log: ' + e;
+      } finally {
+        this.logLoading = false;
+      }
+    },
+    formatElapsed(seconds) {
+      const total = Math.max(0, Math.floor(seconds || 0));
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      const pad = (n) => String(n).padStart(2, '0');
+      return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    },
+    formatStatus(job) {
+      const pct = job.progress_percent;
+      return pct === null || pct === undefined ? job.status : `${job.status} (${pct}%)`;
+    },
+
+    // Dragging a modal by its header. Same window-pointermove/pointerup
+    // pattern as the timeline's drag-to-pan (_bindTimelineDrag) -
+    // deliberately no setPointerCapture(), which retargets click/pointerup
+    // to the capturing element and would break the header's own Close
+    // button and the table's row-selection clicks (see that function's
+    // comment for the full story). xProp/yProp let the jobs-list modal
+    // and the log modal share this logic while tracking independent
+    // offsets (dragX/dragY vs logDragX/logDragY).
+    startDrag(e, xProp = 'dragX', yProp = 'dragY') {
+      if (e.target.closest('.modal-close')) return; // let Close still work
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const originX = this[xProp];
+      const originY = this[yProp];
+
+      const onMove = (ev) => {
+        this[xProp] = originX + (ev.clientX - startX);
+        this[yProp] = originY + (ev.clientY - startY);
+      };
+      const endDrag = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', endDrag);
+        window.removeEventListener('pointercancel', endDrag);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', endDrag);
+      window.addEventListener('pointercancel', endDrag);
+    },
+  };
+}
+
 function userMenu(identity) {
   return {
     identity,
@@ -51,8 +196,162 @@ function fileGridState() {
     downloadMenuOpen: false,
     sortKey: 'name',
     sortDir: 'asc',
+
+    // --- PH.5 restore modal (docs/plan.md §7.5) ---
+    restoreOpen: false,
+    restoreDestDir: '',
+    restoreOverwrite: false,
+    // Both need VM.GuestAgent.Unrestricted (same gate as browsing, hence
+    // reusing restoreBrowseAvailable below rather than a separate flag) -
+    // restoreMetadata only restores mtime, the one piece of metadata
+    // file-restore/list actually exposes (no owner/mode available on any
+    // PVE version).
+    restoreMetadata: false,
+    restoreVerify: false,
+    restoreSubmitting: false,
+    restoreError: null,
+    restoreSubmitted: false,
+    // Browsing the guest filesystem needs VM.GuestAgent.Unrestricted
+    // (guest-exec, no dedicated QGA listing command - docs/plan.md §7.5),
+    // so it's only offered when that's available; otherwise restoreDestDir
+    // stays a plain typed field.
+    restoreBrowseAvailable: false,
+    restoreBrowsing: false,
+    restoreBrowsePath: null,
+    restoreBrowseParent: null,
+    restoreBrowseEntries: [],
+    restoreBrowseLoading: false,
+    restoreBrowseError: null,
+    // Status messages (loading/error/empty) used to render inside the
+    // folder-list box itself, above the entries - moved into the
+    // toolbar's path display instead so the path/status line stays in
+    // one consistent place rather than the list area's content shifting
+    // around depending on state. null means "show the real path" (the
+    // toolbar falls back to that itself).
+    get restoreBrowseStatusText() {
+      if (this.restoreBrowseLoading) return 'Loading…';
+      if (this.restoreBrowseError) return this.restoreBrowseError;
+      if (this.restoreBrowseEntries.length === 0) return 'No subfolders here.';
+      return null;
+    },
+
     init() {
       this.applySort();
+    },
+
+    // guest/snapshotTime/browseAvailable come from the caller's Alpine
+    // expression (see file_grid.html), which - unlike this method body
+    // itself - is evaluated in the ancestor portalApp() scope, so it can
+    // read `guest`/`selectedSnapshotTime`/`restoreCaps` directly. A plain
+    // JS method here has no such scope-chaining, hence passing them in as
+    // arguments rather than trying `this.guest` from inside fileGridState().
+    openRestore(guestType, guestVmid, guestLabel, snapshotTime, browseAvailable) {
+      this._guestType = guestType;
+      this._guestVmid = guestVmid;
+      this._guestLabel = guestLabel;
+      this._snapshotTime = snapshotTime;
+      this.restoreDestDir = '';
+      this.restoreOverwrite = false;
+      this.restoreMetadata = false;
+      this.restoreVerify = false;
+      this.restoreError = null;
+      this.restoreSubmitted = false;
+      this.restoreBrowseAvailable = browseAvailable;
+      this.restoreBrowsing = browseAvailable;
+      this.restoreBrowsePath = null;
+      this.restoreBrowseParent = null;
+      this.restoreBrowseEntries = [];
+      this.restoreBrowseError = null;
+      this.restoreOpen = true;
+      if (browseAvailable) this.browseInto(null);
+    },
+
+    // mode is 'browse' or 'manual' - the segmented toggle above the
+    // destination picker calls this directly rather than a plain flip, so
+    // clicking the already-active side is a no-op instead of re-fetching.
+    setDestMode(mode) {
+      const wantBrowsing = mode === 'browse';
+      if (wantBrowsing === this.restoreBrowsing) return;
+      this.restoreBrowsing = wantBrowsing;
+      if (wantBrowsing) this.browseInto(this.restoreBrowsePath);
+    },
+
+    async browseInto(path) {
+      this.restoreBrowseLoading = true;
+      this.restoreBrowseError = null;
+      try {
+        const params = new URLSearchParams({ type: this._guestType, vmid: this._guestVmid });
+        if (path) params.set('path', path);
+        const resp = await fetch('/api/restore-browse?' + params.toString());
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.restoreBrowseError = data.detail || 'Could not list that folder.';
+          return;
+        }
+        this.restoreBrowsePath = data.path;
+        this.restoreBrowseParent = data.parent;
+        this.restoreBrowseEntries = data.entries || [];
+        if (data.path) this.restoreDestDir = data.path;
+      } catch (e) {
+        this.restoreBrowseError = 'Could not list that folder: ' + e;
+      } finally {
+        this.restoreBrowseLoading = false;
+      }
+    },
+
+    browseUp() {
+      // restoreBrowseParent is null both at an actual filesystem root
+      // (POSIX "/") and at a Windows drive root - the template disables
+      // the Up button in both cases; a separate "Drives" shortcut
+      // (browseInto(null)) is what gets a Windows user from a drive root
+      // back to the drive list, rather than overloading this button.
+      this.browseInto(this.restoreBrowseParent);
+    },
+
+    async startRestore() {
+      void this.count; // see singleDownloadHref - keeps selectedItems reactive
+      const sel = this.selectedItems;
+      if (sel.length < 1 || !this.restoreDestDir || !this.restoreOverwrite) return;
+      this.restoreSubmitting = true;
+      this.restoreError = null;
+      try {
+        const body = new URLSearchParams();
+        body.set('volume', this.$refs.form.dataset.volume);
+        body.set('guest_type', this._guestType);
+        body.set('vmid', this._guestVmid);
+        body.set('guest_label', this._guestLabel);
+        body.set('snapshot_time', this._snapshotTime);
+        body.set('dest_dir', this.restoreDestDir);
+        body.set('overwrite', this.restoreOverwrite ? 'true' : 'false');
+        if (this.isSingleFile) {
+          // Single-leaf-file restore - unchanged from before multi-file
+          // restore existed (docs/plan.md §7.7, issue #24).
+          body.set('filepath', sel[0].filepath);
+          body.set('name', sel[0].name);
+          body.set('restore_metadata', this.restoreMetadata ? 'true' : 'false');
+          body.set('verify', this.restoreVerify ? 'true' : 'false');
+          if (sel[0].mtime !== null && sel[0].mtime !== undefined) {
+            body.set('source_mtime', String(sel[0].mtime));
+          }
+        } else {
+          // Multi-file/directory bundle restore - restore_metadata/
+          // verify don't apply here (mtime is automatic via the bundle
+          // format; verify always runs, not optional - see the modal's
+          // own copy) so they're deliberately not sent.
+          sel.forEach((it) => body.append('item', JSON.stringify(it)));
+        }
+        const resp = await fetch('/api/restore', { method: 'POST', body });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.restoreError = data.detail || 'Restore failed to start.';
+          return;
+        }
+        this.restoreSubmitted = true;
+      } catch (e) {
+        this.restoreError = 'Restore failed to start: ' + e;
+      } finally {
+        this.restoreSubmitting = false;
+      }
     },
     toggleAll() {
       const boxes = this.$refs.tbody.querySelectorAll('input[type=checkbox]');
@@ -151,7 +450,7 @@ const ZOOM_LEVELS = {
 };
 const DEFAULT_ZOOM_LEVEL = 3;
 
-function portalApp(rawSnapshots) {
+function portalApp(rawSnapshots, guest) {
   const snapshots = rawSnapshots
     .map((s) => ({ ...s, date: new Date(s.time) }))
     .sort((a, b) => a.date - b.date);
@@ -183,7 +482,28 @@ function portalApp(rawSnapshots) {
     history: [],
     historyIndex: -1,
 
+    // --- PH.5 restore state (docs/plan.md §7.5) ---
+    // {type, vmid, label} for the currently-viewed guest - static for the
+    // whole page load (switching guest is a full navigation, see taskPicker's
+    // confirm()), so capabilities are fetched once here rather than on every
+    // folder browse/htmx swap.
+    guest,
+    restoreCaps: null,
+
+    async _loadRestoreCapabilities() {
+      if (!this.guest || !this.guest.vmid) return;
+      try {
+        const params = new URLSearchParams({ type: this.guest.type, vmid: this.guest.vmid });
+        const resp = await fetch('/api/restore-capabilities?' + params.toString());
+        if (!resp.ok) return;
+        this.restoreCaps = await resp.json();
+      } catch (e) {
+        this.restoreCaps = null;
+      }
+    },
+
     init() {
+      this._loadRestoreCapabilities();
       this.$nextTick(() => {
         this._bindTimelineDrag();
         // The viewBox is derived from the element's measured pixel width,
@@ -197,6 +517,11 @@ function portalApp(rawSnapshots) {
           this.selectSnapshot(this.snapshots[this.snapshots.length - 1]);
         }
       });
+    },
+
+    get selectedSnapshotTime() {
+      const match = this.snapshots.find((s) => s.volume === this.selectedVolume);
+      return match ? match.time : '';
     },
 
     xFor(date) {

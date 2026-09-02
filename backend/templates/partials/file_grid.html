@@ -1,6 +1,28 @@
 <form class="file-grid-form" x-ref="form" data-volume="{{ volume }}" x-data="fileGridState()" @change="syncAllChecked()">
   <div class="grid-toolbar">
-    <button type="button" class="btn-outline" disabled title="Restore to guest &mdash; planned (PH.5)">Restore</button>
+    <button
+      type="button"
+      class="btn-outline"
+      disabled
+      x-show="count === 0"
+      title="Select one or more files/folders to restore">Restore</button>
+    <button
+      type="button"
+      class="btn-outline"
+      disabled
+      x-show="count > 0 && !restoreCaps"
+      title="Checking restore availability…">Restore</button>
+    <button
+      type="button"
+      class="btn-outline"
+      disabled
+      x-show="count > 0 && restoreCaps && !(isSingleFile ? restoreCaps.design_a.available : restoreCaps.design_b.available)"
+      :title="(isSingleFile ? restoreCaps.design_a.reason : restoreCaps.design_b.reason) || 'Restore is not available for this guest'">Restore</button>
+    <button
+      type="button"
+      class="btn-outline"
+      x-show="count > 0 && restoreCaps && (isSingleFile ? restoreCaps.design_a.available : restoreCaps.design_b.available)"
+      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime, restoreCaps.design_b.available)">Restore</button>
 
     <button type="button" class="btn-outline" disabled x-show="count === 0">Download</button>
 
@@ -61,5 +83,95 @@
         {% endfor %}
       </tbody>
     </table>
+  </div>
+
+  <div class="modal-overlay" x-show="restoreOpen" x-cloak @click.self="restoreOpen = false" @keydown.escape.window="restoreOpen = false">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2>Restore to guest</h2>
+        <button type="button" class="modal-close" @click="restoreOpen = false">&times;</button>
+      </div>
+      <template x-if="!restoreSubmitted">
+        <div class="restore-form">
+          <template x-if="isSingleFile">
+            <p>Restores <strong x-text="selectedItems.length ? selectedItems[0].name : ''"></strong> directly into the running guest.</p>
+          </template>
+          <template x-if="!isSingleFile">
+            <p>Restores <strong x-text="selectedItems.length + ' item' + (selectedItems.length === 1 ? '' : 's')"></strong> directly into the running guest, as a bundle extracted into the destination directory below.</p>
+          </template>
+
+          <div class="restore-mode-toggle" x-show="restoreBrowseAvailable" role="tablist">
+            <button type="button" class="restore-mode-btn" :class="{ 'is-active': restoreBrowsing }" role="tab" :aria-selected="restoreBrowsing" @click="setDestMode('browse')">Browse</button>
+            <button type="button" class="restore-mode-btn" :class="{ 'is-active': !restoreBrowsing }" role="tab" :aria-selected="!restoreBrowsing" @click="setDestMode('manual')">Manual entry</button>
+          </div>
+
+          <template x-if="restoreBrowseAvailable && restoreBrowsing">
+            <div class="restore-browser">
+              <div class="restore-browse-toolbar">
+                <button type="button" class="btn-outline restore-browse-nav" :disabled="restoreBrowseParent === null || restoreBrowseLoading" @click="browseUp()">&uarr; Up</button>
+                <button type="button" class="btn-outline restore-browse-nav" x-show="restoreCaps.guest_os_family === 'windows'" :disabled="restoreBrowseLoading" @click="browseInto(null)">Drives</button>
+                <span class="restore-browse-path" :class="{ 'is-error': !restoreBrowseLoading && restoreBrowseError }" x-text="restoreBrowseStatusText || restoreBrowsePath"></span>
+              </div>
+              <div class="restore-browse-list">
+                <template x-for="entry in restoreBrowseEntries" :key="entry.path">
+                  <button type="button" class="restore-browse-entry" @click="browseInto(entry.path)">
+                    &#128193; <span x-text="entry.name"></span>
+                  </button>
+                </template>
+              </div>
+              <p class="restore-browse-selected">Restoring into: <strong x-text="restoreDestDir || '(select a folder)'"></strong></p>
+            </div>
+          </template>
+
+          <template x-if="!restoreBrowseAvailable || !restoreBrowsing">
+            <label class="restore-field">
+              Destination directory (in the guest)
+              <input type="text" x-model="restoreDestDir" placeholder="e.g. C:\Windows\Temp or /etc" class="modal-filter-input">
+            </label>
+          </template>
+
+          <template x-if="restoreBrowseAvailable && isSingleFile">
+            <div class="restore-extra-options">
+              <label class="restore-checkbox">
+                <input type="checkbox" x-model="restoreMetadata">
+                Restore original modified time
+              </label>
+              <label class="restore-checkbox">
+                <input type="checkbox" x-model="restoreVerify">
+                Verify with checksum after restore
+              </label>
+            </div>
+          </template>
+
+          <template x-if="isSingleFile">
+            <p class="restore-warning" x-show="!restoreMetadata">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
+          </template>
+          <template x-if="isSingleFile">
+            <p class="restore-warning" x-show="restoreMetadata">The restored file lands owned by root/SYSTEM - only the original modified time is restored (ownership &amp; permissions aren't, since this API doesn't expose that data).</p>
+          </template>
+          <template x-if="!isSingleFile">
+            <p class="restore-warning">Every file lands owned by root/SYSTEM. Original modified times are preserved automatically; every restored file is checksum-verified against the backup as part of the restore - not optional for a multi-file/folder restore.</p>
+          </template>
+          <label class="restore-checkbox">
+            <input type="checkbox" x-model="restoreOverwrite">
+            I understand this overwrites the destination file if it already exists.
+          </label>
+          <p class="restore-error" x-show="restoreError" x-text="restoreError"></p>
+        </div>
+      </template>
+      <template x-if="restoreSubmitted">
+        <p class="restore-success">Restore started. Check back shortly to confirm it landed in the guest.</p>
+      </template>
+      <div class="modal-footer">
+        <div class="modal-actions">
+          <template x-if="!restoreSubmitted">
+            <button type="button" class="btn-primary" :disabled="restoreSubmitting || !restoreDestDir || !restoreOverwrite" @click="startRestore()">
+              <span x-text="restoreSubmitting ? 'Starting…' : 'Start restore'"></span>
+            </button>
+          </template>
+          <button type="button" class="btn-outline" @click="restoreOpen = false">Close</button>
+        </div>
+      </div>
+    </div>
   </div>
 </form>

@@ -12,6 +12,12 @@ os.environ.setdefault("PVE_HOST", "pve.test.local")
 os.environ.setdefault("PVE_STORAGE", "pbs")
 os.environ.setdefault("PVE_VERIFY_SSL", "false")
 os.environ.setdefault("SESSION_IDLE_TIMEOUT_MINUTES", "30")
+# Design C (docs/plan.md §7.6, issue #22) tests assume this is unconfigured
+# unless a test opts in itself (test_restore_runner.py's _with_data_nics) -
+# pinned here for the same reason as the rest of this block: a developer's
+# own real .env (e.g. while setting up live verification) must never leak
+# into what's supposed to be a hermetic test run.
+os.environ.setdefault("RESTORE_DATA_NICS", "[]")
 
 import time
 from pathlib import Path
@@ -58,6 +64,45 @@ def clear_sessions():
     auth._sessions.clear()
     yield
     auth._sessions.clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_restore_jobs():
+    """Keep the process-wide restore job registry from leaking between
+    tests that exercise it via the FastAPI app (endpoint tests) -
+    tests that construct their own RestoreJobManager() directly aren't
+    affected either way."""
+    from backend import restore_jobs
+
+    restore_jobs.manager.clear()
+    yield
+    restore_jobs.manager.clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_restore_download_tokens():
+    """Same leak-between-tests convention as sessions/restore jobs above,
+    for Design C's (docs/plan.md §7.6, issue #22) single-use download
+    tokens."""
+    from backend import restore_download
+
+    restore_download.clear()
+    yield
+    restore_download.clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_guest_agent_locks():
+    """asyncio.Lock is bound to the event loop that created it, and tests
+    widely reuse the same vmid ("133") under a fresh event loop per test
+    - a lock left over from a previous test would raise "bound to a
+    different event loop" if reacquired here. Same clear-between-tests
+    convention as sessions/restore jobs above."""
+    from backend import guest_agent_lock
+
+    guest_agent_lock.clear()
+    yield
+    guest_agent_lock.clear()
 
 
 @pytest.fixture

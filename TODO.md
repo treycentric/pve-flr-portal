@@ -8,43 +8,48 @@ timeline code) is archived at
 Current architecture/reference docs live in
 [`docs/plan.md`](docs/plan.md).
 
-## PH.5 — Push-to-guest (stretch, open-ended)
+## PH.5 — Push-to-guest (#5, #22, #24 — built, live-verified, not yet merged to main)
 
-Restore a file directly into the *running* guest via
-`qemu-guest-agent` (QGA) — no bespoke in-guest daemon needed, PVE
-already wraps the relevant QGA commands at
-`POST /nodes/{node}/qemu/{vmid}/agent/{cmd}`. Full mechanism, hard
-limits, and the two design options below are written up in the archive
-(the investigation itself hasn't changed, just where it's filed):
-[`docs/archive/plan-phases-0-4.md` §7.4](docs/archive/plan-phases-0-4.md).
+Restore file(s)/directories directly into the *running* guest via
+`qemu-guest-agent` (QGA) — done, on branch `feat/ph5-push-to-guest`,
+not yet squash-merged to `main`. Covers: capability-detected dual path
+(a single small `agent/file-write` call when it fits, otherwise
+chunked scratch-write+concat via guest-exec), Direct Network Transfer
+(the guest fetches large content itself over a configured data NIC -
+issue #22) as a faster alternative to chunking, and full multi-file/
+directory bundle restore with an embedded, guest-side-verified
+checksum manifest (issue #24). Live-verified against both a real Linux
+CT (multi-item bundle via Direct Network Transfer) and a real Windows
+VM (single-directory restore, zip-fallback + chunked write). Full
+design/build/live-testing history is in `docs/plan.md` §7.5-§7.7 -
+each real bug found along the way (directory double-nesting, disk
+exhaustion, misleading progress display, timeouts, memory blow-ups,
+Windows quoting) has its own "Real-world finding" entry there with the
+fix, test, and commit.
 
-**Before starting**, confirm against the real environment (nothing
-below should be assumed from the write-up):
-- [ ] Target guests have `agent: 1` set and `qemu-guest-agent` running.
-- [ ] PVE version — 9+ has granular `VM.GuestAgent.*` privileges; PVE 8
-  only has the coarse `VM.Monitor` and can't scope this tightly.
-- [ ] Exact `agent/file-write` payload ceiling on the running PVE
-  version (reports online range 40-60 KiB).
-- [ ] Whether `guest-exec`/`guest-file-*` are blocked on target guest
-  OSes (RHEL-family blocks by default; Debian/Ubuntu/Windows allow).
+**Remaining before this is really "done":**
+- [ ] Squash-merge `feat/ph5-push-to-guest` into `main` (paused at the
+  user's request pending their own live testing - testing is now
+  complete, ready whenever they say go).
+- [ ] Version bump + `CHANGELOG.md` entry via `scripts/release.py` as
+  part of that merge, per `docs/dev/versioning.md`.
 
-**Design A (first cut, ~3-5 days):** pure `agent/file-write`, small
-files/directories, ≤40 KiB base64 chunks, `VM.GuestAgent.FileWrite`
-only. Restored files land `root:root 0644` with a fresh mtime — UI
-must say so plainly. Covers the actual common FLR need (a clobbered
-config, a deleted document).
-
-**Design B (later, opt-in, open-ended):** `file-write` bootstrap +
-`guest-exec` pull the real file over the guest's own network — fast,
-large-file capable, needs `VM.GuestAgent.Unrestricted` (≈ root on the
-VM, much larger blast radius). Only pursue if Design A proves too
-limiting.
-
-**Authorization:** a separate, deliberate ACL grant
-(`VM.GuestAgent.FileWrite` / `.Unrestricted`) — never folded into
-`FileRestoreReader`. Browsing a backup must not imply writing into the
-live guest. "Restore" stays disabled without that privilege on the
-selected guest.
+**Deliberately deferred follow-ons, not blockers:**
+- #25 — zero-buffer streaming bundle builder (vs. today's local-disk
+  staging), tracked separately since staging-through-disk's cost
+  (confirmed real live: a multi-hundred-MB selection can matter on a
+  small LXC container) turned out to matter in practice, but Direct
+  Network Transfer already fixed the bigger practical problem (upload
+  speed) independently.
+- #26 — restore original owner/group/permissions (not just mtime) for
+  a multi-file/directory restore, via a companion manifest file
+  alongside the checksum one.
+- #20 — same ownership/permissions gap for the single-file restore
+  path.
+- #7 — `/api/download-bundle` (the plain browser download feature,
+  separate from restore-to-guest) still buffers the whole archive in
+  RAM; the streaming techniques #24 built are directly reusable there
+  but haven't been applied yet.
 
 ## PH.6 — Directory-listing cache (optional, perf only)
 
@@ -103,10 +108,3 @@ wasn't built for.
   factor on their PVE account, `/access/ticket` needs an extra
   round-trip the login flow doesn't do yet (`backend/auth.py`).
   Revisit if/when actually needed by a real user.
-
-## Housekeeping
-
-- [ ] `deploy/lxc-create.sh`'s `pveam` template pin
-  (`debian-12-standard_12.7-1_amd64.tar.zst`) will eventually go stale
-  as Debian ships newer point releases — bump it periodically or make
-  it discover the latest available `debian-12-standard_*` template.

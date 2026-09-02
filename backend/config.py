@@ -26,6 +26,11 @@ def _int(name: str, default: int) -> int:
     return int(val) if val else default
 
 
+def _float(name: str, default: float) -> float:
+    val = os.environ.get(name)
+    return float(val) if val else default
+
+
 @dataclass(frozen=True)
 class Settings:
     pve_host: str
@@ -42,6 +47,54 @@ class Settings:
     tls_cert_file: str
     tls_key_file: str
 
+    # PH.5: minimum gap this app waits between the *end* of one
+    # guest-agent command and the *start* of its own next one, on the
+    # same guest (docs/plan.md §7.5). guest_agent_lock.py already
+    # prevents this app's own commands from overlapping (correctness);
+    # this is about not monopolizing the channel once it's free - a
+    # scheduled PBS backup's fs-freeze or another admin's `qm agent`
+    # call still needs a turn, especially once a multi-chunk restore is
+    # sending many sequential guest-agent commands back to back.
+    # Defaults to 0 (disabled) since the right value is workload-
+    # dependent and there's no evidence yet of what a typical homelab
+    # needs - tune up via GUEST_AGENT_MIN_COMMAND_GAP_SECONDS if a
+    # restore is observed crowding out other guest-agent users.
+    guest_agent_min_command_gap_seconds: float
+
+    # Design C (docs/plan.md §7.6, issue #22 - not yet wired into a live
+    # restore): the data-plane NIC(s) a restore's network-pull download
+    # endpoint may be served from, one entry per non-routable subnet a
+    # target guest might live in. Raw JSON here, parsed by
+    # restore_network_pull.parse_data_nics() - kept as a plain string
+    # rather than parsed eagerly so a malformed value fails where it's
+    # used (with a clear error) instead of crashing the whole app at
+    # import time over a feature most deployments won't configure.
+    # Empty by default - Design C is simply never offered until an admin
+    # opts in by setting this.
+    restore_data_nics_json: str
+    # How long a single-use network-pull download token stays valid
+    # before it's treated as expired - long enough for guest-exec to
+    # kick off the bootstrap script and for it to start the fetch, short
+    # enough that a leaked/logged URL isn't useful for long.
+    restore_download_token_ttl_seconds: float
+    # The port a Design C download URL points at on the chosen data NIC.
+    # 0 (default) means "same as PORT" - only worth overriding once the
+    # actual per-interface bind work (docs/plan.md §7.6, still not
+    # started) stands up a listener on the data NIC(s) that isn't just
+    # the same process/port the main UI+PVE-API listener already uses.
+    # Deliberately plain HTTP, never HTTPS, on this one route/NIC pair -
+    # see the "why HTTP, not HTTPS" note in restore_runner.py's
+    # _try_design_c().
+    restore_data_nic_port: int
+
+    # pve_client.run_guest_exec()'s default ~15s poll budget is sized for
+    # commands that don't scale with file size (mkdir, an exists check).
+    # Confirmed live 2026-09-01: nowhere near enough for one that does -
+    # Direct Network Transfer's actual fetch, or hashing/concatenating a
+    # large file. Used explicitly for just those calls, not as a new
+    # blanket default.
+    restore_long_running_exec_timeout_seconds: float
+
 
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
@@ -51,4 +104,9 @@ settings = Settings(
     port=_int("PORT", 8008),
     tls_cert_file=_get("TLS_CERT_FILE", "certs/portal.crt"),
     tls_key_file=_get("TLS_KEY_FILE", "certs/portal.key"),
+    guest_agent_min_command_gap_seconds=_float("GUEST_AGENT_MIN_COMMAND_GAP_SECONDS", 0.0),
+    restore_data_nics_json=_get("RESTORE_DATA_NICS", "[]"),
+    restore_download_token_ttl_seconds=_float("RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS", 120.0),
+    restore_data_nic_port=_int("RESTORE_DATA_NIC_PORT", 0),
+    restore_long_running_exec_timeout_seconds=_float("RESTORE_LONG_RUNNING_EXEC_TIMEOUT_SECONDS", 1800.0),
 )

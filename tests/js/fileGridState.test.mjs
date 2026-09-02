@@ -108,3 +108,442 @@ test('archiveBaseName uses a single selected folder name, else the last crumb', 
   s.crumbs = [{ label: 'Root' }, { label: 'var' }];
   assert.equal(s.archiveBaseName, 'var');
 });
+
+test('openRestore resets the modal and stashes the caller-supplied guest/snapshot context', () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreError = 'stale error';
+  s.restoreSubmitted = true;
+  s.restoreMetadata = true;
+  s.restoreVerify = true;
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  assert.equal(s.restoreOpen, true);
+  assert.equal(s.restoreDestDir, '');
+  assert.equal(s.restoreOverwrite, false);
+  assert.equal(s.restoreMetadata, false);
+  assert.equal(s.restoreVerify, false);
+  assert.equal(s.restoreError, null);
+  assert.equal(s.restoreSubmitted, false);
+  assert.equal(s._guestType, 'qemu');
+  assert.equal(s._guestVmid, '133');
+  assert.equal(s._guestLabel, 'web (133)');
+  assert.equal(s._snapshotTime, '2026-08-30T14:48:06Z');
+});
+
+test('startRestore is a no-op without any selection, dest dir, and confirmed overwrite', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'a', name: 'hosts', leaf: true })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('fetch should not have been called');
+  };
+  try {
+    s.restoreDestDir = '';
+    s.restoreOverwrite = true;
+    await s.startRestore();
+    assert.equal(s.restoreSubmitted, false);
+
+    s.restoreDestDir = '/etc';
+    s.restoreOverwrite = false;
+    await s.startRestore();
+    assert.equal(s.restoreSubmitted, false);
+
+    // Unlike single-file-only restore before multi-file restore existed
+    // (docs/plan.md §7.7, issue #24), more than one selection is now
+    // valid, not a no-op - only a genuinely empty selection is.
+    s.$refs.tbody.querySelectorAll = () => [];
+    s.restoreDestDir = '/etc';
+    s.restoreOverwrite = true;
+    await s.startRestore();
+    assert.equal(s.restoreSubmitted, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('startRestore posts the expected fields and marks submitted on success', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'L2V0Yy9ob3N0cw==', name: 'hosts', leaf: true })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'pbs:backup/vm/133/x' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = 'C:\\Windows\\Temp';
+  s.restoreOverwrite = true;
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = { url, body: opts.body };
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(posted.url, '/api/restore');
+  const qs = new URLSearchParams(posted.body);
+  assert.equal(qs.get('volume'), 'pbs:backup/vm/133/x');
+  assert.equal(qs.get('filepath'), 'L2V0Yy9ob3N0cw==');
+  assert.equal(qs.get('name'), 'hosts');
+  assert.equal(qs.get('guest_type'), 'qemu');
+  assert.equal(qs.get('vmid'), '133');
+  assert.equal(qs.get('guest_label'), 'web (133)');
+  assert.equal(qs.get('snapshot_time'), '2026-08-30T14:48:06Z');
+  assert.equal(qs.get('dest_dir'), 'C:\\Windows\\Temp');
+  assert.equal(qs.get('overwrite'), 'true');
+  assert.equal(qs.get('restore_metadata'), 'false');
+  assert.equal(qs.get('verify'), 'false');
+  assert.equal(qs.has('source_mtime'), false);
+  assert.equal(s.restoreSubmitted, true);
+  assert.equal(s.restoreSubmitting, false);
+  assert.equal(s.restoreError, null);
+});
+
+test('startRestore includes restore_metadata/verify/source_mtime when set', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'a', name: 'hosts', leaf: true, mtime: 1700000000 })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/etc';
+  s.restoreOverwrite = true;
+  s.restoreMetadata = true;
+  s.restoreVerify = true;
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = opts.body;
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const qs = new URLSearchParams(posted);
+  assert.equal(qs.get('restore_metadata'), 'true');
+  assert.equal(qs.get('verify'), 'true');
+  assert.equal(qs.get('source_mtime'), '1700000000');
+});
+
+test('startRestore omits source_mtime when the selected item has none', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'a', name: 'hosts', leaf: true, mtime: null })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/etc';
+  s.restoreOverwrite = true;
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = opts.body;
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const qs = new URLSearchParams(posted);
+  assert.equal(qs.has('source_mtime'), false);
+});
+
+test('startRestore posts item[] params for a multi-selection bundle restore, not filepath/name', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [
+    checkbox({ filepath: 'L2V0Yw==', name: 'etc', leaf: false }),
+    checkbox({ filepath: 'L2hvbWUvZmlsZQ==', name: 'file', leaf: true }),
+  ];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'pbs:backup/vm/133/x' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/home/user/restore';
+  s.restoreOverwrite = true;
+  s.restoreMetadata = true; // should be ignored - not sent for a bundle restore
+  s.restoreVerify = true; // same
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = { url, body: opts.body };
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(posted.url, '/api/restore');
+  const qs = new URLSearchParams(posted.body);
+  assert.equal(qs.has('filepath'), false);
+  assert.equal(qs.has('name'), false);
+  assert.equal(qs.has('restore_metadata'), false);
+  assert.equal(qs.has('verify'), false);
+  assert.equal(qs.get('dest_dir'), '/home/user/restore');
+  const items = qs.getAll('item').map((raw) => JSON.parse(raw));
+  assert.deepEqual(items, [
+    { filepath: 'L2V0Yw==', name: 'etc', leaf: false },
+    { filepath: 'L2hvbWUvZmlsZQ==', name: 'file', leaf: true },
+  ]);
+  assert.equal(s.restoreSubmitted, true);
+});
+
+test('startRestore treats a single selected directory as a bundle restore too', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'L2V0Yw==', name: 'etc', leaf: false })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/restore';
+  s.restoreOverwrite = true;
+
+  let posted = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    posted = opts.body;
+    return { ok: true, json: async () => ({ id: 'job-1', status: 'queued' }) };
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const qs = new URLSearchParams(posted);
+  assert.equal(qs.has('filepath'), false);
+  assert.equal(qs.getAll('item').length, 1);
+});
+
+test('startRestore surfaces the server-provided detail message on failure', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'a', name: 'hosts', leaf: true })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/etc';
+  s.restoreOverwrite = true;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, json: async () => ({ detail: 'guest agent unavailable' }) });
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(s.restoreError, 'guest agent unavailable');
+  assert.equal(s.restoreSubmitted, false);
+});
+
+test('startRestore surfaces a message when the fetch itself throws', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const checked = [checkbox({ filepath: 'a', name: 'hosts', leaf: true })];
+  s.$refs = { tbody: { querySelectorAll: () => checked }, form: { dataset: { volume: 'vol' } } };
+  s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z');
+  s.restoreDestDir = '/etc';
+  s.restoreOverwrite = true;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('offline');
+  };
+  try {
+    await s.startRestore();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.ok(s.restoreError.includes('offline'));
+  assert.equal(s.restoreSubmitted, false);
+});
+
+test('openRestore kicks off an initial browseInto(null) when browsing is available', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  let requestedUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ path: null, parent: null, entries: [{ name: 'C:', path: 'C:\\' }] }) };
+  };
+  try {
+    s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z', true);
+    await new Promise((r) => setTimeout(r, 0)); // let the fire-and-forget browseInto() settle
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowsing, true);
+  assert.ok(requestedUrl.startsWith('/api/restore-browse?'));
+  assert.ok(!requestedUrl.includes('path='));
+  assert.deepEqual(s.restoreBrowseEntries, [{ name: 'C:', path: 'C:\\' }]);
+});
+
+test('openRestore does not browse when browsing is unavailable', () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('should not be called');
+  };
+  try {
+    s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z', false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowsing, false);
+});
+
+test('browseInto updates path/parent/entries and mirrors destDir', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s._guestType = 'qemu';
+  s._guestVmid = '133';
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = null;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return {
+      ok: true,
+      json: async () => ({
+        path: '/etc',
+        parent: '/',
+        separator: '/',
+        entries: [{ name: 'nginx', path: '/etc/nginx' }],
+      }),
+    };
+  };
+  try {
+    await s.browseInto('/etc');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requestedUrl.includes('path=%2Fetc'));
+  assert.equal(s.restoreBrowsePath, '/etc');
+  assert.equal(s.restoreBrowseParent, '/');
+  assert.deepEqual(s.restoreBrowseEntries, [{ name: 'nginx', path: '/etc/nginx' }]);
+  assert.equal(s.restoreDestDir, '/etc');
+  assert.equal(s.restoreBrowseLoading, false);
+});
+
+test('browseInto(null) does not overwrite restoreDestDir (drive-list has no path)', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreDestDir = 'should-stay';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({ path: null, parent: null, entries: [] }),
+  });
+  try {
+    await s.browseInto(null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreDestDir, 'should-stay');
+  assert.equal(s.restoreBrowsePath, null);
+});
+
+test('browseInto surfaces the server error detail', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, json: async () => ({ detail: 'guest-exec disabled' }) });
+  try {
+    await s.browseInto('/etc');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowseError, 'guest-exec disabled');
+});
+
+test('restoreBrowseStatusText prioritizes loading, then error, then empty, else null', () => {
+  // 2026-09-02: status messages used to render inside the folder-list
+  // box; moved into the toolbar's path display instead - this getter
+  // is what decides what (if anything) overrides the real path there.
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+
+  s.restoreBrowseLoading = true;
+  s.restoreBrowseError = 'should be hidden by loading';
+  s.restoreBrowseEntries = [];
+  assert.equal(s.restoreBrowseStatusText, 'Loading…');
+
+  s.restoreBrowseLoading = false;
+  assert.equal(s.restoreBrowseStatusText, 'should be hidden by loading');
+
+  s.restoreBrowseError = null;
+  s.restoreBrowseEntries = [];
+  assert.equal(s.restoreBrowseStatusText, 'No subfolders here.');
+
+  s.restoreBrowseEntries = [{ name: 'etc', path: '/etc' }];
+  assert.equal(s.restoreBrowseStatusText, null);
+});
+
+test('browseUp browses into the current parent, including null (top level)', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreBrowseParent = '/etc';
+  let requestedUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ path: '/etc', parent: '/', entries: [] }) };
+  };
+  try {
+    await s.browseUp();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requestedUrl.includes('path=%2Fetc'));
+});
+
+test('setDestMode switches to manual, then back re-browses the current path', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreBrowsing = true;
+  s.restoreBrowsePath = '/etc';
+  s.setDestMode('manual');
+  assert.equal(s.restoreBrowsing, false);
+
+  let requestedUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ path: '/etc', parent: '/', entries: [] }) };
+  };
+  try {
+    s.setDestMode('browse');
+    await new Promise((r) => setTimeout(r, 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowsing, true);
+  assert.ok(requestedUrl.includes('path=%2Fetc'));
+});
+
+test('setDestMode is a no-op when the requested mode is already active', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreBrowsing = true;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('should not re-fetch when already in browse mode');
+  };
+  try {
+    s.setDestMode('browse');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreBrowsing, true);
+});

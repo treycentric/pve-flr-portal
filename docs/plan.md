@@ -506,6 +506,1389 @@ admin hasn't supplied their own.
   HTTPS via `run.py` rather than launching uvicorn directly from the
   CLI — see 7.3.
 
+### 7.5 PH.5 design — dual-path push-to-guest, capability-detected
+
+Active design as of PH.5 start (issue #5, branch
+`feat/ph5-push-to-guest`). Builds on the mechanism/limits captured in
+`docs/archive/plan-phases-0-4.md` §7.4 (still the reference for the raw
+QGA facts — live-filesystem hazard, etc.); this section is the living
+design on top of it and supersedes §7.4's Design A/B split with a
+revised one below (2026-08-31 research + user design review).
+
+**Naming note:** §7.4's original "Design B" (`file-write` bootstrap +
+`guest-exec` `curl`/`Invoke-WebRequest` pull over the guest's own NIC)
+was never built and is *not* the same thing as "Design B" below, despite
+sharing the label — the revised split below reused the name for a
+different mechanism (chunked writes + local concat, no guest-initiated
+network call). The original pull-based idea lives on as a separate,
+not-yet-built follow-on — see issue #22, which renames it "Design C" to
+stop the collision.
+
+**Confirmed from official sources (2026-08-31), resolving the open
+question from the first draft of this section:**
+- `agent/file-write` is a genuine one-shot wrapper — the only
+  parameters are `file` and `content` (no `handle`/`offset`), confirmed
+  both by the shape of every real `pvesh create
+  .../agent/file-write --content ... --file ...` example found and by
+  there being no separate `agent/file-open` API node to hold a handle
+  across calls. **No append across HTTP calls exists.** A second call
+  to the same guest path truncates and overwrites the first — this
+  closes the open question outright, no live test needed to establish
+  it (though the exact per-call payload ceiling below still does).
+  Sources: [forum: Proxmox API /agent/file-write](https://forum.proxmox.com/threads/proxmox-api-agent-file-write.67447/),
+  [forum: how to create/edit a file with qm guest agent](https://forum.proxmox.com/threads/how-to-create-or-edit-file-with-qm-guest-agent.89759/).
+- **Live-verified 2026-09-01** against a real guest (PVE 9.2.11, QGA
+  110.0.2, Windows 10, vmid 202) — resolves both remaining open items
+  from the first draft outright, and overturns one assumption:
+  - **The per-call ceiling is exactly 61440 characters**, confirmed via
+    the server's own validation error ("value may only be 61440
+    characters long") at the boundary (60 KiB succeeds, 70 KiB fails).
+    Settles the "~40–60 KiB vs. 48 MB" ambiguity in the earlier draft
+    of this section — 48 MB evidently describes something else (a
+    different QGA file operation, not this one).
+  - **`content` is a raw literal string, not base64** — neither
+    direction is decoded/encoded by the server on this version,
+    regardless of the `encode` param (tried both `0` and `1`, no
+    observable effect). This **overturns the archived §7.4/§3 doc's
+    "content is base64-encoded" assumption** — that most likely
+    described `pvesh`'s own convenience encoding for shell safety
+    (quoted in its `--content` examples), not the raw HTTP API. Proven
+    directly: an 11-character non-base64-shaped string ("FIRST-WRITE")
+    round-tripped through file-write → file-read unchanged.
+  - **Arbitrary binary survives losslessly anyway** — mapped the full
+    0–255 byte range through a Latin-1-decoded Python `str` (each byte
+    ↔ one Unicode codepoint, no loss) before sending as `content`, and
+    it read back byte-for-byte identical. No base64 needed at all,
+    which means the 61440-character ceiling is **61440 raw bytes**
+    per chunk, not reduced by base64's ~33% overhead as originally
+    assumed — `backend/restore_chunking.py` uses this ceiling and this
+    encoding directly (`DEFAULT_CHUNK_SIZE_BYTES = 61440`).
+  - `guest-exec`/`guest-exec-status` confirmed working end-to-end on
+    this guest (ran `cmd /c echo ...`, read back `out-data`/`exited`/
+    `exitcode` via `exec-status`) — matches the assumed shape used
+    elsewhere in this design.
+  - `qemu-guest-agent` was initially *not running* on the test guest
+    despite `agent: 1` being set in its VM config — `agent/info` and
+    `agent/get-osinfo` both failed with "QEMU guest agent is not
+    running" until the in-guest service was started. Confirms the
+    capability-detection design's degrade-to-unavailable behavior on
+    any `agent/info` failure (`backend/guest_agent.py`) is the correct
+    default, not just a defensive nicety.
+  - Caveat carried forward: this was checked against one PVE/QGA
+    version. Re-verify the `content`-is-raw finding specifically if a
+    deployment ever targets a meaningfully older PVE/QGA — the
+    archived doc's base64 assumption came from somewhere, so an older
+    version behaving that way isn't impossible.
+- The five `VM.GuestAgent.*` privileges, straight from the Proxmox
+  access-control patch that introduced them: `Audit` ("issue
+  informational QEMU guest agent commands"), `FileRead` ("read files
+  from the guest"), `FileWrite` ("write files in the guest"),
+  `FileSystemMgmt` ("freeze/thaw/trim file systems"), `Unrestricted`
+  ("issue arbitrary QEMU guest agent commands"). Source:
+  [pve-devel patch series, "replace ambiguously named VM.Monitor privilege"](https://lore.proxmox.com/pve-devel/20250717133711.84715-9-f.ebner@proxmox.com/).
+  Critically, **`guest-exec`/`guest-exec-status` are not named under
+  any specific privilege** — only `Unrestricted` covers "arbitrary"
+  commands, so *any* use of `guest-exec` for *any* reason (chunk
+  reassembly, metadata restore, checksum verification) requires the
+  broad grant. There is no narrower "exec" privilege to ask for.
+  `agent/info` (wraps QMP `guest-info`, used for capability detection
+  below) is itself an informational command, so reading it needs
+  `VM.GuestAgent.Audit` — the capability-detection call itself is
+  privilege-gated, and a user with none of the five grants should get
+  a clean "no info available, assume unavailable" rather than a 403
+  bubbling up as an error.
+
+**Revised Design A / B split**, given the confirmed one-shot/no-append
+behavior above (the write mechanics decide the split now, not an
+arbitrary feature line):
+
+- **Design A — quick restore.** A single file whose content fits in
+  one `agent/file-write` call. No `guest-exec` anywhere in the path —
+  works even where exec is blocked (RHEL-family guests). Needs only
+  `VM.GuestAgent.FileWrite`. Lands `root:root`/SYSTEM, mode `0644`,
+  fresh mtime — stated plainly in the UI, not hidden in a tooltip.
+- **Design B — full restore.** Anything Design A can't do in one call:
+  larger files, directories, or a request to preserve metadata.
+  Mechanism (per your assumption, confirmed as the right shape given
+  the no-append finding above): write each chunk to its own
+  uniquely-named file in a per-restore scratch directory inside the
+  guest — discovered per OS from `agent/info`'s reported guest OS
+  (`%TEMP%`/`C:\Windows\Temp` on Windows via `get-osinfo`, `/tmp` or
+  `$TMPDIR` on Linux/BSD) — then one `guest-exec` concatenates them in
+  order into the destination (`cat part.* > dest` / PowerShell
+  `Get-Content -Raw` + `Set-Content`/`cmd /c copy /b`), then the
+  scratch directory is removed. Needs `VM.GuestAgent.Unrestricted`
+  (the concatenation step alone forces this, independent of whether
+  metadata restore is also requested).
+
+  **Compression option for larger transfers** (your suggestion,
+  worth building in from the start here rather than bolting on later):
+  compress the source bytes before chunking - the virtio-serial channel
+  is the actual bottleneck for a multi-chunk restore, so fewer/smaller
+  chunks directly means fewer round-trips and less total wall time, not
+  just less bandwidth. gzip is the practical choice (`gzip.compress()`
+  in the backend; `gunzip`/`Expand-Archive`-adjacent decompression via
+  one more `guest-exec` step after reassembly - Windows lacks a gzip-
+  native cmd/PowerShell one-liner as clean as Linux's `gunzip`, so that
+  side needs its own small check during implementation, not assumed).
+  Only worth it above some size/compressibility threshold - a small or
+  already-compressed file (most binaries, already-compressed formats)
+  isn't worth the extra decompression step's own complexity and
+  failure surface. Not required for Design B's first cut; a natural
+  opt-in refinement once the plain multi-chunk path is solid.
+
+**Metadata restore and verification are independent opt-ins, not tied
+to which write mechanism ends up used.** Design A/B above is an
+internal implementation detail (which mechanism moves the bytes), not
+a user-facing choice — there's no "pick quick or full" step. Instead,
+whenever `VM.GuestAgent.Unrestricted` is available (regardless of
+whether the content itself needed more than one chunk), the restore
+confirmation offers two independent checkboxes, both defaulting **off**:
+- **Restore metadata** — corrected scope, confirmed against the actual
+  API: `file-restore/list`'s response only ever includes `mtime` and
+  `size` (docs/plan.md §3's documented schema — no `uid`/`gid`/`mode`
+  field exists anywhere in it), so this can only restore the original
+  **modified time**, not ownership or permissions as first sketched —
+  that data simply isn't exposed through this API at all, on any PVE
+  version. A follow-up `guest-exec` (`touch -d @<unix-ts>` on
+  Linux/BSD; PowerShell `(Get-Item).LastWriteTime = ...` on Windows,
+  since `cmd` has no built-in for this) applies the `mtime` the
+  file-restore listing already returned. Still answers "doesn't the
+  single-call write path still need guest-exec for this:" — yes, and
+  it's available as an upgrade on top of a single-chunk restore too,
+  not gated behind also needing chunk concatenation. A user with only
+  `FileWrite` (no `Unrestricted`) doesn't see this checkbox at all and
+  gets the content-only fast path.
+- **Verify** — sha256 preferred over a full read-back, per your point.
+  The backend computes sha256 over the source bytes while streaming
+  them from `file-restore/download` (already has the bytes in hand, no
+  extra guest round-trip for this half). After the write (and any
+  concat), one `guest-exec` runs the guest's native hasher
+  (`sha256sum` on Linux/BSD, `certutil -hashfile <path> SHA256` on
+  Windows — a `cmd`-only tool, no PowerShell dependency, matching
+  `guest_browse.py`'s `cmd`/`wmic`/`dir` approach rather than
+  introducing a second invocation style; `Get-FileHash -Algorithm
+  SHA256` remains a fine fallback if `certutil` is ever missing —
+  `shasum -a 256` fallback on macOS-family) and the backend compares
+  the parsed digest against the precomputed one — no full file
+  read-back over the slow virtio-serial channel. Same `Unrestricted`
+  gate as metadata restore, same independent-checkbox treatment. When
+  exec isn't available at all, verification is simply not offered; a
+  narrower fallback via `agent/file-read` (gated by the separate
+  `VM.GuestAgent.FileRead` privilege) is a possible later addition for
+  the single-chunk case only, not required for the first cut.
+
+The backend decides the actual mechanism from these three independent
+facts at write time: content needing >1 chunk, "restore metadata"
+checked, or "verify" checked — any one of the three means this restore
+uses `guest-exec` and therefore requires `Unrestricted`; none of them
+means it never leaves the single-call `FileWrite`-only path.
+
+**Destination is a directory, not a file path.** Both designs take a
+`dest_dir` (an existing directory inside the guest, chosen by the
+user) as the restore root, not a full target file path — matches how
+the source side already works (a folder or a multi-file selection).
+For a single-file restore, the file lands at `dest_dir/<original
+filename>`; for a directory/multi-file selection, the relative
+structure under the browsed folder is preserved under `dest_dir`. No
+path is invented on the guest side beyond what the user picked as the
+root.
+
+**Capability detection.** New `backend/guest_agent.py`, backing
+`GET /api/restore-capabilities?type=<qemu|lxc>&vmid=<id>`, gathers:
+
+| Check | How | Tells us |
+|---|---|---|
+| Agent enabled in VM config | `GET /nodes/localhost/qemu/{vmid}/config` → `agent` field | Is QGA wired up at all |
+| What the guest agent itself allows | `POST /nodes/localhost/qemu/{vmid}/agent/info` (wraps QMP `guest-info`, returns `supported_commands[]` with per-command `enabled` flags) | Ground truth for whether `guest-file-write`/`guest-exec`/`guest-file-read` are allowed on *this* guest — gated by `VM.GuestAgent.Audit`, see above |
+| Guest OS (for the scratch-dir path and hasher choice) | Same `agent/info` call, or `get-osinfo` | Windows vs. Linux/BSD/macOS-family conventions |
+| Caller's own privilege | `GET /access/permissions?path=/vms/{vmid}` | Which of the five `VM.GuestAgent.*` grants the logged-in user's ticket carries |
+| PVE version | `GET /version` | PVE 8 only has coarse `VM.Monitor` — no granular `VM.GuestAgent.*` at all, so restore is unavailable regardless of the other checks |
+
+**Real-world finding (2026-09-01) and the resulting `guest_agent_lock`
+module.** `agent/info` is on the critical path for every restore
+path's availability, and this surfaced two genuine problems in
+practice, not just theory:
+- `qemu-guest-agent` accepts only **one command at a time** over its
+  virtio-serial channel. An early version of this code retried
+  `agent/info` after *any* failure, including a client-side timeout —
+  but a client-side timeout doesn't prove the in-guest command was
+  actually abandoned, so that retry could send a second command while
+  the first was still in flight. That's a known way to desync the
+  channel until the guest's agent is restarted, and is the most likely
+  explanation for an observed regression: capability checks reading
+  "still enabled" moments earlier, then "not enabled or not
+  responding" on every check after (restarting the in-guest service
+  didn't clear it, consistent with a channel-level desync rather than
+  the service actually having stopped).
+- Even without that bug, this app's own requests can still overlap
+  each other (two browser tabs, a capability check landing mid-browse)
+  — a structural problem, not just a retry-specific one.
+
+Fixed with a new `backend/guest_agent_lock.py`, used by every actual
+agent/* call site (`guest_agent.py`'s `agent/info`/`get-osinfo`,
+`pve_client.write_guest_file()`'s `agent/file-write`,
+`guest_browse.py`'s `agent/exec`+`agent/exec-status`) — never the
+plain PVE API calls like `/config` or `/access/permissions`, which
+aren't guest-agent commands and don't share the channel:
+- **`guest_agent_command(vmid)`** — an async context manager holding a
+  per-vmid `asyncio.Lock` for the full request/response cycle of one
+  command, serializing this app's own overlapping requests. Different
+  vmids never block each other.
+- **`call_with_retries()`** — retries only on a *definite*
+  `httpx.HTTPStatusError`, never on a timeout/connection error. The
+  lock only stops overlap from this app; it can't stop something else
+  entirely (a scheduled PBS backup's fs-freeze, another admin's `qm
+  agent` call, the Proxmox web UI) from being mid-command on the same
+  channel — but PVE/QEMU surfaces that legitimate, externally-caused
+  contention as a completed error response, not a timeout, so it's
+  safe to retry. There's no dedicated "is the agent busy" query in the
+  PVE API to check this proactively — the error response on an actual
+  attempt is the only observable signal.
+- **`settings.guest_agent_min_command_gap_seconds`**
+  (`GUEST_AGENT_MIN_COMMAND_GAP_SECONDS`, default `0` = off) — a
+  courtesy setting distinct from the correctness-focused lock above:
+  a minimum gap this app waits between the end of its own previous
+  command on a guest and the start of its next one, so it doesn't
+  monopolize the channel once it's free. Not very consequential for
+  today's single-write restore, but will matter once a multi-chunk
+  restore (§ Design B above) is sending many sequential commands back
+  to back — left off by default since there's no evidence yet of what
+  a typical homelab actually needs; tune it up if a restore is ever
+  observed crowding out other guest-agent users.
+
+Response shape:
+```json
+{
+  "agent_running": true,
+  "pve_version_ok": true,
+  "guest_os_family": "linux",
+  "design_a": {"available": true, "reason": null},
+  "design_b": {"available": false, "reason": "guest-exec not enabled in qemu-guest-agent config"},
+  "verify_supported": false
+}
+```
+`reason` is always populated when `available: false` so the UI can
+explain *why* a path is greyed out rather than just hiding it.
+
+**Authorization**, unchanged in spirit from the archived design: a
+restore grant is separate from and never folded into
+`FileRestoreReader`/`VM.Backup`. The backend re-checks every privilege
+server-side on every restore step — the capability response is a UI
+convenience, never trusted for the actual write, concat, metadata, or
+verify calls.
+
+**Background jobs — restore runs out-of-band, not on the request.**
+A restore (especially Design B: source stream → N chunk writes →
+concat → optional metadata → optional verify) can run well past a
+reasonable HTTP request lifetime. `POST /api/restore` submits a job
+and returns its id immediately; the actual work runs as a tracked
+asyncio background task. New `backend/restore_jobs.py`, same
+single-process/in-memory tradeoff already accepted for
+`auth._sessions` (CLAUDE.md's "no extra services" — lost on a backend
+restart, acceptable for a homelab tool):
+
+- `RestoreJob`: id, a **snapshot** of the requesting session (see
+  below), guest type/vmid/name, task name (auto-generated, e.g.
+  "Restore 2026-08-30 14:48 → /etc"), source (volume + filepath),
+  destination (`dest_dir` [+ filename]), independent metadata/verify
+  flags (no `strategy` field — see above), status
+  (`queued`/`running`/`verifying`/`done`/`failed`/`cancelled`),
+  started_at, an `elapsed_seconds` property, and a cooperative
+  `cancel_requested` flag checked between chunks/steps.
+- Manager: `submit()` creates a job and launches
+  `asyncio.create_task`; `list_jobs()` for the running-jobs modal;
+  `cancel(job_id)` sets the flag (the loop notices at the next chunk
+  boundary and marks `cancelled`, cleaning up any scratch dir already
+  written).
+- Jobs are visible to any logged-in user, not scoped per-requester —
+  matches this being a single-admin homelab tool with one shared task
+  list (Synology ABB's own restore-task list works the same way), and
+  keeps the UI simple. Revisit if this ever becomes genuinely
+  multi-admin.
+- New endpoints: `GET /api/restore-jobs` (list, polled by the UI),
+  `POST /api/restore-jobs/{id}/cancel`.
+
+**Session handling for background jobs.** A job holds its *own copy*
+of the requester's `SessionData` (`dataclasses.replace(session)` at
+submission time inside `RestoreJobManager.create()`, not left to the
+call site) — never the same object the interactive `auth._sessions`
+entry points at. Two reasons this matters, both raised in review:
+- A restore is meant to keep running even if the browser session that
+  started it logs out or idle-times-out — that's the point of it being
+  a background job rather than tying up the request. If the job shared
+  the interactive session object, `auth.logout()` popping it from
+  `_sessions` wouldn't stop the job (it still holds a Python reference
+  to the object), but conceptually the job's credential shouldn't be
+  entangled with the interactive session's lifecycle either way — it
+  should have its own copy from the start.
+- A PVE ticket is a ~2h credential that needs periodic refreshing.
+  `auth.get_session()` already refreshes the interactive session's
+  ticket, but only when the next browser request comes in — a
+  long-running job can't depend on that happening. `auth.py` now
+  exposes a public `ensure_fresh_ticket(session)` (the same staleness
+  check `get_session()` uses internally, extracted so it's callable
+  outside the request cycle), and the job's run loop calls it on its
+  own copy before each guest-agent call, keeping the job's credential
+  current independent of any browser activity.
+
+**UI.**
+- `file_grid.html`'s "Restore" button reflects
+  `/api/restore-capabilities` for the currently-selected guest (fetched
+  once per guest switch). One confirmation modal, no "quick vs. full"
+  choice:
+  - **Nothing available** (`design_a.available` false): button stays
+    disabled, tooltip shows the `reason`.
+  - **Only content restore available** (`FileWrite`, no
+    `Unrestricted`): a plain typed `dest_dir` field (no directory
+    browser — that needs `guest-exec` too, see below), overwrite
+    warning, "lands as root:root 0644" notice — no metadata/verify
+    checkboxes shown at all, since there's no exec to run them with.
+  - **`Unrestricted` also available:** same modal additionally shows
+    "Restore metadata" and "Verify" checkboxes (both off by default) —
+    checking either (or the content simply being too large for one
+    call) is what pulls this particular restore onto the exec-based
+    path; the user never has to know that distinction exists. The
+    destination field is replaced by a small in-modal directory
+    browser (`GET /api/restore-browse`, `backend/guest_browse.py`) —
+    Up/Drives navigation, click a folder to descend, destination
+    mirrors the current position — with a segmented Browse/Manual
+    entry toggle above the picker (not a small link — a real regression
+    once tested, easy to miss) for anyone who prefers typing. Browsing
+    itself needs the same `Unrestricted` grant (no dedicated QGA
+    listing command), so it's simply absent, not merely disabled, when
+    only `FileWrite` is held.
+
+    **Real-world finding (2026-09-02):** the Windows subfolder listing
+    initially used `cmd /c dir <path> /b /ad` (bare names only), which
+    can't distinguish a real directory from a reparse point - clicking
+    into a legacy compatibility junction like `C:\Documents and
+    Settings` (which Windows deliberately blocks normal enumeration
+    into, even for SYSTEM, specifically to stop naive tools looping on
+    the redirect) surfaced a raw "File Not Found" with no indication
+    why. Switched the Windows subfolder listing from `dir` to
+    PowerShell (`Get-ChildItem -Directory` filtered on the
+    `ReparsePoint` attribute) so junctions/symlinked directories are
+    excluded from the listing outright rather than merely erroring
+    when clicked — the general fix, not a per-name workaround. A small
+    denylist of known junction names (`_KNOWN_WINDOWS_JUNCTIONS` in
+    `guest_browse.py`) stays as a defensive fallback purely for
+    manual-entry mode, where a user can still type such a path
+    directly — Windows blocks listing into it either way, so the
+    fallback just gives a clearer message than the raw error in that
+    one remaining path.
+
+    **Real-world finding (2026-09-02), corrected once live-tested:**
+    the first version passed `path` as a *trailing argv element* after
+    `-Command`, expecting PowerShell to bind it to `$args[0]` inside
+    the script — confirmed live that this does not work
+    ("Cannot bind argument to parameter 'LiteralPath' because it is
+    null"). `powershell -Command` appends trailing CLI arguments onto
+    the end of the **command string itself**, not into the script's
+    `$args`, so `$args[0]` was never actually populated. Fixed by
+    embedding `path` directly as a PowerShell single-quoted string
+    literal in the `-Command` script — safe specifically because
+    `_check_path_safe()` (already called earlier in the same function)
+    rejects `'` along with every other shell-metacharacter, so nothing
+    reaching this point can contain a quote to break out of the
+    literal, and a single-quoted PowerShell string doesn't interpret
+    anything else ($ variables, backticks) that the denylist doesn't
+    already block for other reasons. Guarded by a regression test
+    inspecting the actual `command` array sent to `agent/exec`.
+
+    **Real-world finding (2026-09-02):** the Windows drive list
+    originally used `cmd /c wmic logicaldisk get caption` and was
+    observed as noticeably sluggish on first use. `wmic` is legacy/
+    deprecated and goes through the WMI provider host (`winmgmt`),
+    which has real cold-start overhead, especially right after boot.
+    Switched to PowerShell's `Get-PSDrive -PSProvider FileSystem` (no
+    WMI round-trip), which also makes both the drive-list and
+    subfolder-listing calls consistent on one tool instead of two.
+- **Running-jobs indicator** — a new icon in the top bar between the
+  guest/task picker and the user menu (matching the reference
+  screenshot's placement), showing a small spinning ring around it
+  whenever `GET /api/restore-jobs` (polled every few seconds while any
+  job is `queued`/`running`/`verifying`) reports at least one active
+  job. Click opens a "Restore Task" modal: a table (Device, Task Name,
+  Restore ver., Source, Destination, Status, Elapsed Time, an actions
+  column) with row selection and a "Cancel" button wired to
+  `POST /api/restore-jobs/{id}/cancel`, an empty "No data" state, and
+  a Close button — matching the reference screenshot's layout. The
+  Status column shows a coarse percentage while active (`RestoreJob.
+  progress_current`/`progress_total` — one unit per chunk written, plus
+  one each for concatenation/metadata restore/verify when those run;
+  `progress_percent` is `None`, not a frozen number, once a job is no
+  longer active). The modal itself is resizable (native CSS `resize:
+  both`) and movable (drag the header — same window-level
+  pointermove/pointerup pattern as the timeline's drag-to-pan,
+  deliberately no `setPointerCapture()`, which would break the header's
+  own Close button and the table's row-selection clicks the same way it
+  once broke the timeline's marker clicks).
+
+  **Real-world finding (2026-09-02):** a restore failed with no way to
+  see why - `RestoreJob.error` existed on the backend but the modal
+  never rendered it, and there was no step-by-step trail at all, only
+  the terminal message. Added `RestoreJob.log()` (each call prefixed
+  with elapsed seconds since `started_at`), called at every meaningful
+  step in `restore_runner.py` (download size, chunk-count decision,
+  guest-exec capability check, scratch dir creation, per-phase
+  completion, metadata skip-with-no-mtime, verify result) and
+  automatically by `mark_done`/`mark_failed`/`mark_cancelled` so every
+  job gets a consistent terminal entry regardless of call site. Kept
+  out of the polled list endpoint (`RestoreJob.to_dict()`) to keep that
+  payload light; a new `GET /api/restore-jobs/{id}` returns the full
+  detail (`to_detail_dict()`, list + log) on demand. A "View Log"
+  button (or double-clicking a row) in the Restore Task modal opens a
+  second modal showing it, live-updated by piggybacking on the same 4s
+  poll tick the job list already uses whenever the log viewer is open,
+  rather than running a second timer — auto-scrolls to the bottom on
+  each update.
+
+  **Real-world finding (2026-09-03):** the log modal shipped without
+  its own drag support (only the jobs-list modal had it) and, being
+  the shared `.modal-box--resizable` class, had no explicit `height` —
+  so a long log grew the whole modal window instead of scrolling
+  inside it. Fixed by generalizing `startDrag(e, xProp, yProp)` to take
+  the offset property names instead of hardcoding `dragX`/`dragY`, so
+  the log modal reuses it against its own independent `logDragX`/
+  `logDragY` state; and by giving `.modal-box--resizable` an explicit
+  starting `height` so the flex children that already had `flex: 1;
+  overflow: auto` (`.modal-table-wrap`, `.restore-log-body`) have
+  something concrete to constrain themselves against — without a real
+  height, a `resize: both` box sizes to its content by default, which
+  is what let it grow unbounded. Verified in an isolated Alpine.js
+  harness driven via claude-in-chrome (drag, then resize larger) before
+  committing, per this project's established practice for UI fixes.
+
+  **Real-world finding (2026-09-01):** growing either resizable modal
+  via its native corner resize handle closed it - not a regression from
+  any single change, present since resizing was first added, and only
+  reported once live testing actually exercised it. Root cause:
+  `@click.self="open = false"` closes on any click event whose *target*
+  resolves to the overlay itself - but dragging the native resize handle
+  to grow the box can end with the mouseup landing back on the overlay
+  backdrop (outside the box's pre-resize bounds) even though the
+  gesture began on the resize handle inside the box, and the browser's
+  synthetic `click` event target reflects where the mouseup landed, not
+  where the gesture started. Fixed by replacing `@click.self` with an
+  explicit mousedown/mouseup pair (`backdropDown`, `app.js`) that only
+  closes when *both* ends of the gesture targeted the backdrop itself -
+  a mousedown that started elsewhere (the resize handle, the header) no
+  longer counts, regardless of where the mouseup ends up. One shared
+  `backdropDown` flag across both overlays is safe: when both modals are
+  open the log modal's full-viewport backdrop physically covers the
+  jobs-list modal's, so a mousedown can never actually land on the
+  covered one underneath. Verified in an isolated harness (grow via the
+  resize handle stays open; a genuine backdrop click still closes)
+  before committing, same practice as the fix above.
+
+**Sequencing:**
+1. ~~Empirical verification against a real guest~~ — **done 2026-09-01**,
+   see above.
+2. ~~`backend/guest_agent.py` + `/api/restore-capabilities`~~ — **done**
+   (capability logic + the live endpoint, both tested — capability
+   logic in isolation from fake `agent/info`/config/permissions
+   responses, the endpoint via `TestClient` with the module
+   monkeypatched).
+3. ~~`backend/restore_jobs.py`~~ — **done**, job manager lifecycle
+   (submit, list, cancel, elapsed time), tested without any real QGA
+   calls.
+4. ~~Content-only restore end-to-end~~ — **done**: `POST /api/restore`
+   submits a job through the job manager (`restore_runner.py`), and the
+   file grid's Restore button/confirmation modal are wired to it (no
+   metadata/verify checkboxes or running-jobs icon yet — that's steps
+   5-6). A file needing more than one chunk fails the job with a clear
+   message rather than a silent fallback, since multi-chunk isn't built.
+5. ~~Running-jobs UI~~ — **done**: `GET /api/restore-jobs` (list) and
+   `POST /api/restore-jobs/{id}/cancel` wired into `main.py`;
+   `restoreJobsWidget()` (new top-bar Alpine component, between the
+   task picker and user menu) polls every 4s, shows a spinning ring +
+   active-job-count badge on the icon, and opens the "Restore Task"
+   modal (device/task/restore-ver/source/destination/status/elapsed
+   columns, row select, Cancel, matching the reference screenshots).
+6. ~~Multi-chunk write, metadata restore, verify~~ — **done**:
+   `restore_runner.run_restore()` now decides at runtime (after the
+   source content is in hand) whether any of three independent facts
+   — more than one chunk, `restore_metadata` requested, `verify`
+   requested — means guest-exec is needed, re-checks
+   `VM.GuestAgent.Unrestricted` at that point (never assumed from the
+   submission-time check alone), and runs the scratch-file/concat path,
+   the mtime-only metadata restore (`touch -d`/PowerShell
+   `LastWriteTime` — no owner/mode, see the corrected scope above),
+   and/or the sha256 verify (`sha256sum`/`certutil -hashfile`)
+   accordingly. `pve_client.check_path_safe()` gates the destination
+   before it's ever embedded in a shell/PowerShell command string, the
+   same way `guest_browse.py`'s browse paths already were. Scratch-dir
+   cleanup runs in a `finally`, regardless of outcome (done/failed/
+   cancelled) — best-effort, swallows its own failures rather than
+   masking the restore's real result. `guest_browse._run_exec` and
+   `_check_path_safe` were promoted to `pve_client.run_guest_exec()`/
+   `check_path_safe()` first, so both this code and browsing share one
+   implementation. Checkboxes wired into the same modal, gated on
+   `restoreCaps.design_b.available` (the same flag that already gates
+   the directory browser).
+
+   **Unverified live** (no active session at implementation time — the
+   test guest's ticket had expired): the exact `certutil -hashfile`
+   output shape (`_parse_certutil_hash()` assumes a 3-line
+   header/hash/trailer format with space-separated hex byte pairs on
+   line 2). Should be checked against a real Windows guest before
+   relying on it for anything that matters — unlike the browse
+   feature's `cmd`/`wmic`/`dir`/PowerShell calls, which were
+   live-verified (and, in two cases, corrected after finding real bugs
+   that pure code review hadn't caught) before shipping. The
+   `copy /b`/`LastWriteTime` risk flagged here previously has since
+   been live-tested; see the finding below.
+
+   **Real-world finding (2026-09-03):** restoring into a destination
+   directory that didn't yet exist on the guest (`C:\TestRestore\`, not
+   pre-created) failed confusingly two steps *after* the actual
+   problem: `copy /b "a"+"b" "dest"`'s exit code reported success even
+   though `dest` was never created (its non-existent parent silently
+   swallows the write), so the job sailed through concatenation and
+   only blew up in metadata restore — `Get-Item -LiteralPath 'dest'`
+   raising "Cannot find path ... because it does not exist", then a
+   second, more confusing error ("The property 'LastWriteTime' cannot
+   be found on this object") from the same failed `Get-Item` call.
+   Fixed with two additions to `restore_runner.py`, both guest-OS-aware
+   (`ntpath`/`posixpath` for the parent-directory math): a new
+   `_ensure_destination_dir()` creates the destination's parent
+   directory up front (tolerant of it already existing) before any
+   write happens, and a new `_verify_destination_exists()` runs
+   immediately after concatenation — a direct existence check that
+   raises a clear, specific error right there if concatenation silently
+   didn't produce the file, rather than letting the failure surface
+   confusingly in whatever step happens to run next (Windows commands
+   for both corrected in the finding just below, after the very first
+   live test). Confirms the general lesson from the browse feature's
+   `dir`/`wmic` findings above: a Windows shell command's exit code
+   alone is not always trustworthy evidence that it did what it claims.
+
+   **Real-world finding (2026-09-01), first live test of the two
+   functions above:** their original Windows commands
+   (`cmd /c if not exist "X" mkdir "X"` / `cmd /c if exist "X" (echo
+   FOUND)`) had never actually run against a real Windows guest before
+   this point, and the very first live restore attempt after adding
+   them failed - not with a missing-directory problem this time, but
+   with `_ensure_destination_dir()` itself: "The filename, directory
+   name, or volume label syntax is incorrect" against a destination
+   path that was completely valid. Root cause: `cmd.exe`'s handling of
+   *multiple* embedded double-quoted segments on one `/c` command line
+   is unreliable - unlike `_concat_chunks()`'s superficially similar
+   `copy /b "a"+"b" "dest"`, which had at least run without erroring in
+   an earlier live test (though that test never actually proved correct
+   quote-handling, only that a missing directory didn't crash it).
+   Fixed by switching both functions to PowerShell (`New-Item -Force`/
+   `Test-Path -LiteralPath`, single-quoted literals) - the exact pattern
+   `_restore_mtime()` already used successfully in the *previous* live
+   finding above, which is the one Windows code path in this whole
+   feature that had genuine confirmed-correct field behavior before
+   this. `_concat_chunks()` itself is left as-is for now - it hasn't
+   been shown to actually fail, and per this project's practice of not
+   fixing what isn't confirmed broken, it stays on `cmd /c` until (if
+   ever) a live test says otherwise.
+
+Each step gets its own pytest coverage (chunking/base64 math,
+capability-object construction from fake responses, job lifecycle
+state transitions, privilege-string parsing) per `CLAUDE.md`'s "new
+functionality needs a test in the same change" rule — the real QGA
+calls aren't mockable end-to-end without a live guest, so tests target
+the pure logic the same way `pve_client`/`auth` are unit-tested today.
+Commits cite #5.
+
+### 7.6 Design C — network-pull restore (issue #22, not yet built)
+
+A third restore mechanism, on top of Design A/B above: instead of moving
+every byte over the QMP/virtio-serial control channel, have the guest
+fetch the file itself over its own network, at normal network
+throughput. Exists to fix Design B's real bottleneck — `agent/file-write`
+chunks capped at ~40 KiB, one sequential round-trip each, which is fine
+for a small file and genuinely slow for a large one.
+
+**Naming history, so this doesn't cause the same confusion twice:** this
+is what `docs/archive/plan-phases-0-4.md` §7.4 originally called "Design
+B" — a `file-write` bootstrap + `guest-exec` pull. §7.5's "Revised Design
+A / B split" reused the same labels for a different mechanism (the one
+that shipped). To stop the two ideas colliding under one name, the
+pull-based mechanism is "Design C" everywhere in this doc from here on.
+
+**User-facing name (2026-09-01): "Direct Network Transfer".** "Design C"
+is internal dev-doc jargon and was showing up verbatim in a restore
+job's own log (`_try_design_c()`'s `job.log()` calls) - visible to
+whoever's actually running a restore, not just whoever's reading this
+file. Renamed everywhere user-visible (log lines, the function itself -
+`_try_design_c()` is now `_try_direct_network_transfer()`) to "Direct
+Network Transfer", which describes what's actually happening without
+requiring any QMP/guest-agent background. "Design C" stays as the name
+for this section and in code comments/commit history - only what a user
+actually sees changed.
+
+**Mechanism:**
+1. Backend writes a small bootstrap script into the guest via the
+   existing `agent/file-write` path (same mechanism Design A already
+   uses) — a one-liner `curl`/`Invoke-WebRequest` against a per-job,
+   single-use, short-lived, signed download URL this app serves.
+2. `guest-exec` runs the script. The guest fetches the file directly
+   from the portal over its own NIC — not through PVE, not through QMP.
+3. A follow-up `guest-exec` (same pattern Design B already uses) fixes
+   ownership/mode/mtime as requested.
+
+**Auth for the new download endpoint.** The guest must never see the
+operator's PVE ticket. Instead the backend mints a random, single-use
+token scoped to exactly one restore job's one file, short TTL (e.g. 2
+minutes), stored server-side alongside the job. The bootstrap script
+embeds only that token in its URL; the endpoint consumes it on first use
+(or TTL expiry) and 404s afterward — never a standing, reusable, or
+broadly-scoped credential.
+
+**Requires:** `VM.GuestAgent.Unrestricted` (same as Design B — no new
+privilege tier, but Design C adds "the guest can reach this app" as a
+new dependency on top of it, a meaningfully larger blast radius than
+Design A's `FileWrite`-only path); guest→portal IP reachability (see
+network segmentation below); a fetch tool already present in the guest
+(see fallback chain below — needs a capability check, same spirit as
+`agent/info` detection, never an assumption); `guest-exec` unblocked
+(same RHEL-family caveat as Design B).
+
+**Fetch-tool fallback chain.** "Living off the land" (assuming
+`curl`/`Invoke-WebRequest` is present) is exactly the kind of assumption
+this project has been burned by before (`certutil`'s output shape,
+`copy /b`'s exit code, `wmic`'s slowness) — so Design C probes for a
+fetch tool rather than assuming one, and degrades gracefully rather than
+failing outright when the preferred one is missing. Probe cheaply via
+`guest-exec` (a `--version`/`where`/`command -v` style check per
+candidate, cached per job like the rest of `restoreCaps`) and walk a
+priority list per guest OS family, picking the first that's actually
+present:
+- **Windows:** `Invoke-WebRequest` (PowerShell 3.0+, the common case) →
+  `certutil -urlcache -f <url> <dest>` (a genuine LOLBin already used
+  elsewhere in this app for hashing, present on stock Windows without
+  PowerShell) → `bitsadmin /transfer` (deprecated but still present on
+  older Server builds) → a tiny VBScript one-liner via `cscript`
+  (`WinHttp.WinHttpRequest` COM object — works back to very old Windows,
+  last resort given how dated it is).
+- **Linux/BSD:** `curl` → `wget` → `python3 -c "urllib.request..."` /
+  `python -c` (common on most distros even when neither HTTP client is
+  installed) → bash's `/dev/tcp` pseudo-device for a hand-rolled raw
+  HTTP GET (no external binary at all, but bash-specific — doesn't work
+  under a POSIX `/bin/sh` guest-exec shell, so only reachable if bash is
+  confirmed present).
+- **If nothing on the list is available:** Design C simply isn't offered
+  for that job — same automatic, silent fallback to Design B that
+  already happens when `VM.GuestAgent.Unrestricted` isn't granted or the
+  guest OS family can't be determined. Never a hard failure just because
+  the fast path isn't available; Design B is the always-available floor
+  this degrades to.
+
+**Network segmentation.** Design C is the first (and so far only)
+feature where the guest genuinely needs a network path to this app —
+everything else is QMP-mediated with no such requirement. Given a
+homelab with several *mutually non-routable* subnets, "add one NIC" isn't
+enough — the design is **one data-plane NIC per non-routable subnet**:
+
+- The existing interface keeps serving the UI (user-facing) and the
+  outbound PVE API calls (management-plane) — unchanged.
+- **N additional data-plane interfaces**, one per subnet that isn't
+  routable to the others, each serving *only* the token-gated download
+  endpoint — no UI, no other route reachable from any of them.
+  Firewalled so inbound traffic on each can reach only that one path,
+  and only while a Design C job holds a live token.
+- A compromised guest on any one subnet can therefore hit, at most, one
+  narrow, auth-gated, self-expiring endpoint on the NIC facing *its own*
+  subnet — never the UI, never PVE-management, never a NIC facing an
+  unrelated subnet. The PVE-management NIC stays unreachable from any VM
+  subnet in either direction.
+
+**Per-job data-NIC selection.** With several mutually unreachable
+subnets, the bootstrap script's download URL only works if it points at
+the one data-NIC IP actually reachable from that guest's subnet.
+Proposed approach: query the guest's own reported IP(s) via QGA
+(`agent/network-get-interfaces` — already a QMP-wrapped call, no new PVE
+API surface), and match against the container's own data-NIC subnets
+(computed at startup from local interface config) to find the one
+data-NIC IP sharing a subnet with the guest. Same capability-detection
+spirit as `restoreCaps` today: if no configured data NIC's subnet
+matches any of the guest's reported addresses, Design C simply isn't
+offered for that job — falls back to Design B, no guessing. An explicit
+admin-configured subnet→local-IP override table is worth keeping as a
+fallback for guests with unreliable network reporting or ambiguous
+matches, but QGA auto-match should be the default so it doesn't need
+per-guest admin upkeep as subnets change.
+
+**Deploy-level implementation** (host/deploy config, not app logic,
+beyond the selection step above and the one new route):
+- **LXC:** one additional `netN` interface per non-routable subnet
+  (`pct set <id> -netN name=ethN,bridge=<vlan-bridge>,ip=...`); bind
+  `run.py`'s HTTPS listener to specific interface IPs rather than
+  `0.0.0.0` (UI+PVE-API bind stays as-is; the Design C download route
+  binds separately, across the data-NIC IPs only).
+- **Docker:** `docker network connect` one additional Docker network per
+  subnet; same per-interface bind-address restriction.
+- Host/hypervisor firewall rules restricting what's reachable on each
+  interface — defense in depth, not a substitute for the per-job token
+  above.
+
+**Provisioning documentation is a required deliverable, not follow-up
+polish.** This is real deploy-time work an admin has to get right before
+Design C is usable — user-facing setup documentation, the same audience
+as README.md's existing "Provisioning access" section (not
+`docs/dev/`, which is contributor/process docs). Ship either as a new
+README.md section or a linked `docs/network-provisioning.md`, in the
+same change as the feature, covering: adding the bridge/VLAN
+interface(s) to the LXC config and Docker Compose file, one per
+non-routable subnet; the subnet→IP mapping/override and how to confirm
+QGA auto-match picked correctly; concrete firewall rule examples
+(Proxmox's own firewall, and iptables/nftables as a generic Docker-path
+fallback) restricting each data NIC to inbound-only-to-the-download-
+route; and a worked example with 2–3 subnets, matching the actual
+homelab shape this is built for.
+
+**Simpler alternative worth documenting alongside this, not competing
+with it: guests with a full desktop, when they can reach the management
+plane.** For a guest with a full graphical desktop, logging into the
+portal from *inside the guest itself* and using the already-shipped
+browse+download feature needs none of the above — no `Unrestricted`
+grant, no guest-exec, no bootstrap script, no data NIC. Not a new
+mechanism; browse/download already works today. The caveat that makes
+this conditional rather than a blanket recommendation: a subnet can
+legitimately have a route to a Design C data NIC without any route to
+the management NIC at all — that's the point of keeping them separate —
+so the portal has no reliable way to know whether a given guest can
+actually reach the management UI. User-facing docs and any in-app
+callout should state this as conditional ("if this guest's subnet
+routes to the portal's management interface, this is the simplest,
+lowest-privilege option — check with whoever set up the network
+segmentation if unsure"), not assume it always applies.
+
+**Scope.** Opt-in, separate from Design A/B — same authorization posture
+as today's `VM.GuestAgent.Unrestricted` gate (§7.4's authorization
+model: never folded into `FileRestoreReader`, restore stays a
+deliberate, separate grant). Open-ended effort; worth pursuing once
+Design A/B prove too slow for real large-file restores in practice.
+Tracked as issue #22, filed as a follow-on to #5, not part of PH.5
+itself.
+
+**Sequencing (started 2026-09-01):**
+1. ~~Data-NIC config + per-job subnet selection~~ — **done**:
+   `backend/restore_network_pull.py`'s `parse_data_nics()` (reads
+   `RESTORE_DATA_NICS`, a JSON array of `{cidr, local_ip}`, empty by
+   default so Design C stays off until an admin opts in) and
+   `select_data_nic()` (matches a guest's reported IP(s) against the
+   configured subnets, first match wins, `None` if nothing matches —
+   never guesses). Pure logic, fully unit-tested without a live guest or
+   real multi-NIC hardware.
+2. ~~Fetch-tool detection~~ — **done**: `detect_fetch_tool()` in the same
+   module, walking the priority list from the fallback-chain section
+   above via injected `exec_fn` (same pattern as `restore_runner.py`'s
+   own `_exec` wrapper) — not yet called from anywhere live, since
+   nothing wires Design C into a real restore yet (step 4 below).
+3. ~~Single-use download token + endpoint~~ — **done**:
+   `backend/restore_download.py` (mint/consume, single-use,
+   `RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS` TTL, in-memory — same
+   lost-on-restart tradeoff as `auth._sessions`/`restore_jobs.manager`)
+   and `GET /api/restore-downloads/{token}` in `main.py` — deliberately
+   unauthenticated (the guest has no PVE session and must never get
+   one), re-streams from PVE using the *job's own* session snapshot.
+   Not reachable yet: nothing mints a token outside of tests.
+4. ~~Bootstrap command generation + wiring into `run_restore()`~~ —
+   **done**: `restore_network_pull.build_fetch_command()` builds the
+   actual guest-exec command per detected tool (`Invoke-WebRequest`/
+   `certutil`/`bitsadmin`/`curl`/`wget`/`python`/`bash` — all single
+   guest-exec calls, no staged script needed for any of these; only
+   `cscript` would need one, see the caveat below). `restore_runner.
+   _try_design_c()` wires `select_data_nic()` + `detect_fetch_tool()` +
+   `restore_download.mint_token()` + the built command into
+   `run_restore()`'s multi-chunk branch, tried automatically ahead of
+   Design B's scratch-write+concat whenever it's eligible — silently
+   falling back to Design B the moment any prerequisite isn't met (no
+   data NICs configured — the default, and therefore **zero behavior
+   change for any deployment that hasn't opted in** — no subnet match,
+   no fetch tool), but raising a clear, job-failing error if it *was*
+   eligible and the fetch itself then failed, rather than masking that
+   by quietly retrying via a different mechanism.
+
+   **Two things not yet done, both logged clearly rather than silently
+   wrong:**
+   - `cscript` is detected as a candidate but never actually used yet —
+     it needs a `.vbs` script staged via `agent/file-write` first (no
+     stdin piping through `agent/exec`), and that staging/cleanup isn't
+     threaded through `_try_design_c()` yet. A guest whose *only* usable
+     tool is `cscript` currently falls back to Design B.
+   - The actual per-interface HTTPS/HTTP bind changes in `run.py` (so a
+     data NIC really serves the download route) are **not started** —
+     `_try_design_c()` builds a real URL (`http://<nic-ip>:<port>/...`)
+     today, but nothing is listening there yet outside of a normal
+     `TestClient` in tests. Live end-to-end use needs this plus real
+     multi-NIC deployment to actually test against.
+
+   **Deliberate design decision made while wiring this in: the download
+   URL is `http://`, never `https://`.** Teaching every one of six
+   different guest-side fetch tools to trust this app's own (self-signed
+   by default, §7.3) certificate individually would be its own source of
+   subtle bugs, and `bash`'s `/dev/tcp` fallback cannot speak TLS at all
+   regardless (`build_fetch_command()` raises clearly if asked to, rather
+   than generating a script that would fail confusingly in the guest).
+   The single-use, short-TTL token is the real access control on this
+   one route; the NIC segmentation design above firewalls it further.
+   The rest of the app (UI, PVE API calls) stays HTTPS-only as always —
+   this is a narrow, deliberate tradeoff on one specific route, not a
+   general relaxation.
+5. ~~The actual dual-listener bind~~ — **done**: `run.py` now runs a
+   second, plain-HTTP `uvicorn.Server` per distinct configured data-NIC
+   IP, concurrently with the main HTTPS one, in the *same process* -
+   required, not incidental, since `restore_download`'s token store and
+   `restore_jobs.manager` are both in-memory and process-local, so a
+   guest's fetch has to land in the same process that minted its token
+   (a second `run.py` invocation would have its own empty stores and
+   404 every fetch). Each data listener binds to that NIC's specific IP
+   only, never `0.0.0.0` - binding broadly would defeat the whole point
+   of keeping the data plane separate from the UI/PVE-management
+   listener. Only takes this path when `RESTORE_DATA_NICS` is actually
+   configured; the unconfigured default keeps using plain
+   `uvicorn.run(..., reload=True)` for the familiar auto-reload dev
+   loop, which the multi-`Server` path can't support (uvicorn's
+   `--reload` supervisor wraps `uvicorn.run()`'s single-server
+   entrypoint specifically, not arbitrary concurrent `Server` instances).
+
+   **Docker networking note (live-tested against the real question of
+   how to run this locally):** the data listener binds to a literal IP
+   inside the container's own network namespace - Docker's default
+   bridge/NAT networking doesn't give a container the host's real LAN
+   IP at all, so a `RESTORE_DATA_NICS` entry naming an actual VM-subnet
+   IP would fail to bind. Docker Desktop's host-networking mode (or
+   `macvlan`/`ipvlan` on a native Linux Docker host) resolves this by
+   giving the container the real interface directly, matching how LXC
+   already behaves. Absent that, `local_ip` currently does double duty
+   as both *bind* address and the address embedded in the guest's fetch
+   URL - a NAT'd/port-published deployment would need those split into
+   two separate values (bind `0.0.0.0` inside the container, advertise
+   the host's real published-on IP in the URL), which isn't built.
+
+**Live end-to-end verification (2026-09-01): confirmed working**, first
+real run against a real Proxmox host/guest — LXC container (real
+bare-metal networking, not Docker Desktop; see the Docker-networking
+note above for why that path was abandoned for this test), second NIC
+added via `pct set -netN`, `RESTORE_DATA_NICS` pointed at it, a Windows
+VM on the matching subnet. Every piece of the chain fired correctly in
+one pass: `select_data_nic()` matched the guest's own subnet,
+`detect_fetch_tool()` found `Invoke-WebRequest`, the destination
+directory got created (PowerShell fix from the finding just above),
+`Invoke-WebRequest` pulled all 3.9 MB of a real file over the guest's
+own network in about 8 seconds — versus the many sequential QMP
+round-trips 65 chunks would've needed over Design B — the post-fetch
+existence check passed, mtime restore and checksum verify both
+succeeded. Full job log:
+```
++0.0s Starting restore of 'explorer.exe' -> 'C:\TestRestore\explorer.exe'.
++0.2s Downloaded 3933184 byte(s) from the backup.
++0.2s Content needs 65 chunks (over the single-call size limit).
++0.2s Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).
++0.2s guest-exec available (guest OS family: windows).
++2.9s Confirmed the destination directory exists.
++6.2s Design C: fetching via Invoke-WebRequest over 192.168.10.88 (matches the guest's own subnet).
++14.8s Design C: fetch complete.
++14.8s Restoring the original modified time.
++17.5s Modified time restored.
++17.5s Verifying checksum against the source.
++17.6s Checksum verified - matches the source.
++17.6s Restore completed successfully.
+```
+Not yet covered by this pass: a Linux target guest (confirmed separately
+below, after the memory/timeout fixes that first live Linux attempt led
+to), the Design-B-fallback path when no subnet/tool matches (only the
+success path has been live-confirmed), and `cscript`/multi-subnet
+scenarios (the deferred pieces noted above).
+
+**Real-world finding (2026-09-01), first Linux guest attempt — not a
+Design C bug, a pre-existing memory scaling problem:** trying a large
+file against a Linux guest next, the whole `pve-flr-portal.service`
+process got OOM-killed by the kernel (`systemd`: "A process of this
+unit has been killed by the OOM killer") on the LXC container's default
+512 MB memory limit — before the restore ever got far enough to reach
+Direct Network Transfer's eligibility check at all, which is also why
+it "didn't appear to be using" it. Root cause predates this session's
+work entirely: `run_restore()` downloaded the whole source file into
+memory (`content = await response.aread()`), then `split_into_chunks()`
+built a **second, full, separate copy** as a list of every chunk's
+wire-ready (Latin-1) string - roughly doubling peak memory for content
+that Direct Network Transfer doesn't even use in wire-string form at
+all. First fix removed the redundant wire-string copy (`chunk_count()` +
+`bytes_to_wire_str()` replacing `Chunk`/`split_into_chunks()`/
+`needs_guest_exec()`) but deliberately left the initial
+`content = await response.aread()` in place, on the reasoning that
+halving peak memory was a lower-risk change than a full streaming
+rewrite. **That wasn't enough** - retried against a real large file and
+the process was OOM-killed again, this time with only the job's very
+first log line ("Starting restore...") ever written, meaning it died
+during that initial `aread()` itself, before even logging a byte count.
+One buffered copy of a large-enough file is still too much for a
+memory-constrained deployment on its own.
+
+Fixed properly this time: `run_restore()` now reads at most two
+`DEFAULT_CHUNK_SIZE_BYTES` pieces up front (`response.aiter_bytes()`,
+not `aread()`) - just enough to know whether this is the small,
+single-call case, without ever buffering the rest of a possibly-large
+file to find out. For the multi-chunk case, the exact chunk count isn't
+known until the stream is exhausted (a growing/placeholder
+`progress_total`, refined as chunks are actually written, rather than
+computed up front from a fully-known size) - Direct Network Transfer
+drains and discards the rest (only needs the total byte count and,
+if verify was requested, a running `hashlib.sha256` digest); the
+scratch-write path streams the same way, writing and discarding one
+piece at a time. At most one piece (~60 KiB) of raw bytes and one
+piece's wire string are ever alive at once, for the whole restore,
+regardless of file size. Locked in with a test double that raises if
+`aread()` is ever called again, and a byte-fidelity test confirming the
+streamed reassembly is still exact.
+
+**Real-world finding (2026-09-01), immediately after the memory fix
+above:** with memory no longer the blocker, the very next Linux attempt
+failed with "Guest command timed out" - `pve_client.run_guest_exec()`'s
+poll budget is a hardcoded ~15 seconds, sized (per its own original
+comment) for "listing/writing/hashing" - i.e. commands whose duration
+doesn't scale with file size. Direct Network Transfer's actual fetch is
+exactly the opposite: its whole duration IS the file transfer. Fixed by
+adding an optional `timeout_seconds` parameter to `run_guest_exec()`
+(default unchanged at ~15s) and a new
+`RESTORE_LONG_RUNNING_EXEC_TIMEOUT_SECONDS` setting (default 1800s/30
+min), passed explicitly through `restore_runner.py`'s `_exec()` wrapper
+for the three calls whose duration scales with content size: the Direct
+Network Transfer fetch itself, `_verify_checksum()`'s hashing
+(`sha256sum`/`certutil`), and `_concat_chunks()`'s reassembly (`cat`/
+`copy /b`) - every other guest-exec call in this module (mkdir, exists
+checks, fetch-tool detection probes) stays on the fast ~15s default,
+since none of those scale with file size. Locked in with tests
+asserting the actual `timeout_seconds` value reaching `run_guest_exec()`
+for each of the three calls, not just that the code path doesn't crash.
+
+**Live end-to-end verification (2026-09-01), Linux guest: confirmed
+working**, and at real scale - a 706 MB file (740411560 bytes, well
+past anything a buffering approach could have survived on this same
+512 MB container), fetched via `curl` in ~21s and checksum-verified in
+~17s, both comfortably inside the new long-running timeout budget.
+First real proof the memory-streaming and timeout fixes above actually
+solve the problems they were written for, not just that they pass their
+own unit tests. Full job log:
+```
++0.0s Starting restore of '2f3a-linux-x64-4.3.6-...' -> '/home/tljones/test_restore/2f3a-linux-x64-4.3.6-...'.
++0.2s Content needs more than one chunk (over the single-call size limit).
++0.2s Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).
++0.6s guest-exec available (guest OS family: linux).
++1.0s Confirmed the destination directory exists.
++1.6s Direct Network Transfer: fetching via curl over 192.168.10.88 (matches the guest's own subnet).
++22.2s Direct Network Transfer: fetch complete.
++36.2s Downloaded 740411560 byte(s) from the backup.
++36.2s Restoring the original modified time.
++36.6s Modified time restored.
++36.6s Verifying checksum against the source.
++53.7s Checksum verified - matches the source.
++53.7s Restore completed successfully.
+```
+Between this and the earlier Windows/`Invoke-WebRequest` success, both
+fetch-tool families (POSIX and Windows) and both guest OS families are
+now live-confirmed for the success path. Still not covered: the
+fallback path when no subnet/tool matches (only success has been
+live-tested), `cscript`, and genuinely multi-subnet scenarios.
+
+**Not started, remaining:** deploy-level LXC/Docker additional-NIC
+provisioning steps (the `pct set -netN`/Docker Compose `networks:`
+config an admin actually runs), firewall rule examples, and the
+user-facing provisioning documentation (README.md section or
+`docs/network-provisioning.md` — not `docs/dev/`, see above).
+
+### 7.7 Multi-file / directory restore-to-guest
+
+Restore-to-guest is single-file only today, end to end: `POST
+/api/restore`'s `filepath`/`name` fields are singular, `RestoreJob`'s
+`source_volume`/`source_filepath`/`source`/`destination` are all
+singular, and the frontend gates the Restore button on
+`sel.length !== 1`. A real restore need is often "this whole directory"
+or "these several files/folders together", not one file at a time -
+this section designs that, covering both individual multi-selected
+files and whole directories (mixed together in one selection, matching
+how multi-select download already works). "A directory" here means the
+**full recursive tree** under it, not one flat level - already how
+`leaf: false` entries behave in `download_bundle()` today (a directory
+path, fetched from PVE without `tar=1`, returns everything PVE finds
+under it as a zip - `file-restore/download`'s own default encoding for
+a directory, §3 - nested subdirectories included; the existing code
+already iterates every entry the resulting zip contains, not just its
+top level), so this falls out of the existing mechanism rather than
+needing new design. (Correction from an earlier draft of this section:
+directories don't need `tar=1` at all - that flag only switches PVE's
+*encoding* to `.tar.zst` instead of the default zip, which
+`download_bundle()` doesn't currently use. The restore path's own
+output-bundle format, chosen separately below, is an independent
+question from how directory content gets fetched from PVE in the first
+place.)
+
+**Mechanism: reuse the existing multi-select convention already proven
+by `/api/download-bundle`.** That endpoint already accepts
+`item: list[str] = Query(...)`, each a JSON `{filepath, name, leaf}`
+(`leaf: false` = a directory, fetched from PVE as PVE's own default zip
+encoding and re-expanded), and already builds zip/tar.gz/tar.zst bundles
+from a mixed multi-file/directory selection. The restore path reuses
+that same `item` request shape and the same directory-fetch mechanism -
+no new PVE API surface - but **does not reuse `download_bundle()`'s
+implementation as-is**: that function buffers the
+entire bundle in memory (`content = await response.aread()`,
+`io.BytesIO()`) - a known, already-documented limitation acceptable for
+an ad-hoc human-triggered browser download, but exactly the class of
+bug this session just spent considerable effort fixing for single-file
+restore (§7.6's memory-streaming finding above) - reusing it here would
+reintroduce that same risk at potentially *larger* scale (a whole
+directory, not one file). The restore path's bundle-building has to be
+streaming-aware from the start, the same discipline §7.6 landed on.
+
+**Guest-side extraction format: try native first, fall back
+server-side, decided by actually probing the guest (2026-09-01 design
+review).** Whether a guest's `tar` can genuinely decompress `.zst` is
+not safely assumed (recent Windows ships a libarchive-based `tar.exe`
+that plausibly supports it, but "plausibly" isn't good enough per this
+project's whole established practice of verifying rather than guessing
+at guest-tool behavior - `certutil`'s output shape, `copy /b`'s exit
+code, `cmd /c`'s quoting, `wmic`'s slowness were all real, live-only
+surprises). So this is a genuine runtime capability check, same spirit
+as `detect_fetch_tool()`:
+1. Probe the guest (a cheap guest-exec check, ideally by actually
+   attempting to decompress a tiny known-good `.tar.zst` test blob
+   rather than trusting a `--version`/`--help` string, once what's
+   reliable is confirmed against real guests) for whether its `tar` can
+   extract `.zst`.
+2. **If yes:** stream PVE's raw `.tar.zst` straight through - scratch-
+   write (chunked) or Direct Network Transfer, the exact same
+   mechanisms §7.5/§7.6 already built, just carrying a tar stream
+   instead of a single file's bytes - and extract in-guest via `tar -xf`
+   (Windows or Linux). No server-side repackaging; most efficient path.
+2. **If no:** the app re-bundles server-side into a more universally
+   extractable format before anything reaches the guest - `.zip`
+   (Windows: `Expand-Archive`, always available, no PowerShell version
+   dependency) or `.tar.gz` (Linux/BSD: gzip support in `tar` predates
+   zstd by decades, essentially universal). Reuses
+   `download_bundle()`'s zip/tar.gz-building *logic* (stdlib `zipfile`/
+   `tarfile`, the `zstandard` package already in `requirements.txt` to
+   decompress PVE's `.tar.zst` first) but rebuilt to stream rather than
+   buffer whole - see above.
+
+**Verify: an embedded manifest, checked entirely guest-side, not an
+app-side hash map (2026-09-01 design review, refined from the
+single-file per-file-hash idea).** While the app streams through and
+builds the bundle (one pass, whichever format), it computes each
+entry's SHA256 as it's read - already the streaming-hash discipline
+§7.6's memory fix established, extended to multiple entries - and
+writes those hashes into the bundle itself as one extra manifest entry
+(`sha256sum`-compatible format: `<hash>  <relative-path>` per line, the
+format Linux's own `sha256sum -c` already understands natively). After
+extraction, **one** guest-exec call verifies everything at once,
+entirely inside the guest: `sha256sum -c <manifest>` on Linux/BSD (a
+single command, no app-side comparison needed - matches the channel-
+efficiency lesson this whole feature has been built around: one guest-
+exec round trip, not N); a short PowerShell script reading the same
+manifest format and comparing via `Get-FileHash` on Windows. The app
+only needs the pass/fail summary (exit code / parsed output) from that
+one call, never a retained per-file hash map of its own. Metadata
+(mtime) restore continues to be free - both tar and zip preserve each
+entry's original modified time in their own format, restored
+automatically by extraction, no extra guest-exec step (true for zip
+too, not just tar - standard unzip/`Expand-Archive` behavior).
+
+**Data model:** `RestoreJob`'s single `source_volume`/`source_filepath`
+become a list of selected items (the same `item` JSON shape as
+`download_bundle()`, for one consistent multi-select convention across
+both download and restore); `destination` becomes a target *directory*
+the bundle extracts into, rather than one specific file path.
+
+**Not yet decided:** exact wire format for the embedded manifest inside
+each bundle format (trivial for tar - just another entry; zip needs the
+same, just via `zipfile.writestr()`); how `RestoreJobManager`/the UI
+represent progress across a multi-file bundle (one coarse "building the
+bundle / transferring / extracting / verifying" sequence, most likely,
+rather than per-file granularity - not yet designed). Filed as a
+follow-on to #5, scoped as an extension of PH.5 rather than a new phase
+since it completes restore-to-guest rather than standing apart from it.
+
+**Sequencing (started 2026-09-01):**
+1. ~~Pure, guest-independent pieces~~ — **done**: `backend/restore_bundle.py`
+   - `BundleItem` (the reused `download_bundle()`-style multi-select
+     shape) and `ManifestBuilder` (accumulates one SHA256 per entry,
+     renders `sha256sum -c`-compatible text).
+   - `build_zst_probe_blob()`/`probe_tar_zst_support()`: the tar.zst
+     capability check landed on a real-extraction test, not a
+     `--version`/`--help` string - a tiny, freshly-built known-good
+     `.tar.zst` blob (one file, content `"ok"`) gets written to the
+     guest and actually extracted; only a correct exit code *and*
+     correct content count as capable. Same "don't trust a banner,
+     verify the real behavior" discipline as every other guest-tool
+     assumption in this project.
+   - `select_bundle_format()` (native `.tar.zst` vs `.zip`/`.tar.gz`
+     fallback) and `build_extract_command()`/`build_verify_command()`
+     (the actual per-format guest-exec commands), mirroring
+     `restore_network_pull.py`'s role for Design C.
+   - All fully unit-tested without a live guest (`tests/test_restore_bundle.py`),
+     including a round-trip test that the probe blob is genuinely a
+     valid, extractable `.tar.zst` via the real `zstandard`/`tarfile`
+     libraries, not just internally self-consistent.
+2. ~~The streaming bundle builder~~ — **done**: `build_bundle()`
+   downloads each selected item (files directly, directories via
+   PVE's own default zip encoding - already covering the full recursive
+   tree) to its own local temp file (streamed, one piece at a time,
+   never fully in RAM), adds it to the still-open output bundle -
+   format chosen by `select_bundle_format()` - via a background thread
+   (`asyncio.to_thread`, since `tarfile`/`zipfile` are blocking APIs),
+   then deletes that item's temp file immediately before moving to the
+   next item; the manifest is embedded last, once every item has been
+   added. Staged through local temp files rather than a true zero-buffer
+   `os.pipe()` bridge deliberately (2026-09-01 design review) - simpler,
+   no fragile hand-rolled sync/async pipe to get right without live
+   testing, at the cost of real disk usage proportional to bundle size
+   and some extra latency. That zero-buffer alternative is tracked
+   separately as issue #25, to build only if staging through disk turns
+   out to actually be a problem in practice (disk space, throughput)
+   once this ships and gets used for real. Every entry - a whole leaf
+   item, or one member inside a fetched directory's zip - streams
+   through in fixed-size pieces during both passes (`_HashingReader`
+   lets `tarfile`'s/`zipfile`'s own internal chunked reads double as the
+   manifest hash computation, no second pass over the same content), and
+   directory-marker entries in a source zip are correctly skipped rather
+   than becoming bogus zero-byte manifest lines. Fully round-trip tested
+   (`tests/test_restore_bundle.py`) against the real `zipfile`/
+   `tarfile`/`zstandard` libraries for all three output formats, not
+   just internally self-consistent - still not run against a real PVE
+   instance or guest.
+
+   **Real-world finding (2026-09-01):** the first implementation of this
+   step downloaded *every* selected item to its own local temp file
+   before starting to build the output bundle at all - so peak local
+   disk usage was (every selected source item combined) + (the full
+   output bundle) at once. Live-tested against a real multi-item
+   selection on the LXC container hosting the app, this exhausted the
+   container's own rootfs (`OSError: [Errno 28] No space left on
+   device`) - exactly the risk issue #25 had already flagged as the
+   cost of staging through disk at all, just worse than necessary: the
+   fix doesn't require the zero-buffer bridge #25 tracks, only
+   interleaving download and build so at most one item's temp file
+   exists alongside the growing output bundle at any moment, rather than
+   every item's. `build_bundle()` was refactored accordingly (the
+   description above reflects the fixed behavior); a regression test
+   (`test_build_bundle_deletes_each_item_temp_file_as_it_is_consumed`)
+   patches the per-item add step to snapshot the temp directory's
+   contents mid-build, confirming no more than one item's temp file
+   exists on disk at a time and nothing but the finished bundle remains
+   once building completes.
+3. ~~Backend wiring~~ — **done**: `RestoreJob` gained an `items:
+   list[BundleItem] | None = None` field - `None` (every job created
+   before this existed, and every ordinary single-file restore
+   submitted today) means the original single-file logic runs
+   unchanged; a non-empty list means a bundle job instead. `run_restore()`
+   is now a two-line dispatcher (`_run_bundle_restore()` vs. the renamed
+   `_run_single_file_restore()`, the latter otherwise byte-for-byte
+   identical to before). `_run_bundle_restore()` checks `design_b`
+   unconditionally (a bundle always needs guest-exec - no Design-A
+   equivalent), probes tar.zst support, builds the bundle, then tries
+   Direct Network Transfer before falling back to the chunked
+   scratch-write+concat mechanism the single-file path already uses
+   (`_concat_chunks()` gained an explicit `dest_path` parameter so it
+   can target a scratch bundle file instead of always
+   `job.destination`), extracts it, then verifies via the embedded
+   manifest - one command, no app-side comparison. `POST /api/restore`
+   accepts `item: list[str]` (the same JSON shape `download_bundle()`
+   already uses) as an alternative to `filepath`/`name` - exactly one of
+   the two must be given. Frontend multi-select UI (extending past
+   `sel.length !== 1`) is the remaining piece of this step, tracked
+   separately below since it didn't fit in the same pass.
+
+   **Real-world finding (2026-09-02):** a live restore of ~1.54GB across
+   3 items projected tens of thousands of chunks at
+   `DEFAULT_CHUNK_SIZE_BYTES` (61440 bytes) - each one a separate
+   `agent/file-write` round trip - and appeared "stuck" at a displayed
+   100% almost immediately (a second, related bug: the old "+1 ahead of
+   current" progress-total placeholder, built for the single-file path's
+   genuinely-unknown-length streaming download, rounds up to 100% after
+   only ~200 chunks regardless of how many actually remain). Fixed two
+   things: (1) `_write_chunks_to_scratch()` gained a `total_bytes_hint`
+   parameter - when the source's real size is already known up front
+   (true for a bundle, already fully materialized on local disk before
+   writing starts, unlike a streaming download), `job.progress_total` is
+   set to the real expected chunk count immediately, not chased upward
+   as chunks land; (2) Direct Network Transfer (§7.6) is now tried for
+   bundles too, the same way it already was for single files - the
+   download-token endpoint (`restore_download.py`) gained an optional
+   `local_path` on `DownloadToken`, set only for a bundle, so
+   `GET /api/restore-downloads/{token}` streams the already-built local
+   bundle file straight off disk instead of re-proxying from PVE (which
+   can't hand back a synthesized multi-item bundle as one item the way
+   it can a single source file). `_try_direct_network_transfer()` gained
+   matching `dest_path`/`local_path` parameters (both `None` for the
+   unchanged single-file case) so the guest fetches into a scratch
+   bundle-file path rather than `job.destination` directly. Silently
+   unavailable (no configured data NIC, no usable fetch tool) still
+   falls straight through to the chunked path, same contract as before -
+   this doesn't remove that fallback, it just gives a bundle restore a
+   real shot at the fast path first, exactly as issue #25's write-up
+   anticipated once the disk-staging fix alone proved insufficient in
+   practice.
+
+   **Real-world finding (2026-09-02), immediately after the above
+   shipped:** the "Bundle built (...) - writing it to the guest in N
+   chunk(s)" log line printed unconditionally right after the bundle
+   finished building, before Direct Network Transfer was even attempted
+   - misleading once DNT actually took over and no chunked write
+   happened at all. Fixed by dropping the presumptive chunk-count phrase
+   from that line entirely; the chunk count now only appears in the log
+   line that actually fires on the chunked-write path. Also asked
+   directly whether extraction/verification progress can be measured
+   more finely: no - PVE's `agent/exec-status` only returns output once
+   the guest process has exited, never incrementally while it's still
+   running (confirmed by re-reading `pve_client.run_guest_exec()`'s own
+   polling loop), so there's no live byte-level signal to poll during a
+   single `tar -xf`/`sha256sum -c` call without a materially bigger
+   change (per-item guest-exec calls, or a background process plus a
+   separately-polled progress-marker file) - not pursued given how much
+   faster these phases are than the transfer itself. That question
+   surfaced a real bug in the DNT change above, though: `progress_total`
+   was left at `expected_chunks + 3` even when DNT (not the chunked
+   path) actually ran, so `progress_current` (set to `expected_chunks`
+   to mark "the transfer is done") divided by that total rounded to a
+   displayed 100% the instant the fetch finished - before extraction or
+   verification had even started, the exact "looks done/stuck early"
+   symptom the chunk-count fix was written to prevent, just relocated
+   one phase later. Fixed by rescaling to 3 units (transfer, extract,
+   verify - no separate concat unit, since DNT fetches the whole bundle
+   in one shot) whenever DNT is the path actually taken. Separately,
+   confirmed live that the embedded manifest (`.pve-flr-manifest.sha256`)
+   was left behind in the destination directory permanently after a
+   successful restore - it's a restore-mechanism artifact, not part of
+   the original backup, so it's now removed via one best-effort
+   guest-exec call after verification succeeds (a cleanup failure logs a
+   note but doesn't fail the otherwise-successful restore).
+
+   **Real-world finding (2026-09-02), a real directory restore:**
+   restoring a `Downloads` directory landed its contents under a doubled
+   `Downloads/Downloads/` in the destination, one level deeper than
+   expected. Root cause: `_add_directory_entries_to_tar()`/
+   `_add_directory_entries_to_zip()` re-prefixed each source zip member's
+   `info.filename` with `{item_name}/` on top of what was already
+   there - but PVE's own zip encoding for a directory selection already
+   roots every entry under the directory's own name (`Downloads/photo.jpg`,
+   not just `photo.jpg`), so the correct arcname is `info.filename` as-is.
+   The corresponding logic in `main.py`'s `download_bundle()` (the
+   ordinary browser-download multi-select feature, §7.7's "reuse the
+   existing multi-select convention") had the exact same bug, unnoticed
+   until now because that feature's own tests never covered a directory
+   selection's exact output paths - fixed there too, in the same change.
+   Both fixes also now skip zip directory-marker entries explicitly
+   (`info.is_dir()`), matching a discipline `restore_bundle.py` already
+   had but `download_bundle()` didn't. This was the first real,
+   live-verified directory selection either code path had seen -
+   confirming this required updating every fixture/test that had
+   fabricated a directory's zip content without a self-referencing
+   prefix, since that fabricated shape had never actually matched what
+   PVE hands back.
+
+   **Real-world finding (2026-09-02), a Windows single-directory
+   restore:** the job log sat at "Building the restore bundle from 1
+   item(s)." for 282 seconds with no further output and
+   `progress_percent` stuck at 0% the entire time - genuinely just slow
+   (a large directory), not hung, but indistinguishable from one: the
+   whole build phase (download each item, add it to the output bundle)
+   had no progress signal at all, unlike the write-to-guest phase, which
+   already had one. Fixed by threading an `on_item_progress` callback
+   (`ItemProgressFn`) through `build_bundle()` ->
+   `_download_item_to_temp_file()`, called after every downloaded chunk
+   with `(item, bytes_so_far, total_bytes_or_None)` - `total_bytes` comes
+   from PVE's `Content-Length` response header when present, `None`
+   otherwise (not guaranteed present; the log/progress tracking
+   degrades gracefully either way). `_run_bundle_restore()` wires a
+   throttled handler (logs on a new item and at most every ~5s while
+   it's downloading, not once per 61440-byte chunk) that also updates
+   `job.progress_current`/`progress_total` to the real byte counts when
+   the total is known - overwritten once the build phase finishes and
+   the real write-phase total (chunk count, or the DNT-rescaled 3 units)
+   takes over, the same "reassign progress_total per phase" pattern
+   already used through the rest of this function.
+
+   **Real-world finding (2026-09-02), immediately after that shipped:**
+   the progress bar (a UI addition made the same day, driven by
+   `progress_percent`) sat frozen at a flat, unmoving "0%" during a real
+   directory restore even while the log clearly showed active downloads
+   ("Downloading 'AppData': 1904640 bytes so far...") - PVE didn't send
+   a `Content-Length` header for that item, so `on_item_progress` never
+   touched `job.progress_current`/`progress_total`, and those stayed at
+   `RestoreJob`'s field defaults (`current=0`, `total=1`) - which
+   `progress_percent` happily computed as a real-looking "0%" rather
+   than recognizing "no total has ever been set." Root cause was the
+   default itself: `progress_total` defaulted to `1`, not `0`, even
+   though `progress_percent`'s own guard (`progress_total <= 0: return
+   None`) was clearly written to treat `<= 0` as "nothing to report
+   yet." Changed the default to `0` - now genuinely unmeasured phases
+   (freshly queued, or downloading an item with no known size) read
+   `None` and the frontend shows no bar at all, rather than a
+   misleadingly precise "0%" indistinguishable from a hang. No call site
+   needed to change: every real progress_total assignment already
+   overwrites the default outright rather than incrementing off it.
+3b. ~~Frontend~~ — **done**: the Restore button's gate/capability check
+   now reuses `isSingleFile` (unchanged) to branch between `design_a`
+   (a single leaf file - the original fast-path check) and `design_b`
+   (everything else - multiple items, or a single directory, which
+   always needs guest-exec); `count === 0` is the only case that hides
+   it entirely now, not `!isSingleFile`. The modal's description,
+   metadata/verify checkboxes (hidden for a bundle - mtime is automatic
+   via the archive format, verify always runs, not optional), and
+   warning copy all branch the same way. `startRestore()`'s gate
+   loosened from `sel.length !== 1` to `sel.length < 1` and now sends
+   `item[]` (the same JSON shape `download_bundle()`'s multi-select
+   already builds) instead of `filepath`/`name` whenever the selection
+   isn't a single leaf file - a single selected *directory* correctly
+   takes the bundle path too, not just multiple selections.
+4. ~~Live verification against a real guest~~ — **done, 2026-09-02**:
+   a Linux CT multi-item restore (740MB + 800MB + more, via Direct
+   Network Transfer once the disk-space and progress-display bugs found
+   along the way were fixed) and a Windows VM single-directory restore
+   (`AppData`, tar.zst not supported so the zip fallback path, chunked
+   write since no data NIC was configured for that guest) both
+   succeeded end to end - build, transfer, extract, manifest verify,
+   cleanup. Every bug this step's live-testing turned up (directory
+   double-nesting, disk exhaustion, misleading progress/log lines,
+   missing build-phase feedback, the manifest file being left behind)
+   is captured as its own "Real-world finding" entry above, each with
+   its own fix, test, and commit. This closes out §7.7/issue #24's
+   implementation; issues #25 (zero-buffer streaming) and #26
+   (ownership/permissions) remain deliberately deferred follow-ons, not
+   blockers.
+
+   **Real-world finding (2026-09-02), a second Windows bundle
+   restore:** a 4-item selection (small files, single-chunk zip bundle)
+   failed at the concat step - `Could not assemble the restored file:
+   The filename, directory name, or volume label syntax is incorrect` -
+   even with only one chunk to concatenate. Root cause: `_concat_chunks()`
+   still used `cmd /c copy /b "a"+"b" "dest"` for Windows - the exact
+   same unreliable "multiple embedded double-quoted segments on one
+   `cmd /c` line" pattern already found and fixed for
+   `_ensure_destination_dir()`/`_verify_destination_exists()` back on
+   2026-09-01 (docs/plan.md's own §7.5 entry), just never migrated to
+   this function too when that fix landed. Fixed the same way: a small
+   PowerShell script (`[System.IO.File]::Open`/`OpenRead`/`CopyTo`)
+   with single-quoted path literals, replacing `cmd /c copy /b`
+   entirely for Windows concatenation - both the single-file restore
+   path and bundle restore share `_concat_chunks()`, so this fixes both
+   at once. A reminder that "already fixed this exact bug class
+   elsewhere" doesn't mean every call site got the memo - swept the rest
+   of the codebase for the same `cmd /c '<command with 2+ embedded
+   "quoted" segments>'` shape and found one more, not yet live-tested:
+   `restore_network_pull.py`'s `bitsadmin` fetch-tool candidate (Direct
+   Network Transfer, §7.6) built `bitsadmin ... "{url}" "{destination}"`
+   the identical way. Fixed proactively, before it could fail live too -
+   `bitsadmin.exe` is a real executable, so it's invoked as plain argv
+   now (`["bitsadmin", "/transfer", ..., url, destination]`), no
+   `cmd /c` wrapper or quoting involved at all, matching how `certutil`
+   right above it in the same function is already called. The two
+   remaining `cmd /c` uses in this codebase (`_create_scratch_dir()`/
+   `_remove_scratch_dir()`'s `mkdir`/`rmdir`) are plain argv, not a
+   single command string with embedded quotes - a different, unaffected
+   shape - so left as-is. **Confirmed live 2026-09-02, same day:** a
+   repeat of the same Windows bundle restore that hit this bug now
+   succeeds end to end.
+
 ## 8. Stack — and why
 
 - **Backend:** Python, FastAPI — one small process, typed surface for a

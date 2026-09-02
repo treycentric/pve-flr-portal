@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import json
 import tarfile
@@ -14,8 +15,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException
 
-from . import auth, pve_client
-from .auth import SessionData
+from . import (
+    auth,
+    guest_agent,
+    guest_browse,
+    pve_client,
+    restore_bundle,
+    restore_download,
+    restore_jobs,
+    restore_runner,
+)
+from .auth import SessionData, ensure_fresh_ticket
+from .restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 from .version import REPO_URL, __version__
 
 app = FastAPI(title="pve-flr-portal")
@@ -183,6 +194,7 @@ async def index(request: Request, task: str | None = None, session: SessionData 
             "guest_vmid": guest_vmid,
             "guest_type": guest_type,
             "guest_label": guest_label,
+            "guest_json": json.dumps({"type": guest_type, "vmid": guest_vmid, "label": guest_label}),
             "groups_json": json.dumps(groups),
             "current_identity": session.username,
             "app_version": __version__,
@@ -228,7 +240,9 @@ async def browse(request: Request, volume: str, filepath: str = "/", session: Se
         leaf = bool(entry.get("leaf", True))
         text = entry.get("text", "")
         entry["download_name"] = text + (".zip" if not leaf else "")
-        entry["item_json"] = json.dumps({"filepath": entry["filepath"], "leaf": leaf, "name": text})
+        entry["item_json"] = json.dumps(
+            {"filepath": entry["filepath"], "leaf": leaf, "name": text, "mtime": entry["mtime"]}
+        )
         entry["type_label"] = _type_label(entry, at_root)
     entries.sort(key=lambda e: (bool(e.get("leaf", True)), e.get("text", "").lower()))
     return templates.TemplateResponse(
@@ -276,6 +290,271 @@ async def tree(
         "partials/tree_nodes.html",
         {"nodes": nodes, "volume": volume},
     )
+
+
+@app.get("/api/restore-capabilities")
+async def restore_capabilities(
+    type: str,
+    vmid: str,
+    session: SessionData = Depends(auth.get_session),
+):
+    """PH.5 (docs/plan.md §7.5): what push-to-guest restore this specific
+    user can actually use on this specific guest, right now. A caller
+    lacking even VM.Audit on the guest (so /config itself 403s) degrades
+    to "nothing available" rather than a 500 - restore is opt-in extra
+    access on top of the browse permission every visible guest already
+    implies, not something that should ever crash the button. `type` is
+    the app-internal "vm"/"ct" value (matching the task picker/groups
+    elsewhere) - guest_agent.py translates it to PVE's "qemu"/"lxc" API
+    node segment."""
+    if type not in ("vm", "ct"):
+        raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
+    try:
+        caps = await guest_agent.get_restore_capabilities(session, type, vmid)
+    except httpx.HTTPStatusError:
+        reason = "could not read this guest's configuration/permissions"
+        unavailable = guest_agent.PathAvailability(False, reason)
+        caps = guest_agent.RestoreCapabilities(
+            agent_running=False,
+            pve_version_ok=False,
+            guest_os_family=None,
+            design_a=unavailable,
+            design_b=unavailable,
+            verify_supported=False,
+        )
+    return JSONResponse(dataclasses.asdict(caps))
+
+
+@app.post("/api/restore")
+async def restore(
+    volume: str = Form(...),
+    filepath: str | None = Form(None),
+    name: str | None = Form(None),
+    item: list[str] = Form(default=[]),
+    guest_type: str = Form(...),
+    vmid: str = Form(...),
+    guest_label: str = Form(...),
+    snapshot_time: str = Form(...),
+    dest_dir: str = Form(...),
+    overwrite: bool = Form(False),
+    restore_metadata: bool = Form(False),
+    verify: bool = Form(False),
+    source_mtime: int | None = Form(None),
+    session: SessionData = Depends(auth.get_session),
+):
+    """PH.5 restore (docs/plan.md §7.5): submits a background job and
+    returns immediately - the actual write (plus, when needed, multi-
+    chunk assembly / metadata restore / verify) runs out-of-band
+    (restore_runner.run_restore), independent of this request's
+    lifetime; the job itself fails clearly (not this endpoint) if
+    something later turns out to need guest-exec but the account lacks
+    it. `guest_type` is the app-internal "vm"/"ct" value - see
+    restore_capabilities() above.
+
+    Multi-file/directory restore (docs/plan.md §7.7, issue #24): pass
+    one or more `item` fields - the same JSON `{filepath, name, leaf}`
+    shape `download_bundle()` already uses for multi-select - instead
+    of `filepath`/`name`. Exactly one of (`filepath` + `name`) or
+    `item[]` must be given."""
+    if guest_type not in ("vm", "ct"):
+        raise HTTPException(status_code=400, detail=f"Unknown guest type: {guest_type}")
+    if not overwrite:
+        raise HTTPException(status_code=400, detail="Restore must be explicitly confirmed to overwrite the destination")
+
+    is_bundle = bool(item)
+    if is_bundle and (filepath or name):
+        raise HTTPException(status_code=400, detail="Provide either filepath+name or item[], not both")
+    if not is_bundle and not (filepath and name):
+        raise HTTPException(status_code=400, detail="filepath and name are required for a single-file restore")
+
+    # Re-checked server-side regardless of what the UI already showed -
+    # the capability response is a UI convenience, never trusted for the
+    # actual write (docs/plan.md §7.5).
+    caps = await guest_agent.get_restore_capabilities(session, guest_type, vmid)
+
+    if is_bundle:
+        # A bundle restore always needs guest-exec (write + extract +
+        # verify) - there's no Design-A-equivalent single-call fast path
+        # for more than one item, so this checks design_b unconditionally
+        # rather than only when restore_metadata/verify were requested.
+        if not caps.design_b.available:
+            raise HTTPException(
+                status_code=403,
+                detail=caps.design_b.reason or "Multi-file/directory restore needs VM.GuestAgent.Unrestricted",
+            )
+        try:
+            # Extracts only the fields BundleItem needs, same as
+            # download_bundle() above already does for the same `item`
+            # JSON shape - the checkbox value each entry comes from also
+            # carries fields irrelevant here (e.g. `mtime`, used only by
+            # the single-file restore path), so this can't be a strict
+            # BundleItem(**spec) unpack.
+            items = [
+                restore_bundle.BundleItem(
+                    filepath=(spec := json.loads(raw))["filepath"],
+                    name=spec["name"],
+                    leaf=spec.get("leaf", True),
+                )
+                for raw in item
+            ]
+        except (json.JSONDecodeError, TypeError, KeyError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid item entry: {exc}") from None
+
+        destination = dest_dir.rstrip("\\/")
+        job = restore_jobs.manager.create(
+            session=session,
+            guest_type=guest_type,
+            vmid=vmid,
+            guest_label=guest_label,
+            task_name=f"Restore {len(items)} item(s) → {destination}",
+            snapshot_time=snapshot_time,
+            source_volume=volume,
+            source_filepath="",
+            source=f"{len(items)} item(s)",
+            destination=destination,
+            items=items,
+        )
+    else:
+        if not caps.design_a.available:
+            raise HTTPException(
+                status_code=403, detail=caps.design_a.reason or "Restore is not available for this guest"
+            )
+        if (restore_metadata or verify) and not caps.design_b.available:
+            raise HTTPException(
+                status_code=403,
+                detail=caps.design_b.reason or "Restoring metadata/verifying needs VM.GuestAgent.Unrestricted",
+            )
+
+        sep = "\\" if caps.guest_os_family == "windows" else "/"
+        destination = dest_dir.rstrip("\\/") + sep + name
+
+        job = restore_jobs.manager.create(
+            session=session,
+            guest_type=guest_type,
+            vmid=vmid,
+            guest_label=guest_label,
+            task_name=f"Restore {name} → {destination}",
+            snapshot_time=snapshot_time,
+            source_volume=volume,
+            source_filepath=filepath,
+            source=name,
+            destination=destination,
+            restore_metadata=restore_metadata,
+            verify=verify,
+            source_mtime=source_mtime,
+        )
+
+    restore_jobs.manager.submit(job, lambda j: restore_runner.run_restore(j, restore_jobs.manager))
+    return JSONResponse(job.to_dict())
+
+
+@app.get("/api/restore-jobs")
+async def restore_jobs_list(session: SessionData = Depends(auth.get_session)):
+    """PH.5 (docs/plan.md §7.5): the running-jobs indicator's data source,
+    polled from the top bar. Jobs are visible to any logged-in user, not
+    scoped per-requester - a single-admin homelab tool with one shared
+    task list, same as the rest of this design."""
+    return JSONResponse([job.to_dict() for job in restore_jobs.manager.list_jobs()])
+
+
+@app.get("/api/restore-jobs/{job_id}")
+async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.get_session)):
+    """A single job's full detail, including its step-by-step log
+    (restore_runner.py's job.log() calls) - kept out of the list endpoint
+    above to keep that one light on every poll; fetched on demand when a
+    user opens the log viewer for one specific job."""
+    job = restore_jobs.manager.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such restore job")
+    return JSONResponse(job.to_detail_dict())
+
+
+@app.post("/api/restore-jobs/{job_id}/cancel")
+async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.get_session)):
+    job = restore_jobs.manager.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such restore job")
+    restore_jobs.manager.cancel(job_id)
+    return JSONResponse(job.to_dict())
+
+
+@app.get("/api/restore-downloads/{token}")
+async def restore_download_fetch(token: str):
+    """Design C (docs/plan.md §7.6, issue #22) - not yet reachable from a
+    live restore (nothing mints a token yet; that's a later step). The
+    endpoint a Design C bootstrap script's `curl`/`Invoke-WebRequest`/etc.
+    fetches its file from, once wired in. Deliberately **not** gated by
+    `Depends(auth.get_session)` - the guest has no PVE session and must
+    never be handed one; the single-use token minted by
+    restore_download.mint_token() is the only credential here, consumed
+    on first use regardless of outcome (restore_download.py's docstring).
+    Re-streams from PVE using the *job's own* session snapshot, the same
+    one restore_runner.py already uses for the rest of that job's work -
+    never the requester's, since the requester is the guest, not a
+    logged-in user. Except for a bundle restore's already-built local
+    bundle file (docs/plan.md §7.7, issue #24) - `token.local_path`, set
+    only in that case - which is streamed straight off local disk
+    instead, since a bundle isn't something PVE's file-restore API can
+    hand back as one item."""
+    token_info = restore_download.consume_token_full(token)
+    if token_info is None:
+        raise HTTPException(status_code=404, detail="This download link is invalid, already used, or has expired")
+    job = restore_jobs.manager.get(token_info.job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such restore job")
+
+    if token_info.local_path is not None:
+        local_path = Path(token_info.local_path)
+
+        async def local_body():
+            with local_path.open("rb") as f:
+                while chunk := f.read(DEFAULT_CHUNK_SIZE_BYTES):
+                    yield chunk
+
+        return StreamingResponse(local_body(), media_type="application/octet-stream")
+
+    await ensure_fresh_ticket(job.session)
+    client, response = await pve_client.open_download(job.session, job.source_volume, job.source_filepath, tar=False)
+
+    async def body():
+        try:
+            async for chunk in response.aiter_bytes():
+                yield chunk
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+    media_type = response.headers.get("content-type", "application/octet-stream")
+    return StreamingResponse(body(), media_type=media_type)
+
+
+@app.get("/api/restore-browse")
+async def restore_browse(
+    type: str,
+    vmid: str,
+    path: str = "",
+    session: SessionData = Depends(auth.get_session),
+):
+    """PH.5 (docs/plan.md §7.5): lists subdirectories inside the guest via
+    guest-exec, so the restore destination can be browsed rather than
+    typed blind. Needs VM.GuestAgent.Unrestricted - there's no dedicated
+    QGA directory-listing command - so this is gated on design_b, same as
+    metadata restore/verify, and re-checked here regardless of what the
+    capabilities response already showed."""
+    if type not in ("vm", "ct"):
+        raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
+    caps = await guest_agent.get_restore_capabilities(session, type, vmid)
+    if not caps.design_b.available:
+        raise HTTPException(
+            status_code=403, detail=caps.design_b.reason or "Browsing this guest's filesystem is not available"
+        )
+    try:
+        result = await guest_browse.list_directories(session, type, vmid, caps.guest_os_family, path or None)
+    except guest_browse.UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except (httpx.HTTPStatusError, guest_browse.ListingError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    return JSONResponse(result)
 
 
 @app.get("/api/download")
@@ -337,9 +616,17 @@ async def download_bundle(
             await response.aclose()
             await client.aclose()
         if is_dir:
+            # PVE's own zip for a directory already roots every entry
+            # under the directory's own name (e.g. "Downloads/file.txt"
+            # for a "Downloads" selection) - confirmed live 2026-09-02
+            # (a doubled "Downloads/Downloads" in a restored bundle) -
+            # so info.filename is used as-is, not re-prefixed with
+            # item_name on top of what's already there.
             with zipfile.ZipFile(io.BytesIO(content)) as sub:
                 for info in sub.infolist():
-                    entries.append((f"{item_name}/{info.filename}", sub.read(info.filename)))
+                    if info.is_dir():
+                        continue
+                    entries.append((info.filename, sub.read(info.filename)))
         else:
             entries.append((item_name, content))
 

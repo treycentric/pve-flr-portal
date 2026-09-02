@@ -1,0 +1,258 @@
+"""PH.5: capability detection for push-to-guest restore
+(docs/plan.md §7.5). Answers "which restore paths can this guest and
+this user actually use right now" from four independent, empirically-
+checked facts - never an OS-family guess:
+
+- The VM config's own `agent` flag (is QGA wired up at all).
+- The guest agent's own `agent/info` response (wraps QMP `guest-info`),
+  whose `supported_commands[]` says what the agent itself allows -
+  ground truth for whether guest-exec is blocked, confirmed per-guest
+  rather than assumed from the guest OS family.
+- The caller's own `VM.GuestAgent.*` privileges on this guest
+  (`/access/permissions`) - confirmed set, from the Proxmox
+  access-control patch that introduced them: Audit, FileRead,
+  FileWrite, FileSystemMgmt, Unrestricted. Only Unrestricted covers
+  guest-exec; there is no narrower "exec" privilege.
+- The PVE version - 8 only has the coarse VM.Monitor, no granular
+  VM.GuestAgent.* at all, so restore is unavailable there regardless
+  of the other three checks.
+
+Design A ("quick restore") needs only FileWrite. Design B ("full
+restore" - anything needing guest-exec: multi-chunk concatenation,
+metadata restore, checksum verify) needs Unrestricted. Reading
+agent/info itself needs Audit, so a caller with none of the five
+grants gets a clean "unavailable", not a bubbled-up 403.
+"""
+from dataclasses import dataclass
+
+import httpx
+
+from .auth import SessionData, pve_headers
+from .config import settings
+from .guest_agent_lock import call_with_retries, guest_agent_command
+from .pve_client import api_node_type
+
+_API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
+
+_MIN_GUESTAGENT_PRIVS_PVE_VERSION = 9
+
+
+@dataclass(frozen=True)
+class PathAvailability:
+    available: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RestoreCapabilities:
+    agent_running: bool
+    pve_version_ok: bool
+    guest_os_family: str | None  # "windows" | "linux" | "bsd" | "macos" | None (unknown)
+    design_a: PathAvailability
+    design_b: PathAvailability
+    verify_supported: bool  # sha256-via-guest-exec verification available (implies design_b)
+
+
+def _guest_os_family(osinfo: dict | None) -> str | None:
+    if not osinfo:
+        return None
+    # get-osinfo's "id" is the closest thing to a stable machine-readable
+    # family marker; kernel-name is a Windows/Linux/... fallback.
+    os_id = (osinfo.get("id") or "").lower()
+    kernel = (osinfo.get("kernel-name") or "").lower()
+    if "windows" in os_id or "windows" in kernel or "mswin" in kernel:
+        return "windows"
+    if "darwin" in os_id or "darwin" in kernel:
+        return "macos"
+    if "bsd" in os_id or "bsd" in kernel:
+        return "bsd"
+    if os_id or "linux" in kernel:
+        return "linux"
+    return None
+
+
+def _command_enabled(supported_commands: list[dict], name: str) -> bool | None:
+    """None means "not reported" - agent/info's supported_commands isn't
+    guaranteed to enumerate every command on every QGA version, so absence
+    isn't the same as confirmed-disabled."""
+    for entry in supported_commands or []:
+        if entry.get("name") == name:
+            return bool(entry.get("enabled"))
+    return None
+
+
+def parse_capabilities(
+    *,
+    vm_config: dict | None,
+    agent_info: dict | None,
+    permissions: dict | None,
+    pve_version_major: int | None,
+    osinfo: dict | None = None,
+) -> RestoreCapabilities:
+    """Pure function: builds the capability decision from already-fetched
+    raw API responses. Kept separate from the async fetching below so the
+    decision logic is unit-testable without a live PVE/guest."""
+    agent_flag = (vm_config or {}).get("agent")
+    agent_configured = bool(agent_flag) and str(agent_flag) not in ("0", "0,enabled=0")
+    agent_running = agent_configured and agent_info is not None
+
+    pve_version_ok = pve_version_major is not None and pve_version_major >= _MIN_GUESTAGENT_PRIVS_PVE_VERSION
+
+    perms = permissions or {}
+    has_file_write = bool(perms.get("VM.GuestAgent.FileWrite")) or bool(perms.get("VM.GuestAgent.Unrestricted"))
+    has_unrestricted = bool(perms.get("VM.GuestAgent.Unrestricted"))
+
+    supported = (agent_info or {}).get("supported_commands", [])
+    file_write_enabled = _command_enabled(supported, "guest-file-write")
+    guest_exec_enabled = _command_enabled(supported, "guest-exec")
+
+    if not pve_version_ok:
+        reason = "PVE 8 has no granular VM.GuestAgent.* privileges (VM.Monitor is all-or-nothing)"
+        design_a = PathAvailability(False, reason)
+        design_b = PathAvailability(False, reason)
+    elif not agent_running:
+        reason = "qemu-guest-agent is not enabled or not responding for this guest"
+        design_a = PathAvailability(False, reason)
+        design_b = PathAvailability(False, reason)
+    else:
+        if not has_file_write:
+            design_a = PathAvailability(False, "missing VM.GuestAgent.FileWrite (or .Unrestricted) privilege")
+        elif file_write_enabled is False:
+            design_a = PathAvailability(False, "guest-file-write is disabled in this guest's agent config")
+        else:
+            design_a = PathAvailability(True)
+
+        if not has_unrestricted:
+            design_b = PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege")
+        elif guest_exec_enabled is False:
+            design_b = PathAvailability(False, "guest-exec is disabled in this guest's agent config")
+        else:
+            design_b = PathAvailability(True)
+
+    return RestoreCapabilities(
+        agent_running=agent_running,
+        pve_version_ok=pve_version_ok,
+        guest_os_family=_guest_os_family(osinfo),
+        design_a=design_a,
+        design_b=design_b,
+        verify_supported=design_b.available,
+    )
+
+
+async def _get_agent_json(
+    client: httpx.AsyncClient, vmid: str, url: str, headers: dict, *, retry: bool
+) -> dict | None:
+    """Fetches one agent/* endpoint, tolerating failure as "no info
+    available" rather than propagating. Runs under guest_agent_lock's
+    per-vmid lock (serializes this app's own overlapping requests) and
+    retries via call_with_retries (rides out a legitimate busy response
+    from something else using the same channel) - see guest_agent_lock's
+    module docstring for the full rationale on both. `retry=False` (used
+    for get-osinfo, which only feeds a display nicety, nothing gating)
+    makes a single attempt."""
+    async def fetch():
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.json()["data"]
+
+    async with guest_agent_command(vmid):
+        try:
+            return await call_with_retries(fetch, attempts=3 if retry else 1)
+        except httpx.HTTPError:
+            return None
+
+
+def _extract_ip_addresses(network_interfaces: list[dict] | None) -> list[str]:
+    """Flattens QGA's network-get-interfaces response (one entry per NIC,
+    each with its own ip-addresses list) down to a plain list of address
+    strings - loopback excluded, since it can never match a configured
+    data-NIC subnet and would just be noise for Design C's
+    select_data_nic() (docs/plan.md §7.6, issue #22) to skip over."""
+    addresses = []
+    for iface in network_interfaces or []:
+        for entry in iface.get("ip-addresses") or []:
+            ip = entry.get("ip-address")
+            if ip and not ip.startswith("127.") and ip != "::1":
+                addresses.append(ip)
+    return addresses
+
+
+async def get_guest_ip_addresses(session: SessionData, guest_type: str, vmid: str) -> list[str]:
+    """Design C (docs/plan.md §7.6, issue #22): the guest's own reported
+    IP(s), via QGA's network-get-interfaces (already-wrapped QMP call, no
+    new PVE API surface) - used to pick which configured data NIC is
+    actually reachable from this guest's subnet. Same
+    tolerate-failure-as-no-info pattern as agent/info and get-osinfo
+    above: a guest that can't be asked (agent not running, caller lacks
+    VM.GuestAgent.Audit, LXC container with no QGA at all) just gets an
+    empty list back, which select_data_nic() correctly treats as "no
+    match" rather than this raising and failing the whole restore over a
+    capability check."""
+    node_type = api_node_type(guest_type)
+    if node_type != "qemu":  # LXC containers have no qemu-guest-agent
+        return []
+    headers = pve_headers(session)
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        data = await _get_agent_json(
+            client, vmid, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/network-get-interfaces", headers, retry=False
+        )
+    result = (data or {}).get("result") if isinstance(data, dict) else None
+    return _extract_ip_addresses(result)
+
+
+async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: str) -> RestoreCapabilities:
+    """Live orchestration: fetches the four raw facts, then hands them to
+    parse_capabilities(). agent/info and get-osinfo failures (guest agent
+    not running, or the caller lacking VM.GuestAgent.Audit) are treated as
+    "no info available" rather than propagated - a missing grant should
+    degrade to "unavailable", not a 500. `guest_type` is the app-internal
+    "vm"/"ct" value (matching the rest of the app - task picker, groups,
+    etc.), translated to PVE's "qemu"/"lxc" API node segment here."""
+    node_type = api_node_type(guest_type)
+    headers = pve_headers(session)
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        config_resp = await client.get(
+            f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/config", headers=headers
+        )
+        config_resp.raise_for_status()
+        vm_config = config_resp.json()["data"]
+
+        perms_resp = await client.get(
+            f"{_API_ROOT}/access/permissions", params={"path": f"/vms/{vmid}"}, headers=headers
+        )
+        perms_resp.raise_for_status()
+        # Confirmed live (docs/plan.md §7.5): the response nests the
+        # privilege dict under the path key itself, even with a single
+        # `path` filter given - e.g. {"/vms/202": {"VM.GuestAgent...": 1}},
+        # not a flat {"VM.GuestAgent...": 1}. Unwrap it here so
+        # parse_capabilities() can stay a simple flat-dict lookup.
+        permissions = perms_resp.json()["data"].get(f"/vms/{vmid}", {})
+
+        version_resp = await client.get(f"{_API_ROOT}/version", headers=headers)
+        version_resp.raise_for_status()
+        version_str = str(version_resp.json()["data"].get("version", ""))
+        pve_version_major = None
+        if version_str:
+            try:
+                pve_version_major = int(version_str.split(".")[0])
+            except ValueError:
+                pve_version_major = None
+
+        agent_info = None
+        osinfo = None
+        if node_type == "qemu":
+            agent_info = await _get_agent_json(
+                client, vmid, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/info", headers, retry=True
+            )
+            osinfo_data = await _get_agent_json(
+                client, vmid, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/get-osinfo", headers, retry=False
+            )
+            osinfo = osinfo_data.get("result") if osinfo_data else None
+
+    return parse_capabilities(
+        vm_config=vm_config,
+        agent_info=agent_info,
+        permissions=permissions,
+        pve_version_major=pve_version_major,
+        osinfo=osinfo,
+    )

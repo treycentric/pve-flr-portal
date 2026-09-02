@@ -13,6 +13,17 @@ APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_USER="pveflr"
 SERVICE_NAME="pve-flr-portal"
 
+# Git's "dubious ownership" safety check (CVE-2022-24765) rejects git
+# commands against a repo it doesn't consider safely owned - confirmed
+# live 2026-09-01 under an unprivileged LXC container, where a `pct exec`
+# root shell's git still tripped this against a root-owned clone. --system
+# (not --global) so this holds regardless of which user runs git here -
+# root today, but also $APP_USER after the chown below changes this
+# directory's actual owner, and either way for every future `git pull`
+# a redeploy (`cd $APP_DIR && git pull && systemctl restart
+# pve-flr-portal`) would otherwise trip the exact same error on.
+git config --system --add safe.directory "$APP_DIR"
+
 echo "==> Installing OS packages"
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip

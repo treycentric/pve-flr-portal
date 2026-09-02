@@ -6,6 +6,7 @@ so nothing here touches the network. Auth is bypassed by overriding the
 unauthenticated path.
 """
 
+import asyncio
 import io
 import zipfile
 
@@ -126,6 +127,510 @@ def test_tree_lists_only_directories(client, monkeypatch):
     assert "file.txt" not in resp.text
 
 
+def test_restore_capabilities_rejects_unknown_guest_type(client):
+    resp = client.get("/api/restore-capabilities", params={"type": "bogus", "vmid": "133"})
+    assert resp.status_code == 400
+
+
+def test_restore_capabilities_returns_capability_json(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        assert guest_type == "vm"
+        assert vmid == "133"
+        return guest_agent.RestoreCapabilities(
+            agent_running=True,
+            pve_version_ok=True,
+            guest_os_family="linux",
+            design_a=guest_agent.PathAvailability(True),
+            design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
+            verify_supported=False,
+        )
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["agent_running"] is True
+    assert body["design_a"] == {"available": True, "reason": None}
+    assert body["design_b"]["available"] is False
+    assert "Unrestricted" in body["design_b"]["reason"]
+
+
+def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monkeypatch):
+    from backend import guest_agent
+
+    async def boom(session, guest_type, vmid):
+        raise httpx.HTTPStatusError(
+            "x",
+            request=httpx.Request("GET", "http://x"),
+            response=httpx.Response(403, request=httpx.Request("GET", "http://x")),
+        )
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", boom)
+    resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["design_a"]["available"] is False
+    assert body["design_b"]["available"] is False
+    assert body["design_a"]["reason"]
+
+
+def _available_caps(**overrides):
+    from backend import guest_agent
+
+    defaults = dict(
+        agent_running=True,
+        pve_version_ok=True,
+        guest_os_family="windows",
+        design_a=guest_agent.PathAvailability(True),
+        design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
+        verify_supported=False,
+    )
+    defaults.update(overrides)
+    return guest_agent.RestoreCapabilities(**defaults)
+
+
+def _restore_form(**overrides):
+    defaults = dict(
+        volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        filepath="L2V0Yy9ob3N0cw==",
+        name="hosts",
+        guest_type="vm",
+        vmid="133",
+        guest_label="web (133)",
+        snapshot_time="2026-08-30T14:48:06Z",
+        dest_dir="C:\\Windows\\Temp",
+        overwrite="true",
+    )
+    defaults.update(overrides)
+    return defaults
+
+
+def test_restore_submits_a_queued_job(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        # submit() launches this as a real asyncio task in the running
+        # TestClient event loop - keep it inert so the test only asserts
+        # on the synchronous "job was queued" response, not job completion.
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    resp = client.post("/api/restore", data=_restore_form())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert body["destination"] == "C:\\Windows\\Temp\\hosts"
+    assert restore_jobs.manager.get(body["id"]) is not None
+
+
+def test_restore_rejects_unknown_guest_type(client):
+    resp = client.post("/api/restore", data=_restore_form(guest_type="bogus"))
+    assert resp.status_code == 400
+
+
+def test_restore_requires_explicit_overwrite_confirmation(client):
+    resp = client.post("/api/restore", data=_restore_form(overwrite="false"))
+    assert resp.status_code == 400
+
+
+def test_restore_blocked_when_capability_unavailable(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_a=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.post("/api/restore", data=_restore_form())
+    assert resp.status_code == 403
+    assert "FileWrite" in resp.json()["detail"]
+
+
+def test_restore_requires_either_filepath_name_or_item(client):
+    resp = client.post("/api/restore", data=_restore_form(filepath=None, name=None))
+    assert resp.status_code == 400
+    assert "required" in resp.json()["detail"]
+
+
+def test_restore_rejects_both_filepath_name_and_item_together(client):
+    form = _restore_form()
+    form["item"] = ['{"filepath": "abc==", "name": "etc", "leaf": false}']
+    resp = client.post("/api/restore", data=form)
+    assert resp.status_code == 400
+    assert "not both" in resp.json()["detail"]
+
+
+def test_restore_bundle_submits_a_queued_job(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    form = _restore_form(filepath=None, name=None, dest_dir="/home/user/restore")
+    form["item"] = [
+        '{"filepath": "L2V0Yw==", "name": "etc", "leaf": false}',
+        '{"filepath": "L2hvbWUvZmlsZQ==", "name": "file", "leaf": true}',
+    ]
+    resp = client.post("/api/restore", data=form)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert body["destination"] == "/home/user/restore"  # no filename appended - it's a bundle target dir
+    assert body["source"] == "2 item(s)"
+
+    job = restore_jobs.manager.get(body["id"])
+    assert job is not None
+    assert len(job.items) == 2
+    assert job.items[0].name == "etc"
+    assert job.items[0].leaf is False
+    assert job.items[1].leaf is True
+
+
+def test_restore_bundle_tolerates_extra_fields_in_item_json(client, monkeypatch):
+    # Confirmed live 2026-09-01: the checkbox value each `item` entry
+    # comes from (main.py's own item_json, browse()) always includes
+    # `mtime` too - only relevant to the single-file restore path, but
+    # still present on every multi-select entry. A strict
+    # BundleItem(**spec) unpack broke on it; this must tolerate it, the
+    # same way download_bundle()'s own item-parsing already does for
+    # this exact JSON shape.
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    form = _restore_form(filepath=None, name=None, dest_dir="/home/user/restore")
+    form["item"] = ['{"filepath": "L2V0Yw==", "name": "etc", "leaf": false, "mtime": 1700000000, "size": null}']
+    resp = client.post("/api/restore", data=form)
+
+    assert resp.status_code == 200
+    job = restore_jobs.manager.get(resp.json()["id"])
+    assert job.items[0].filepath == "L2V0Yw=="
+    assert job.items[0].name == "etc"
+    assert job.items[0].leaf is False
+
+
+def test_restore_bundle_checks_design_b_not_design_a(client, monkeypatch):
+    # A bundle restore always needs guest-exec - design_a availability
+    # (the single-call fast path) is irrelevant to it.
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(
+            design_a=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"),
+            design_b=guest_agent.PathAvailability(True),
+        )
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    form = _restore_form(filepath=None, name=None)
+    form["item"] = ['{"filepath": "abc==", "name": "f", "leaf": true}']
+
+    from backend import restore_jobs, restore_runner
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    resp = client.post("/api/restore", data=form)
+    assert resp.status_code == 200  # design_a being unavailable doesn't block a bundle restore
+    assert restore_jobs.manager.get(resp.json()["id"]) is not None
+
+
+def test_restore_bundle_blocked_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    form = _restore_form(filepath=None, name=None)
+    form["item"] = ['{"filepath": "abc==", "name": "f", "leaf": true}']
+    resp = client.post("/api/restore", data=form)
+    assert resp.status_code == 403
+    assert "Unrestricted" in resp.json()["detail"]
+
+
+def test_restore_bundle_rejects_invalid_item_json(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    form = _restore_form(filepath=None, name=None)
+    form["item"] = ["not json"]
+    resp = client.post("/api/restore", data=form)
+    assert resp.status_code == 400
+
+
+def test_restore_uses_posix_separator_for_non_windows_guest(client, monkeypatch):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    resp = client.post("/api/restore", data=_restore_form(dest_dir="/etc", name="hosts"))
+    assert resp.status_code == 200
+    assert resp.json()["destination"] == "/etc/hosts"
+
+
+def test_restore_blocked_when_metadata_requested_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        # design_a available, design_b not - only FileWrite, no Unrestricted
+        return _available_caps(design_a=guest_agent.PathAvailability(True))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.post("/api/restore", data=_restore_form(restore_metadata="true"))
+    assert resp.status_code == 403
+    assert "Unrestricted" in resp.json()["detail"]
+
+
+def test_restore_blocked_when_verify_requested_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_a=guest_agent.PathAvailability(True))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.post("/api/restore", data=_restore_form(verify="true"))
+    assert resp.status_code == 403
+
+
+def test_restore_passes_metadata_verify_and_mtime_through_to_the_job(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(
+            design_a=guest_agent.PathAvailability(True), design_b=guest_agent.PathAvailability(True)
+        )
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    resp = client.post(
+        "/api/restore", data=_restore_form(restore_metadata="true", verify="true", source_mtime="1700000000")
+    )
+    assert resp.status_code == 200
+    job = restore_jobs.manager.get(resp.json()["id"])
+    assert job.restore_metadata is True
+    assert job.verify is True
+    assert job.source_mtime == 1700000000
+
+
+def test_restore_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.post("/api/restore", data=_restore_form(), follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
+def test_restore_jobs_list_returns_submitted_job(client, monkeypatch):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    resp = client.get("/api/restore-jobs")
+    assert resp.status_code == 200
+    jobs = resp.json()
+    assert any(j["id"] == submitted["id"] for j in jobs)
+
+
+def test_restore_jobs_list_empty_when_none_submitted(client):
+    resp = client.get("/api/restore-jobs")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_restore_jobs_list_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-jobs", follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
+def test_restore_jobs_cancel_unknown_job_404s(client):
+    resp = client.post("/api/restore-jobs/does-not-exist/cancel")
+    assert resp.status_code == 404
+
+
+def test_restore_jobs_detail_returns_log(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    # Mutate the job directly rather than relying on the (monkeypatched,
+    # inert) background task's own scheduling timing.
+    job = restore_jobs.manager.get(submitted["id"])
+    job.log("did a thing")
+
+    resp = client.get(f"/api/restore-jobs/{submitted['id']}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert any("did a thing" in line for line in body["log"])
+    assert body["id"] == submitted["id"]
+
+    # The list endpoint's dict shape stays lean - no log field.
+    assert "log" not in job.to_dict()
+
+
+def test_restore_jobs_detail_unknown_job_404s(client):
+    resp = client.get("/api/restore-jobs/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_restore_jobs_detail_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-jobs/x", follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
+def test_restore_jobs_cancel_marks_flag_and_returns_job(client, monkeypatch):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def hangs(job, jobs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", hangs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    resp = client.post(f"/api/restore-jobs/{submitted['id']}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == submitted["id"]
+
+
+def test_restore_jobs_cancel_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.post("/api/restore-jobs/x/cancel", follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
+def test_restore_capabilities_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"}, follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
+def test_restore_browse_rejects_unknown_guest_type(client):
+    resp = client.get("/api/restore-browse", params={"type": "bogus", "vmid": "133"})
+    assert resp.status_code == 400
+
+
+def test_restore_browse_blocked_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        reason = "missing VM.GuestAgent.Unrestricted privilege"
+        return _available_caps(design_b=guest_agent.PathAvailability(False, reason))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133"})
+    assert resp.status_code == 403
+    assert "Unrestricted" in resp.json()["detail"]
+
+
+def test_restore_browse_returns_listing(client, monkeypatch):
+    from backend import guest_agent, guest_browse
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True), guest_os_family="linux")
+
+    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+        assert guest_os_family == "linux"
+        assert path == "/etc"
+        return {"path": "/etc", "parent": "/", "separator": "/", "entries": [{"name": "nginx", "path": "/etc/nginx"}]}
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_browse, "list_directories", fake_list)
+    resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133", "path": "/etc"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["entries"] == [{"name": "nginx", "path": "/etc/nginx"}]
+
+
+def test_restore_browse_unsafe_path_returns_400(client, monkeypatch):
+    from backend import guest_agent, guest_browse
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+        raise guest_browse.UnsafePathError("nope")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_browse, "list_directories", fake_list)
+    resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133", "path": "/tmp/;rm"})
+    assert resp.status_code == 400
+
+
+def test_restore_browse_listing_error_returns_502(client, monkeypatch):
+    from backend import guest_agent, guest_browse
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+        raise guest_browse.ListingError("No such file or directory")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_browse, "list_directories", fake_list)
+    resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133"})
+    assert resp.status_code == 502
+
+
+def test_restore_browse_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-browse", params={"type": "vm", "vmid": "133"}, follow_redirects=False)
+    assert resp.status_code in (302, 401)
+
+
 def test_download_streams_with_content_disposition(client, monkeypatch):
     class FakeResponse:
         def __init__(self):
@@ -184,6 +689,42 @@ def test_download_bundle_builds_zip(client, monkeypatch):
         assert zf.read("a.txt") == b"file-content"
 
 
+def test_download_bundle_directory_entries_are_not_double_prefixed(client, monkeypatch):
+    # Confirmed live 2026-09-02 (in the sibling restore-to-guest code
+    # path, restore_bundle.py): PVE's own zip for a directory selection
+    # already roots every entry under the directory's own name, so
+    # re-prefixing with item_name on top of that doubles it
+    # ("Downloads/Downloads/..."). This endpoint had the same bug.
+    dir_zip_buf = io.BytesIO()
+    with zipfile.ZipFile(dir_zip_buf, mode="w") as zf:
+        zf.writestr("Downloads/photo.jpg", b"family photo bytes")
+
+    async def fake_open(session, volume, filepath, tar=False):
+        class FakeResponse:
+            async def aread(self):
+                return dir_zip_buf.getvalue()
+
+            async def aclose(self):
+                pass
+
+        class FakeClient:
+            async def aclose(self):
+                pass
+
+        return FakeClient(), FakeResponse()
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open)
+    item = '{"filepath": "abc", "name": "Downloads", "leaf": false}'
+    resp = client.get(
+        "/api/download-bundle",
+        params={"volume": "v", "item": [item], "name": "bundle", "format": "zip"},
+    )
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        assert zf.namelist() == ["Downloads/photo.jpg"]
+        assert zf.read("Downloads/photo.jpg") == b"family photo bytes"
+
+
 def test_login_page_renders_even_if_realms_fail(monkeypatch):
     async def boom():
         raise RuntimeError("pve down")
@@ -237,3 +778,103 @@ def test_logout_clears_cookie_and_session(session_data):
     assert resp.status_code == 303
     assert resp.headers["location"] == "/login"
     assert "session-xyz" not in auth._sessions
+
+
+# --- Design C download endpoint (docs/plan.md §7.6, issue #22) -----------
+# Not yet reachable from a live restore - these exercise the endpoint
+# directly with a job created straight through the manager and a token
+# minted straight through restore_download, the way a future bootstrap
+# script's fetch would eventually reach it.
+
+
+def _make_download_job(session_data):
+    from backend import restore_jobs
+
+    return restore_jobs.manager.create(
+        session=session_data,
+        guest_type="vm",
+        vmid="133",
+        guest_label="web (133)",
+        task_name="Restore hosts -> /etc/hosts",
+        snapshot_time="2026-08-30T14:48:06Z",
+        source_volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        source_filepath="L2V0Yy9ob3N0cw==",
+        source="/etc/hosts",
+        destination="/etc/hosts",
+    )
+
+
+def test_restore_download_fetch_requires_no_auth_but_a_valid_token(session_data, monkeypatch):
+    """The endpoint is deliberately unauthenticated - the guest has no
+    PVE session - so this uses a bare TestClient with no session cookie
+    at all, unlike the other tests here."""
+    from backend import restore_download
+
+    job = _make_download_job(session_data)
+    token = restore_download.mint_token(job.id, ttl_seconds=60)
+
+    async def fake_open_download(session, volume, filepath, tar=False):
+        assert session is job.session
+        return httpx.AsyncClient(), httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open_download)
+    with TestClient(main.app) as c:
+        resp = c.get(f"/api/restore-downloads/{token}")
+    assert resp.status_code == 200
+    assert resp.content == b"hello world"
+
+
+def test_restore_download_fetch_serves_local_file_for_a_bundle_restore(session_data, monkeypatch, tmp_path):
+    # 2026-09-02, docs/plan.md §7.7: a bundle's Direct Network Transfer
+    # mints a token with local_path set - the endpoint must stream that
+    # file straight off disk, never touching PVE at all.
+    from backend import restore_download
+
+    job = _make_download_job(session_data)
+    bundle_path = tmp_path / "bundle.tar.gz"
+    bundle_path.write_bytes(b"bundle content" * 100)
+    token = restore_download.mint_token(job.id, ttl_seconds=60, local_path=str(bundle_path))
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("should never call PVE's own download API for a local-path token")
+
+    monkeypatch.setattr(pve_client, "open_download", fail_if_called)
+    with TestClient(main.app) as c:
+        resp = c.get(f"/api/restore-downloads/{token}")
+    assert resp.status_code == 200
+    assert resp.content == b"bundle content" * 100
+
+
+def test_restore_download_fetch_unknown_token_404s():
+    with TestClient(main.app) as c:
+        resp = c.get("/api/restore-downloads/not-a-real-token")
+    assert resp.status_code == 404
+
+
+def test_restore_download_fetch_is_single_use(session_data, monkeypatch):
+    from backend import restore_download
+
+    job = _make_download_job(session_data)
+    token = restore_download.mint_token(job.id, ttl_seconds=60)
+
+    async def fake_open_download(session, volume, filepath, tar=False):
+        return httpx.AsyncClient(), httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open_download)
+    with TestClient(main.app) as c:
+        first = c.get(f"/api/restore-downloads/{token}")
+        second = c.get(f"/api/restore-downloads/{token}")
+    assert first.status_code == 200
+    assert second.status_code == 404
+
+
+def test_restore_download_fetch_404s_if_the_job_no_longer_exists(session_data):
+    from backend import restore_download, restore_jobs
+
+    job = _make_download_job(session_data)
+    token = restore_download.mint_token(job.id, ttl_seconds=60)
+    restore_jobs.manager.clear()  # job gone, token still "valid" on its own terms
+
+    with TestClient(main.app) as c:
+        resp = c.get(f"/api/restore-downloads/{token}")
+    assert resp.status_code == 404

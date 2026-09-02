@@ -135,6 +135,35 @@ body {
   overflow: hidden;
 }
 
+.modal-box--resizable {
+  /* Taken out of .modal-overlay's flex-centering flow deliberately -
+     mixing flexbox auto-centering with CSS `resize` on the same element
+     fights itself as the box grows (the flex container keeps
+     re-centering against the changing size while the box is also being
+     manually resized), and could push the box outside the viewport.
+     position:fixed + top/left:50% + a translate(-50%,-50%) base offset
+     replicates the centering without flex involved, so resize behaves
+     like resizing any ordinary positioned block. The drag offset (see
+     app.js's startDrag) is a second translate() stacked after it. */
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  resize: both;
+  min-width: 480px;
+  min-height: 320px;
+  /* Without an explicit starting height, a resize:both box sizes itself
+     to its content by default - which meant a long restore log grew the
+     whole modal instead of scrolling inside it (the log body's flex:1 +
+     overflow:auto below only has something to constrain against once
+     the box itself has a real height). */
+  height: 480px;
+}
+
+.modal-header--draggable {
+  cursor: move;
+  user-select: none;
+}
+
 .modal-header {
   display: flex;
   align-items: center;
@@ -251,8 +280,271 @@ body {
   cursor: pointer;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   background: var(--btn-blue-hover);
+}
+
+.btn-primary:disabled {
+  background: var(--btn-grey-bg);
+  color: var(--disabled-text);
+  cursor: default;
+}
+
+.restore-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 20px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.restore-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.restore-warning {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.restore-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.restore-extra-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.restore-error {
+  margin: 0;
+  color: #c0392b;
+  font-size: 12px;
+}
+
+.restore-success {
+  padding: 20px;
+  margin: 0;
+  color: var(--text);
+}
+
+.restore-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.restore-browse-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--btn-grey-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.restore-browse-nav {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.restore-browse-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.restore-browse-path.is-error {
+  color: #c0392b;
+}
+
+.restore-browse-list {
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 4px 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+.restore-browse-status {
+  margin: 6px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.restore-browse-entry {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 5px 4px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  border-radius: 3px;
+}
+
+.restore-browse-entry:hover {
+  background: var(--tree-hover);
+}
+
+.restore-browse-selected {
+  margin: 0;
+  padding: 6px 8px 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.restore-mode-toggle {
+  display: inline-flex;
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+  background: var(--btn-grey-bg);
+}
+
+.restore-mode-btn {
+  border: none;
+  background: none;
+  padding: 4px 14px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 999px;
+}
+
+.restore-mode-btn.is-active {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.restore-jobs-trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin-left: 4px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.restore-jobs-trigger:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.restore-jobs-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.restore-jobs-spinner {
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: var(--link-alt);
+  animation: restore-jobs-spin 0.9s linear infinite;
+}
+
+@keyframes restore-jobs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.restore-jobs-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--link-alt);
+  color: #ffffff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.modal-overlay--log {
+  /* Layers above the Restore Task modal, which can stay open underneath
+     it - both use the same z-index:100 base from .modal-overlay. */
+  z-index: 110;
+}
+
+.restore-log-body {
+  flex: 1;
+  overflow: auto;
+  padding: 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.restore-log-lines {
+  margin: 0;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.restore-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 160px;
+}
+
+.restore-progress-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.restore-progress-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--btn-blue-bg);
+  transition: width 0.3s ease;
+}
+
+.restore-progress-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  min-width: 2.5em;
+  text-align: right;
 }
 
 .user-menu-trigger {
