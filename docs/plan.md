@@ -1461,6 +1461,112 @@ config an admin actually runs), firewall rule examples, and the
 user-facing provisioning documentation (README.md section or
 `docs/network-provisioning.md` — not `docs/dev/`, see above).
 
+### 7.7 Multi-file / directory restore-to-guest (not yet built)
+
+Restore-to-guest is single-file only today, end to end: `POST
+/api/restore`'s `filepath`/`name` fields are singular, `RestoreJob`'s
+`source_volume`/`source_filepath`/`source`/`destination` are all
+singular, and the frontend gates the Restore button on
+`sel.length !== 1`. A real restore need is often "this whole directory"
+or "these several files/folders together", not one file at a time -
+this section designs that, covering both individual multi-selected
+files and whole directories (mixed together in one selection, matching
+how multi-select download already works). "A directory" here means the
+**full recursive tree** under it, not one flat level - already how
+`leaf: false` entries behave in `download_bundle()` today (`tar=1`
+against a directory returns everything PVE finds under it, nested
+subdirectories included; the existing code already iterates every entry
+the resulting sub-archive contains, not just its top level), so this
+falls out of the existing mechanism rather than needing new design.
+
+**Mechanism: reuse the existing multi-select convention and PVE's
+`tar=1` capability, both already proven by `/api/download-bundle`.**
+That endpoint already accepts `item: list[str] = Query(...)`, each a
+JSON `{filepath, name, leaf}` (`leaf: false` = a directory, fetched from
+PVE with `tar=1` and re-expanded), and already builds zip/tar.gz/tar.zst
+bundles from a mixed multi-file/directory selection. The restore path
+reuses that same `item` request shape and the same directory-via-`tar=1`
+mechanism - no new PVE API surface - but **does not reuse
+`download_bundle()`'s implementation as-is**: that function buffers the
+entire bundle in memory (`content = await response.aread()`,
+`io.BytesIO()`) - a known, already-documented limitation acceptable for
+an ad-hoc human-triggered browser download, but exactly the class of
+bug this session just spent considerable effort fixing for single-file
+restore (§7.6's memory-streaming finding above) - reusing it here would
+reintroduce that same risk at potentially *larger* scale (a whole
+directory, not one file). The restore path's bundle-building has to be
+streaming-aware from the start, the same discipline §7.6 landed on.
+
+**Guest-side extraction format: try native first, fall back
+server-side, decided by actually probing the guest (2026-09-01 design
+review).** Whether a guest's `tar` can genuinely decompress `.zst` is
+not safely assumed (recent Windows ships a libarchive-based `tar.exe`
+that plausibly supports it, but "plausibly" isn't good enough per this
+project's whole established practice of verifying rather than guessing
+at guest-tool behavior - `certutil`'s output shape, `copy /b`'s exit
+code, `cmd /c`'s quoting, `wmic`'s slowness were all real, live-only
+surprises). So this is a genuine runtime capability check, same spirit
+as `detect_fetch_tool()`:
+1. Probe the guest (a cheap guest-exec check, ideally by actually
+   attempting to decompress a tiny known-good `.tar.zst` test blob
+   rather than trusting a `--version`/`--help` string, once what's
+   reliable is confirmed against real guests) for whether its `tar` can
+   extract `.zst`.
+2. **If yes:** stream PVE's raw `.tar.zst` straight through - scratch-
+   write (chunked) or Direct Network Transfer, the exact same
+   mechanisms §7.5/§7.6 already built, just carrying a tar stream
+   instead of a single file's bytes - and extract in-guest via `tar -xf`
+   (Windows or Linux). No server-side repackaging; most efficient path.
+2. **If no:** the app re-bundles server-side into a more universally
+   extractable format before anything reaches the guest - `.zip`
+   (Windows: `Expand-Archive`, always available, no PowerShell version
+   dependency) or `.tar.gz` (Linux/BSD: gzip support in `tar` predates
+   zstd by decades, essentially universal). Reuses
+   `download_bundle()`'s zip/tar.gz-building *logic* (stdlib `zipfile`/
+   `tarfile`, the `zstandard` package already in `requirements.txt` to
+   decompress PVE's `.tar.zst` first) but rebuilt to stream rather than
+   buffer whole - see above.
+
+**Verify: an embedded manifest, checked entirely guest-side, not an
+app-side hash map (2026-09-01 design review, refined from the
+single-file per-file-hash idea).** While the app streams through and
+builds the bundle (one pass, whichever format), it computes each
+entry's SHA256 as it's read - already the streaming-hash discipline
+§7.6's memory fix established, extended to multiple entries - and
+writes those hashes into the bundle itself as one extra manifest entry
+(`sha256sum`-compatible format: `<hash>  <relative-path>` per line, the
+format Linux's own `sha256sum -c` already understands natively). After
+extraction, **one** guest-exec call verifies everything at once,
+entirely inside the guest: `sha256sum -c <manifest>` on Linux/BSD (a
+single command, no app-side comparison needed - matches the channel-
+efficiency lesson this whole feature has been built around: one guest-
+exec round trip, not N); a short PowerShell script reading the same
+manifest format and comparing via `Get-FileHash` on Windows. The app
+only needs the pass/fail summary (exit code / parsed output) from that
+one call, never a retained per-file hash map of its own. Metadata
+(mtime) restore continues to be free - both tar and zip preserve each
+entry's original modified time in their own format, restored
+automatically by extraction, no extra guest-exec step (true for zip
+too, not just tar - standard unzip/`Expand-Archive` behavior).
+
+**Data model:** `RestoreJob`'s single `source_volume`/`source_filepath`
+become a list of selected items (the same `item` JSON shape as
+`download_bundle()`, for one consistent multi-select convention across
+both download and restore); `destination` becomes a target *directory*
+the bundle extracts into, rather than one specific file path.
+
+**Not yet decided:** exact wire format for the embedded manifest inside
+each bundle format (trivial for tar - just another entry; zip needs the
+same, just via `zipfile.writestr()`); the precise guest-exec probe for
+"can this tar decompress zstd" (needs live-testing against a real guest
+to land on something reliable, same as every other guest-tool
+assumption in this project); how `RestoreJobManager`/the UI represent
+progress across a multi-file bundle (one coarse "building the bundle /
+transferring / extracting / verifying" sequence, most likely, rather
+than per-file granularity - not yet designed). Filed as a follow-on to
+#5, scoped as an extension of PH.5 rather than a new phase since it
+completes restore-to-guest rather than standing apart from it.
+
 ## 8. Stack — and why
 
 - **Backend:** Python, FastAPI — one small process, typed surface for a
