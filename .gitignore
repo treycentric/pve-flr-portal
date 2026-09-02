@@ -9,6 +9,8 @@ venv/
 # Local data
 *.db
 *.sqlite3
+# Issue #30: default PFR_DATA_DIR for a source checkout
+/data/
 
 # Env / secrets
 .env

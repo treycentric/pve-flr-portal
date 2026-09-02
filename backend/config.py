@@ -31,6 +31,10 @@ def _float(name: str, default: float) -> float:
     return float(val) if val else default
 
 
+def _path(name: str, default: str) -> Path:
+    return Path(os.environ.get(name) or default).expanduser()
+
+
 _THEMES = ("auto", "light", "dark", "proxmox-dark")
 
 
@@ -112,6 +116,16 @@ class Settings:
     # can still switch themes from the user menu.
     default_theme: str
 
+    # Issue #30: one writable directory for the app's own small, durable
+    # state. Nothing writes here yet - it exists so the features that
+    # will need persistence (#29's per-user prefs, #14's session store,
+    # PH.6's dir_cache) share one deploy-provisioned location instead of
+    # each inventing their own. Default "data" for a source checkout;
+    # the systemd unit and docker-compose point it at a real volume.
+    # Still no database and no extra service (CLAUDE.md) - at most a
+    # single small file written from the request path.
+    data_dir: Path
+
 
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
@@ -127,4 +141,17 @@ settings = Settings(
     restore_data_nic_port=_int("RESTORE_DATA_NIC_PORT", 0),
     restore_long_running_exec_timeout_seconds=_float("RESTORE_LONG_RUNNING_EXEC_TIMEOUT_SECONDS", 1800.0),
     default_theme=_theme("DEFAULT_THEME", "auto"),
+    data_dir=_path("PFR_DATA_DIR", "data"),
 )
+
+
+def ensure_data_dir() -> Path:
+    """Create PFR_DATA_DIR if it doesn't exist yet, and return it.
+
+    Called from run.py rather than at import time, so `pytest` and a bare
+    `uvicorn backend.main:app` don't leave a stray directory behind. Any
+    feature that persists state should also call this before its first
+    write.
+    """
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    return settings.data_dir

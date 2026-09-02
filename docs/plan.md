@@ -214,6 +214,18 @@ PVE API on each request; there is no SQLite file, no indexer, and no
 scheduled poll. See the callout below and §6 for what changed and what
 (if anything) is still worth building.
 
+**Persistence location (issue #30).** There is now one designated,
+deploy-provisioned writable directory — `PFR_DATA_DIR`, default `data`
+under the app dir, `/var/lib/pve-flr-portal` via the systemd unit's
+`StateDirectory`, a named Docker volume at `/app/data`. **Nothing writes
+to it yet**; it exists so the features that will need durable state
+(§6's `dir_cache`, a per-user preferences file for #29, moving the
+session store off the in-memory dict for #14) share one location rather
+than each inventing storage. The stateless-by-default design is
+unchanged — still no database and no extra service, at most a single
+small file written from the request path. `config.ensure_data_dir()`
+creates it; `run.py` calls that before serving.
+
 ### The indexer / scheduled PBS poll — obsolete, not pending
 
 The original design had a background job polling **PBS's** admin API for

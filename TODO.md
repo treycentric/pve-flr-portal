@@ -68,12 +68,13 @@ an admin-wide `DEFAULT_THEME` env default. Making a user's choice
 *follow them across browsers/devices* needs a small persisted
 `{pve-username -> preferences}` store on the backend — a single JSON
 file written from the request path (same "one file, no background job,
-no service" shape as PH.6), at a configurable path on a mounted volume.
-This is the app's first server-side write, so it also needs the
-persistence/volume story sorted (relates to #14, "move session store
-off in-memory") and a `docs/plan.md` / `CLAUDE.md` amendment recording
-the new persisted state. Deferred out of #29 deliberately to keep that
-change small. **Needs a GitHub issue opened.**
+no service" shape as PH.6). The storage *location* is now sorted:
+`PFR_DATA_DIR` (#30). Remaining is the feature itself — a
+`preferences.json` under `config.ensure_data_dir()`, read at page
+render and written from a small `POST /api/preferences` (or similar),
+and the `docs/plan.md` §4 note that state is actually being written.
+Deferred out of #29 deliberately to keep that change small.
+**Still needs its own GitHub issue.**
 
 ## Known limitations / tech debt
 

@@ -8,6 +8,10 @@ services:
     volumes:
       - ./.env:/app/.env:ro
       - ./certs:/app/certs
+      # Issue #30: the app's own state dir (PFR_DATA_DIR, default
+      # /app/data in the container). Named volume so it survives
+      # `docker compose down` + a rebuild.
+      - pve-flr-data:/app/data
     restart: unless-stopped
 
   # Design C (docs/plan.md §7.6, issue #22) local testing only - not
@@ -38,5 +42,9 @@ services:
     volumes:
       - ./.env:/app/.env:ro
       - ./certs:/app/certs
+      - pve-flr-data:/app/data
     restart: unless-stopped
     profiles: ["hostnet"]
+
+volumes:
+  pve-flr-data:

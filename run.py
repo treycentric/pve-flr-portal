@@ -23,7 +23,7 @@ from pathlib import Path
 
 import uvicorn
 
-from backend.config import settings
+from backend.config import ensure_data_dir, settings
 from backend.restore_network_pull import parse_data_nics
 from backend.tls import ensure_self_signed_cert
 
@@ -53,6 +53,7 @@ async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> N
 
 
 if __name__ == "__main__":
+    ensure_data_dir()  # issue #30 - provision the app-state dir before serving
     cert_path = Path(settings.tls_cert_file)
     key_path = Path(settings.tls_key_file)
     ensure_self_signed_cert(cert_path, key_path, common_name=settings.pve_host)
