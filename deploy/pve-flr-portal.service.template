@@ -11,7 +11,13 @@ WorkingDirectory=__APP_DIR__
 ExecStart=__APP_DIR__/.venv/bin/python run.py
 Restart=on-failure
 RestartSec=5
-# Self-signed cert + venv live under the app dir; nothing else needed.
+# Issue #30: app-state dir, created + owned by this service's user.
+# %S is systemd's state-directory root (/var/lib), so this resolves to
+# /var/lib/pve-flr-portal - persists across restarts and redeploys.
+StateDirectory=pve-flr-portal
+Environment=PFR_DATA_DIR=%S/pve-flr-portal
+# Self-signed cert + venv live under the app dir (StateDirectory above
+# is made writable automatically).
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=__APP_DIR__

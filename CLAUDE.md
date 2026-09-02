@@ -32,7 +32,10 @@ open phase; PH.6, a directory-listing cache, is optional/perf-only).
 directory listing are read live from the PVE API per request. See
 `docs/plan.md` §4 for why the originally-planned indexer/poll turned
 out unnecessary, and §6 for the one piece of persistence still on the
-table (deferred, optional PH.6).
+table (deferred, optional PH.6). Issue #30 added a designated writable
+directory (`PFR_DATA_DIR`, provisioned by the systemd unit / a Docker
+volume) for future small state — nothing writes there yet, and it does
+not change the "no database, no extra service" rule.
 
 **PBS is required.** Everything hangs off Proxmox's File Restore
 feature, which per Proxmox is PBS-only — plain `vzdump` backups on
@@ -59,14 +62,16 @@ scope (`docs/plan.md` §2).
   sent to the browser.
 - Prefer the simplest thing that works for a single-admin homelab tool:
   no build pipeline, no SPA framework, no extra services beyond the one
-  backend process (and, only if PH.6 lands, a single SQLite cache file
-  written from the request path — never a background job).
+  backend process. Durable state, when a feature genuinely needs it,
+  goes in `PFR_DATA_DIR` (issue #30) as a single small file written from
+  the request path — never a background job, never a separate service,
+  and SQLite only if PH.6's directory-listing cache is taken.
 
 ## Stack (decided, see `docs/plan.md` §8 for why)
 - Backend: Python, FastAPI
-- Storage: none today (stateless). Reserved for a lazily-populated
-  directory-listing cache only, if PH.6 is taken (schema in
-  `docs/plan.md` §6)
+- Storage: none written today (stateless). `PFR_DATA_DIR` (issue #30)
+  is the provisioned location for future small state — e.g. PH.6's
+  lazily-populated directory-listing cache (schema in `docs/plan.md` §6)
 - Frontend: server-rendered HTML + htmx + Alpine.js
 - Timeline widget: hand-rolled inline SVG (no charting library — nothing
   off the shelf fits "date axis, one dot per discrete event, drag to

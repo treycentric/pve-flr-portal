@@ -46,6 +46,18 @@ also keeps many retained recovery points per guest cheaply via dedup,
 which is what makes a *timeline* worth scrubbing; a handful of rotated
 vzdump files would barely fill one.)
 
+**Both VMs and LXC containers are supported**, everywhere — the same
+`file-restore` endpoint serves both (the volid's second path segment is
+`vm` or `ct`, §3), and the app carries the type through grouping, the
+task picker, browse/download, and PH.5 push-to-guest (which for a CT
+uses the `lxc` node type / `pct`-style exec rather than QGA; live-
+verified against a real Linux CT — see §7.5). CT file-restore should
+generally be *faster* than VM — per Proxmox's design a CT backup is a
+`pxar` archive read directly, where a VM backup boots an ephemeral
+helper VM to mount the block image (the ~3s cold cost measured in §3
+was against a VM). Not separately timed against a CT here yet; worth a
+line in §3 once it is.
+
 On feature parity with ABB: **build browse-and-download first, matched
 closely to the ABB layout. Treat "restore directly into the original,
 running VM" as a distinct later phase (PH.5) with its own design.**
@@ -213,6 +225,18 @@ the snapshot list and every directory listing are fetched live from the
 PVE API on each request; there is no SQLite file, no indexer, and no
 scheduled poll. See the callout below and §6 for what changed and what
 (if anything) is still worth building.
+
+**Persistence location (issue #30).** There is now one designated,
+deploy-provisioned writable directory — `PFR_DATA_DIR`, default `data`
+under the app dir, `/var/lib/pve-flr-portal` via the systemd unit's
+`StateDirectory`, a named Docker volume at `/app/data`. **Nothing writes
+to it yet**; it exists so the features that will need durable state
+(§6's `dir_cache`, a per-user preferences file for #29, moving the
+session store off the in-memory dict for #14) share one location rather
+than each inventing storage. The stateless-by-default design is
+unchanged — still no database and no extra service, at most a single
+small file written from the request path. `config.ensure_data_dir()`
+creates it; `run.py` calls that before serving.
 
 ### The indexer / scheduled PBS poll — obsolete, not pending
 
@@ -2047,6 +2071,38 @@ options given the hard PVE dependency. Considered:
   Docker host) rather than wanting another PVE guest, and doubles as
   the fastest local dev/test loop. See `Dockerfile` /
   `docker-compose.yml` at the repo root.
+
+### Persistence, and backing up the portal itself
+
+**What lives only on the deployment's own disk** (LXC rootfs / Docker
+volumes), i.e. what a fresh install or a container *recreate* loses:
+
+| Path | What | Rebuildable? |
+|---|---|---|
+| `.env` | config (no credentials — per-user PVE login, §7.1) | yes, from `.env.example` |
+| `certs/` (`/…/certs`, or the `certs` bind mount) | the HTTPS cert + **private key** | yes — regenerated self-signed on next start (§7.3), or drop your own back in |
+| `PFR_DATA_DIR` (`/var/lib/pve-flr-portal` under systemd, the `pve-flr-data` Docker volume) | app state (issue #30) | **empty today** — nothing writes here yet |
+
+Not persisted anywhere by design: the in-memory session store
+(`backend/auth.py`) — a backend restart or container reboot logs
+everyone out (accepted tradeoff, issue #14).
+
+**Can the portal's own LXC be backed up with PBS?** Yes — PBS backs up
+LXC (CT) guests as well as VMs, and this container is nothing special.
+Notes:
+
+- No database and no long-lived on-disk state, so a crash-consistent
+  backup (PBS `snapshot` or `stop` mode) is perfectly fine — there is
+  nothing that needs quiescing. The worst a `snapshot`-mode backup can
+  catch mid-write is a half-written preferences/cache file once those
+  features exist; both are designed to be safe to discard and rebuild.
+- The backup will contain `certs/` — including the TLS **private key**.
+  For the default self-signed homelab cert this is low-stakes, but if
+  you install a real CA-issued key, treat that backup (and the PBS
+  datastore holding it) accordingly.
+- Pointing this portal at the **same** PBS/PVE that backs up its own
+  container is fine — the dependency is only "PVE API reachable at
+  request time", there's no bootstrapping loop.
 
 **Deployment target is Python 3.11** (Debian 12 bookworm's default),
 not the dev machine's 3.14 — this mattered concretely once: the

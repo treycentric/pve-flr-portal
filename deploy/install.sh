@@ -46,6 +46,9 @@ fi
 chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
 
 echo "==> Installing systemd unit"
+# The unit's StateDirectory=pve-flr-portal makes systemd create + own
+# /var/lib/pve-flr-portal (PFR_DATA_DIR, issue #30) on first start - no
+# mkdir/chown needed here, and `systemctl enable --now` below triggers it.
 sed "s#__APP_DIR__#${APP_DIR}#g; s#__APP_USER__#${APP_USER}#g" \
   "$APP_DIR/deploy/pve-flr-portal.service.template" > "/etc/systemd/system/${SERVICE_NAME}.service"
 

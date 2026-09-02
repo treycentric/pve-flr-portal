@@ -1,4 +1,5 @@
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,28 @@ def test_theme_rejects_unknown_value(monkeypatch):
     monkeypatch.setenv("DEFAULT_THEME", "solarized")
     with pytest.raises(RuntimeError, match="DEFAULT_THEME"):
         config._theme("DEFAULT_THEME", "auto")
+
+
+def test_path_parsing_and_default(monkeypatch):
+    monkeypatch.delenv("SOME_DIR", raising=False)
+    assert config._path("SOME_DIR", "data") == Path("data")
+    monkeypatch.setenv("SOME_DIR", "/srv/state")
+    assert config._path("SOME_DIR", "data") == Path("/srv/state")
+
+
+def test_data_dir_default_and_ensure_creates_it(tmp_path, monkeypatch):
+    target = tmp_path / "nested" / "state"
+    monkeypatch.setenv("PFR_DATA_DIR", str(target))
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.settings.data_dir == target
+        assert not target.exists()  # not created at import time
+        assert reloaded.ensure_data_dir() == target
+        assert target.is_dir()
+        reloaded.ensure_data_dir()  # idempotent, no error
+    finally:
+        monkeypatch.delenv("PFR_DATA_DIR", raising=False)
+        importlib.reload(config)
 
 
 def test_get_required_missing_raises(monkeypatch):
