@@ -1461,7 +1461,7 @@ config an admin actually runs), firewall rule examples, and the
 user-facing provisioning documentation (README.md section or
 `docs/network-provisioning.md` — not `docs/dev/`, see above).
 
-### 7.7 Multi-file / directory restore-to-guest (not yet built)
+### 7.7 Multi-file / directory restore-to-guest
 
 Restore-to-guest is single-file only today, end to end: `POST
 /api/restore`'s `filepath`/`name` fields are singular, `RestoreJob`'s
@@ -1805,11 +1805,21 @@ since it completes restore-to-guest rather than standing apart from it.
    already builds) instead of `filepath`/`name` whenever the selection
    isn't a single leaf file - a single selected *directory* correctly
    takes the bundle path too, not just multiple selections.
-4. **Not started.** Live verification against a real guest - the
-   tar.zst capability probe, the fallback rebuild path, and the
-   embedded-manifest verify script (both shells) are all unverified
-   live, same caution as everything else in this feature area before
-   it's actually been run against a real guest.
+4. ~~Live verification against a real guest~~ — **done, 2026-09-02**:
+   a Linux CT multi-item restore (740MB + 800MB + more, via Direct
+   Network Transfer once the disk-space and progress-display bugs found
+   along the way were fixed) and a Windows VM single-directory restore
+   (`AppData`, tar.zst not supported so the zip fallback path, chunked
+   write since no data NIC was configured for that guest) both
+   succeeded end to end - build, transfer, extract, manifest verify,
+   cleanup. Every bug this step's live-testing turned up (directory
+   double-nesting, disk exhaustion, misleading progress/log lines,
+   missing build-phase feedback, the manifest file being left behind)
+   is captured as its own "Real-world finding" entry above, each with
+   its own fix, test, and commit. This closes out §7.7/issue #24's
+   implementation; issues #25 (zero-buffer streaming) and #26
+   (ownership/permissions) remain deliberately deferred follow-ons, not
+   blockers.
 
 ## 8. Stack — and why
 
