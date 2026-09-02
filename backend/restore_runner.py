@@ -517,10 +517,11 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         )
         bundle_size_bytes = output_path.stat().st_size
         expected_chunks = chunk_count(bundle_size_bytes, DEFAULT_CHUNK_SIZE_BYTES)
-        job.log(
-            f"Bundle built ({fmt.value}, {len(manifest)} file(s), {bundle_size_bytes} bytes) - "
-            f"writing it to the guest in {expected_chunks} chunk(s)."
-        )
+        # Doesn't claim *how* it'll reach the guest yet - Direct Network
+        # Transfer is tried next and, when eligible, skips the chunked
+        # write entirely; the log line below that actually says "N
+        # chunk(s)" only fires on the path that's really taking them.
+        job.log(f"Bundle built ({fmt.value}, {len(manifest)} file(s), {bundle_size_bytes} bytes).")
 
         # Already known exactly - the bundle is fully materialized on
         # local disk at this point, unlike the single-file path's
