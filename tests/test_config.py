@@ -45,6 +45,21 @@ def test_float_parsing_and_default(monkeypatch):
     assert config._float("SOME_FLOAT", default=1.0) == 1.0
 
 
+def test_theme_parsing_default_and_case(monkeypatch):
+    monkeypatch.delenv("DEFAULT_THEME", raising=False)
+    assert config._theme("DEFAULT_THEME", "auto") == "auto"
+    monkeypatch.setenv("DEFAULT_THEME", "Dark")
+    assert config._theme("DEFAULT_THEME", "auto") == "dark"
+    monkeypatch.setenv("DEFAULT_THEME", "Proxmox-Dark")
+    assert config._theme("DEFAULT_THEME", "auto") == "proxmox-dark"
+
+
+def test_theme_rejects_unknown_value(monkeypatch):
+    monkeypatch.setenv("DEFAULT_THEME", "solarized")
+    with pytest.raises(RuntimeError, match="DEFAULT_THEME"):
+        config._theme("DEFAULT_THEME", "auto")
+
+
 def test_get_required_missing_raises(monkeypatch):
     monkeypatch.delenv("NEEDED", raising=False)
     with pytest.raises(RuntimeError, match="NEEDED"):

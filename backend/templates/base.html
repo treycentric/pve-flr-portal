@@ -4,6 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Proxmox File Level Restore Portal{% endblock %}</title>
+  {# Theme (issue #29): resolve the persisted choice before first paint so
+     there is no light-to-dark flash. Kept in sync afterwards by userMenu
+     in app.js - the resolution logic is duplicated there on purpose. #}
+  <script>
+    (function () {
+      var d = "{{ default_theme }}";
+      window.__PFR_DEFAULT_THEME__ = d;
+      try {
+        var t = localStorage.getItem('pfr_theme');
+        if (['light', 'dark', 'proxmox-dark', 'auto'].indexOf(t) === -1) t = d;
+        var resolved = t;
+        if (t === 'auto') {
+          resolved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', resolved);
+      } catch (e) {}
+    })();
+  </script>
   <link rel="icon" type="image/png" href="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}">
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
   <script src="/static/app.js?v={{ static_version('app.js') }}"></script>
