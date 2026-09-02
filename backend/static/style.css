@@ -514,6 +514,34 @@ body {
   color: var(--text);
 }
 
+.restore-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.restore-progress-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.restore-progress-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--btn-blue-bg);
+  transition: width 0.3s ease;
+}
+
+.restore-progress-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  min-width: 2.5em;
+  text-align: right;
+}
+
 .user-menu-trigger {
   position: relative;
   display: flex;
