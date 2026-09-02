@@ -6,7 +6,7 @@ import zipfile
 import pytest
 import zstandard
 
-from backend import pve_client
+from backend import pve_client, restore_bundle
 from backend.restore_bundle import (
     MANIFEST_NAME,
     BundleFormat,
@@ -255,6 +255,53 @@ async def test_build_bundle_zip_contains_every_item_plus_manifest(session_data, 
         assert f"{hashlib.sha256(hosts).hexdigest()}  hosts" in manifest_text
         assert f"{hashlib.sha256(passwd).hexdigest()}  etc/passwd" in manifest_text
         assert f"{hashlib.sha256(shadow).hexdigest()}  etc/shadow" in manifest_text
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_deletes_each_item_temp_file_as_it_is_consumed(session_data, monkeypatch, tmp_path):
+    # Confirmed live 2026-09-01: downloading every selected item to a
+    # local temp file before building anything ran a real LXC
+    # container's rootfs out of space ("[Errno 28] No space left on
+    # device") on a multi-item selection. This locks in the fix - at
+    # most one item's temp file (plus the growing output bundle) should
+    # ever exist in the working directory at once, not every item's.
+    import os
+
+    a = b"a" * 1000
+    b = b"b" * 1000
+    c = b"c" * 1000
+    _patch_bundle_download(monkeypatch, {"a==": a, "b==": b, "c==": c})
+    items = [
+        BundleItem(filepath="a==", name="a.txt", leaf=True),
+        BundleItem(filepath="b==", name="b.txt", leaf=True),
+        BundleItem(filepath="c==", name="c.txt", leaf=True),
+    ]
+
+    seen_item_file_counts = []
+    tmp_dir_holder = {}
+
+    real_add = restore_bundle._add_item_to_bundle_writer
+
+    def _spying_add(writer, item, local_path, manifest):
+        # Snapshot how many "item-*" temp files exist in the working
+        # directory at the moment each item is actually being added -
+        # should never be more than the one currently being processed.
+        tmp_dir_holder["dir"] = local_path.parent
+        count = sum(1 for p in local_path.parent.iterdir() if p.name.startswith("item-"))
+        seen_item_file_counts.append(count)
+        return real_add(writer, item, local_path, manifest)
+
+    monkeypatch.setattr(restore_bundle, "_add_item_to_bundle_writer", _spying_add)
+
+    output_path, _fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/133/2026-09-01", items, guest_os_family="linux", zst_capable=False
+    )
+    try:
+        assert seen_item_file_counts == [1, 1, 1]  # never more than the one currently being added
+        # And nothing lingers afterward either - just the finished bundle.
+        remaining = os.listdir(tmp_dir_holder["dir"])
+        assert remaining == [output_path.name]
     finally:
         tmp_dir_ctx.cleanup()
 

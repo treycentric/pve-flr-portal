@@ -26,20 +26,27 @@ design and open questions.
 - **`build_extract_command()`/`build_verify_command()`** - the actual
   guest-exec commands per bundle format, mirroring
   `restore_network_pull.build_fetch_command()`'s role for Design C.
-- **`build_bundle()`** - the actual builder: downloads every selected
+- **`build_bundle()`** - the actual builder: downloads each selected
   item to its own local temp file (streamed, never a whole item in
-  memory), then combines them into one output bundle from those local
-  files, in a background thread since `tarfile`/`zipfile` are
-  synchronous APIs. Stages through local temp files rather than a true
-  zero-buffer pipe deliberately (2026-09-01 design review) - simpler
-  and more robust than a hand-rolled sync/async bridge, at the cost of
-  real disk usage proportional to bundle size; the zero-buffer
-  alternative is tracked separately as issue #25, worth building only
-  if staging through disk turns out to actually be a problem once this
-  ships. Every entry - a whole leaf item, or one member inside a
-  fetched directory's zip - streams through in fixed-size pieces during
-  both the download and the archive-building passes, never buffered
-  whole, matching the discipline §7.6's memory fix established.
+  memory) and adds it to the output bundle one item at a time, deleting
+  each item's temp file immediately after it's added - not downloading
+  every item up front the way an earlier version of this did. Confirmed
+  live 2026-09-01 that downloading everything before building anything
+  could exhaust a real LXC container's disk on a multi-item selection
+  (`OSError: [Errno 28] No space left on device`); this way, at most
+  one source item's temp file exists on disk at once, alongside the
+  growing output bundle, not every selected item's worth simultaneously.
+  Stages through local temp files at all rather than a true zero-buffer
+  pipe deliberately (2026-09-01 design review) - simpler and more
+  robust than a hand-rolled sync/async bridge, at the cost of some real
+  disk usage; the zero-buffer alternative is tracked separately as
+  issue #25. `tarfile`/`zipfile` are blocking APIs, so the actual
+  reads/writes run in a background thread (`asyncio.to_thread`) across
+  several separate thread hops, since an async download has to happen
+  between each item's add. Every entry - a whole leaf item, or one
+  member inside a fetched directory's zip - streams through in
+  fixed-size pieces during both passes, never buffered whole, matching
+  the discipline §7.6's memory fix established.
 """
 import asyncio
 import hashlib
@@ -289,45 +296,87 @@ def _add_manifest_to_tar(tf: tarfile.TarFile, manifest: ManifestBuilder) -> None
     tf.addfile(info, io.BytesIO(data))
 
 
-def _build_bundle_sync(
-    items_with_paths: list[tuple[BundleItem, Path]], output_path: Path, fmt: BundleFormat
-) -> ManifestBuilder:
-    """Synchronous - combines every already-downloaded local item into
-    one output bundle at `output_path`, with a manifest of every
-    entry's SHA256 built as each is added, the manifest itself embedded
-    last (has to be, since every other entry's hash has to be known
-    first). Runs inside a background thread (`asyncio.to_thread`, see
-    `build_bundle()`) since `tarfile`/`zipfile` are blocking APIs."""
-    manifest = ManifestBuilder()
-    if fmt == BundleFormat.ZIP:
-        with zipfile.ZipFile(output_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for item, local_path in items_with_paths:
-                if item.leaf:
-                    _add_leaf_to_zip(zf, item.name, local_path, manifest)
-                else:
-                    _add_directory_entries_to_zip(zf, item.name, local_path, manifest)
-            zf.writestr(MANIFEST_NAME, manifest.render())
-        return manifest
+@dataclass
+class _BundleWriter:
+    """Holds whatever open, still-being-written-to handles a given
+    format needs across multiple separate `asyncio.to_thread()` calls -
+    `open`/`add`/`finish` each run as their own thread hop (see
+    `build_bundle()`), so nothing here can rely on a `with` block
+    spanning the whole build the way `zipfile`/`tarfile` are normally
+    used."""
 
+    fmt: BundleFormat
+    zf: zipfile.ZipFile | None = None
+    tf: tarfile.TarFile | None = None
+    compressor: object | None = None  # zstandard stream_writer - only for TAR_ZST
+    raw: object | None = None  # the underlying file handle - only for the tar formats
+
+
+def _open_bundle_writer(output_path: Path, fmt: BundleFormat) -> _BundleWriter:
+    if fmt == BundleFormat.ZIP:
+        return _BundleWriter(fmt=fmt, zf=zipfile.ZipFile(output_path, mode="w", compression=zipfile.ZIP_DEFLATED))
+    # .tar.gz uses tarfile's built-in gzip support; .tar.zst uses the
+    # zstandard package (not stdlib compression.zstd, which is 3.14+
+    # only and won't exist on a normal deployment's Python) - same
+    # reasoning as main.py's download_bundle().
     tar_mode = "w:gz" if fmt == BundleFormat.TAR_GZ else "w|"
-    with output_path.open("wb") as raw:
-        # .tar.gz uses tarfile's built-in gzip support; .tar.zst uses
-        # the zstandard package (not stdlib compression.zstd, which is
-        # 3.14+ only and won't exist on a normal deployment's Python) -
-        # same reasoning as main.py's download_bundle().
-        outer = zstandard.ZstdCompressor().stream_writer(raw, closefd=False) if fmt == BundleFormat.TAR_ZST else raw
-        try:
-            with tarfile.open(fileobj=outer, mode=tar_mode) as tf:
-                for item, local_path in items_with_paths:
-                    if item.leaf:
-                        _add_leaf_to_tar(tf, item.name, local_path, manifest)
-                    else:
-                        _add_directory_entries_to_tar(tf, item.name, local_path, manifest)
-                _add_manifest_to_tar(tf, manifest)
-        finally:
-            if outer is not raw:
-                outer.close()
-    return manifest
+    raw = output_path.open("wb")
+    if fmt == BundleFormat.TAR_ZST:
+        compressor = zstandard.ZstdCompressor().stream_writer(raw, closefd=False)
+        tf = tarfile.open(fileobj=compressor, mode=tar_mode)
+        return _BundleWriter(fmt=fmt, tf=tf, compressor=compressor, raw=raw)
+    return _BundleWriter(fmt=fmt, tf=tarfile.open(fileobj=raw, mode=tar_mode), raw=raw)
+
+
+def _add_item_to_bundle_writer(
+    writer: _BundleWriter, item: BundleItem, local_path: Path, manifest: ManifestBuilder
+) -> None:
+    """Adds one already-downloaded item's local file to the still-open
+    bundle - the caller deletes `local_path` immediately after this
+    returns (`build_bundle()`), so at most one source item's temp file
+    exists on local disk at a time, alongside the growing output bundle
+    - not every selected item's worth at once. Confirmed live
+    2026-09-01: the previous download-everything-then-build approach
+    ran a real LXC container's rootfs out of space
+    (`OSError: [Errno 28] No space left on device`) on a multi-item
+    selection - see docs/plan.md §7.7's finding for the fuller
+    zero-buffer alternative (issue #25) this stops short of."""
+    if writer.fmt == BundleFormat.ZIP:
+        if item.leaf:
+            _add_leaf_to_zip(writer.zf, item.name, local_path, manifest)
+        else:
+            _add_directory_entries_to_zip(writer.zf, item.name, local_path, manifest)
+    else:
+        if item.leaf:
+            _add_leaf_to_tar(writer.tf, item.name, local_path, manifest)
+        else:
+            _add_directory_entries_to_tar(writer.tf, item.name, local_path, manifest)
+
+
+def _finish_bundle_writer(writer: _BundleWriter, manifest: ManifestBuilder) -> None:
+    """Embeds the manifest (has to be last - every other entry's hash
+    has to be known first) and closes every handle `_open_bundle_writer()`
+    opened, in order."""
+    if writer.fmt == BundleFormat.ZIP:
+        writer.zf.writestr(MANIFEST_NAME, manifest.render())
+        writer.zf.close()
+        return
+    _add_manifest_to_tar(writer.tf, manifest)
+    writer.tf.close()
+    if writer.compressor is not None:
+        writer.compressor.close()
+    writer.raw.close()
+
+
+def _abort_bundle_writer(writer: _BundleWriter) -> None:
+    # Best-effort cleanup on the way out after a real error - swallows
+    # its own failures rather than masking whatever actually went wrong.
+    for handle in (writer.zf, writer.tf, writer.compressor, writer.raw):
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
 
 
 async def build_bundle(
@@ -337,22 +386,38 @@ async def build_bundle(
     guest_os_family: str | None,
     zst_capable: bool,
 ) -> tuple[Path, BundleFormat, ManifestBuilder, tempfile.TemporaryDirectory]:
-    """Downloads every selected item (streamed, one piece at a time) to
-    its own local temp file, then builds one output bundle - format
-    chosen by `select_bundle_format()` - from those local files in a
-    background thread. Caller owns the returned `TemporaryDirectory`:
-    keep it alive until the bundle's been fully sent on to the guest,
-    then let it clean itself up (or use it as a context manager)."""
+    """Downloads each selected item (streamed, one piece at a time) to
+    its own local temp file and adds it to the output bundle - format
+    chosen by `select_bundle_format()` - one item at a time, deleting
+    each item's temp file immediately after it's added rather than
+    downloading everything up front: at most one source item's temp
+    file exists on disk at once, alongside the growing output bundle,
+    not every selected item's worth simultaneously (confirmed live
+    2026-09-01 that downloading-everything-first could exhaust a real
+    LXC container's disk on a multi-item selection). `tarfile`/`zipfile`
+    are blocking APIs, so the actual reads/writes run in a background
+    thread (`asyncio.to_thread`) - across several separate thread hops,
+    since a download has to happen (async) between each item's add.
+    Caller owns the returned `TemporaryDirectory`: keep it alive until
+    the bundle's been fully sent on to the guest, then let it clean
+    itself up (or use it as a context manager)."""
     fmt = select_bundle_format(guest_os_family, zst_capable)
     tmp_dir_ctx = tempfile.TemporaryDirectory(prefix="pve-flr-portal-bundle-")
     tmp_dir = Path(tmp_dir_ctx.name)
-
-    items_with_paths = []
-    for item in items:
-        local_path = await _download_item_to_temp_file(session, volume, item, tmp_dir)
-        items_with_paths.append((item, local_path))
-
     extension = {BundleFormat.TAR_ZST: "tar.zst", BundleFormat.TAR_GZ: "tar.gz", BundleFormat.ZIP: "zip"}[fmt]
     output_path = tmp_dir / f"bundle.{extension}"
-    manifest = await asyncio.to_thread(_build_bundle_sync, items_with_paths, output_path, fmt)
+
+    manifest = ManifestBuilder()
+    writer = await asyncio.to_thread(_open_bundle_writer, output_path, fmt)
+    try:
+        for item in items:
+            local_path = await _download_item_to_temp_file(session, volume, item, tmp_dir)
+            try:
+                await asyncio.to_thread(_add_item_to_bundle_writer, writer, item, local_path, manifest)
+            finally:
+                local_path.unlink(missing_ok=True)
+        await asyncio.to_thread(_finish_bundle_writer, writer, manifest)
+    except BaseException:
+        await asyncio.to_thread(_abort_bundle_writer, writer)
+        raise
     return output_path, fmt, manifest, tmp_dir_ctx

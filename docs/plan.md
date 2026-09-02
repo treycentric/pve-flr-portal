@@ -1594,32 +1594,52 @@ since it completes restore-to-guest rather than standing apart from it.
      valid, extractable `.tar.zst` via the real `zstandard`/`tarfile`
      libraries, not just internally self-consistent.
 2. ~~The streaming bundle builder~~ — **done**: `build_bundle()`
-   downloads every selected item (files directly, directories via
+   downloads each selected item (files directly, directories via
    PVE's own default zip encoding - already covering the full recursive
    tree) to its own local temp file (streamed, one piece at a time,
-   never fully in RAM), then `_build_bundle_sync()` combines them into
-   one output bundle - format chosen by `select_bundle_format()`, with
-   the manifest embedded last - synchronously against those already-
-   local files in a background thread (`asyncio.to_thread`), since
-   `tarfile`/`zipfile` are blocking APIs. Staged through local temp
-   files rather than a true zero-buffer `os.pipe()` bridge deliberately
-   (2026-09-01 design review) - simpler, no fragile hand-rolled
-   sync/async pipe to get right without live testing, at the cost of
-   real disk usage proportional to bundle size and some extra latency.
-   That zero-buffer alternative is tracked separately as issue #25, to
-   build only if staging through disk turns out to actually be a
-   problem in practice (disk space, throughput) once this ships and
-   gets used for real. Every entry - a whole leaf item, or one member
-   inside a fetched directory's zip - streams through in fixed-size
-   pieces during both passes (`_HashingReader` lets `tarfile`'s/
-   `zipfile`'s own internal chunked reads double as the manifest hash
-   computation, no second pass over the same content), and directory-
-   marker entries in a source zip are correctly skipped rather than
-   becoming bogus zero-byte manifest lines. Fully round-trip tested
+   never fully in RAM), adds it to the still-open output bundle -
+   format chosen by `select_bundle_format()` - via a background thread
+   (`asyncio.to_thread`, since `tarfile`/`zipfile` are blocking APIs),
+   then deletes that item's temp file immediately before moving to the
+   next item; the manifest is embedded last, once every item has been
+   added. Staged through local temp files rather than a true zero-buffer
+   `os.pipe()` bridge deliberately (2026-09-01 design review) - simpler,
+   no fragile hand-rolled sync/async pipe to get right without live
+   testing, at the cost of real disk usage proportional to bundle size
+   and some extra latency. That zero-buffer alternative is tracked
+   separately as issue #25, to build only if staging through disk turns
+   out to actually be a problem in practice (disk space, throughput)
+   once this ships and gets used for real. Every entry - a whole leaf
+   item, or one member inside a fetched directory's zip - streams
+   through in fixed-size pieces during both passes (`_HashingReader`
+   lets `tarfile`'s/`zipfile`'s own internal chunked reads double as the
+   manifest hash computation, no second pass over the same content), and
+   directory-marker entries in a source zip are correctly skipped rather
+   than becoming bogus zero-byte manifest lines. Fully round-trip tested
    (`tests/test_restore_bundle.py`) against the real `zipfile`/
    `tarfile`/`zstandard` libraries for all three output formats, not
    just internally self-consistent - still not run against a real PVE
    instance or guest.
+
+   **Real-world finding (2026-09-01):** the first implementation of this
+   step downloaded *every* selected item to its own local temp file
+   before starting to build the output bundle at all - so peak local
+   disk usage was (every selected source item combined) + (the full
+   output bundle) at once. Live-tested against a real multi-item
+   selection on the LXC container hosting the app, this exhausted the
+   container's own rootfs (`OSError: [Errno 28] No space left on
+   device`) - exactly the risk issue #25 had already flagged as the
+   cost of staging through disk at all, just worse than necessary: the
+   fix doesn't require the zero-buffer bridge #25 tracks, only
+   interleaving download and build so at most one item's temp file
+   exists alongside the growing output bundle at any moment, rather than
+   every item's. `build_bundle()` was refactored accordingly (the
+   description above reflects the fixed behavior); a regression test
+   (`test_build_bundle_deletes_each_item_temp_file_as_it_is_consumed`)
+   patches the per-item add step to snapshot the temp directory's
+   contents mid-build, confirming no more than one item's temp file
+   exists on disk at a time and nothing but the finished bundle remains
+   once building completes.
 3. ~~Backend wiring~~ — **done**: `RestoreJob` gained an `items:
    list[BundleItem] | None = None` field - `None` (every job created
    before this existed, and every ordinary single-file restore
