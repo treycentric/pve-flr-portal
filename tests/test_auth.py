@@ -29,6 +29,35 @@ async def test_list_realms_sorted():
 
 
 @respx.mock
+async def test_list_realms_retries_then_succeeds(monkeypatch):
+    """A transient failure of /access/domains is retried, not surfaced
+    as an empty dropdown (issue #31)."""
+    monkeypatch.setattr(auth, "_LIST_REALMS_BACKOFF_SECONDS", 0)
+    route = respx.get(f"{API}/access/domains").mock(
+        side_effect=[
+            httpx.ConnectError("boom"),
+            httpx.Response(200, json={"data": [{"realm": "pve"}, {"realm": "pam"}]}),
+        ]
+    )
+    realms = await auth.list_realms()
+    assert [r["realm"] for r in realms] == ["pam", "pve"]
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_list_realms_falls_back_to_pam_pve_when_pve_unreachable(monkeypatch, caplog):
+    """Retries exhausted -> the two realms PVE always ships, never an
+    empty list (issue #31)."""
+    monkeypatch.setattr(auth, "_LIST_REALMS_BACKOFF_SECONDS", 0)
+    route = respx.get(f"{API}/access/domains").mock(side_effect=httpx.ConnectError("down"))
+    with caplog.at_level("WARNING"):
+        realms = await auth.list_realms()
+    assert [r["realm"] for r in realms] == ["pam", "pve"]
+    assert route.call_count == auth._LIST_REALMS_ATTEMPTS
+    assert "fallback" in caplog.text.lower()
+
+
+@respx.mock
 async def test_login_success_stores_session():
     respx.post(f"{API}/access/ticket").mock(
         return_value=httpx.Response(

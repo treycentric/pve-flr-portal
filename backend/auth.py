@@ -11,6 +11,8 @@ Session store is a plain in-memory dict: this is a single-process
 homelab tool (CLAUDE.md - no extra services), so a backend restart
 logging everyone out is an acceptable tradeoff.
 """
+import asyncio
+import logging
 import secrets
 import time
 from dataclasses import dataclass
@@ -20,11 +22,27 @@ from fastapi import HTTPException, Request
 
 from .config import settings
 
+logger = logging.getLogger(__name__)
+
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 
 # Refresh a session's PVE ticket once it's this old, well inside the ~2h
 # PVE ticket lifetime.
 _TICKET_REFRESH_AGE_SECONDS = 90 * 60
+
+# list_realms() retry/fallback (issue #31). A transient failure of the
+# unauthenticated /access/domains call must not leave the login page
+# with an empty realm <select> - the browser omits an option-less
+# select from the POST entirely, which surfaces as a baffling
+# "realm Field required" 422.
+_LIST_REALMS_ATTEMPTS = 3
+_LIST_REALMS_BACKOFF_SECONDS = 0.5
+# The two realms every PVE install ships with - used only when PVE
+# can't be reached to enumerate them for real.
+_FALLBACK_REALMS = (
+    {"realm": "pam", "comment": "Linux PAM standard authentication"},
+    {"realm": "pve", "comment": "Proxmox VE authentication server"},
+)
 
 
 @dataclass
@@ -48,11 +66,30 @@ def pve_headers(session: SessionData) -> dict[str, str]:
 
 async def list_realms() -> list[dict]:
     """Unauthenticated - PVE's own login page calls this the same way to
-    populate its realm dropdown."""
-    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
-        resp = await client.get(f"{_API_ROOT}/access/domains")
-        resp.raise_for_status()
-        return sorted(resp.json()["data"], key=lambda d: d["realm"])
+    populate its realm dropdown.
+
+    Retries a few times on failure, then returns the pam/pve fallback
+    rather than raising or returning an empty list (issue #31): the
+    login page must always have at least one selectable realm.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _LIST_REALMS_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+                resp = await client.get(f"{_API_ROOT}/access/domains")
+                resp.raise_for_status()
+                return sorted(resp.json()["data"], key=lambda d: d["realm"])
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            last_exc = exc
+            if attempt < _LIST_REALMS_ATTEMPTS:
+                await asyncio.sleep(_LIST_REALMS_BACKOFF_SECONDS * attempt)
+
+    logger.warning(
+        "Could not fetch realms from PVE after %d attempts (%s); using the pam/pve fallback",
+        _LIST_REALMS_ATTEMPTS,
+        last_exc,
+    )
+    return [dict(r) for r in _FALLBACK_REALMS]
 
 
 async def login(username: str, password: str) -> str:

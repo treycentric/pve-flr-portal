@@ -434,6 +434,14 @@ comes back in the same shape PBS's admin API gives, since the UI's
   own backend, which in turn calls PVE's `POST /access/ticket`
   (`{username: "user@realm", password}`). Success returns a `ticket`
   and a `CSRFPreventionToken`.
+- The realm `<select>` is populated from the unauthenticated
+  `GET /access/domains` (`auth.list_realms()`). That call **must not**
+  yield an empty dropdown: an option-less `<select name="realm">` is
+  dropped from the POST entirely, and the form fails validation with a
+  cryptic "realm Field required" (issue #31). So `list_realms()` retries
+  a few times, then returns the `pam`/`pve` fallback every PVE install
+  has, and never raises; the login template only restores a saved realm
+  from `localStorage` if it still matches a listed option.
 - The backend keeps a small server-side session store (in-memory dict
   is fine — no new service, per CLAUDE.md's "no extra services"
   constraint) keyed by an opaque session id, holding `{username,

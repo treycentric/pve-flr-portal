@@ -74,14 +74,10 @@ async def unauthorized_handler(request: Request, exc: HTTPException):
 
 @app.get("/login")
 async def login_page(request: Request):
-    # Broad except deliberate: the login page must always render even if
-    # PVE itself is unreachable (connection error, DNS failure, etc, not
-    # just a non-2xx response) - it just falls back to an empty realm
-    # dropdown rather than a 500.
-    try:
-        realms = await auth.list_realms()
-    except Exception:
-        realms = []
+    # list_realms() handles its own failures - it retries, then returns
+    # the pam/pve fallback (issue #31) - so it never raises here and
+    # never yields an empty dropdown.
+    realms = await auth.list_realms()
     return templates.TemplateResponse(request, "login.html", {"error": None, "realms": realms})
 
 
@@ -93,14 +89,10 @@ async def login_submit(
     try:
         session_id = await auth.login(full_username, password)
     except HTTPException:
-        try:
-            realms = await auth.list_realms()
-        except Exception:
-            realms = []
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": "Invalid username or password", "realms": realms},
+            {"error": "Invalid username or password", "realms": await auth.list_realms()},
             status_code=401,
         )
     response = RedirectResponse(url="/", status_code=303)

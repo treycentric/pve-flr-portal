@@ -725,15 +725,20 @@ def test_download_bundle_directory_entries_are_not_double_prefixed(client, monke
         assert zf.read("Downloads/photo.jpg") == b"family photo bytes"
 
 
-def test_login_page_renders_even_if_realms_fail(monkeypatch):
-    async def boom():
-        raise RuntimeError("pve down")
+def test_login_page_always_has_a_realm_option(monkeypatch):
+    # list_realms() owns its own failure handling now (issue #31): it
+    # retries, then returns the pam/pve fallback rather than raising or
+    # returning an empty list, so login_page never renders an empty
+    # <select> (which the browser would omit from the POST).
+    async def fallback():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
 
-    monkeypatch.setattr(auth, "list_realms", boom)
+    monkeypatch.setattr(auth, "list_realms", fallback)
     with TestClient(main.app) as c:
         resp = c.get("/login")
     assert resp.status_code == 200
-    assert "Log in" in resp.text
+    assert 'value="pam"' in resp.text
+    assert 'value="pve"' in resp.text
 
 
 def test_login_submit_invalid_credentials(monkeypatch):
@@ -743,7 +748,7 @@ def test_login_submit_invalid_credentials(monkeypatch):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     async def realms():
-        return []
+        return [dict(r) for r in auth._FALLBACK_REALMS]
 
     monkeypatch.setattr(auth, "login", bad_login)
     monkeypatch.setattr(auth, "list_realms", realms)
