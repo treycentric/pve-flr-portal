@@ -616,9 +616,17 @@ async def download_bundle(
             await response.aclose()
             await client.aclose()
         if is_dir:
+            # PVE's own zip for a directory already roots every entry
+            # under the directory's own name (e.g. "Downloads/file.txt"
+            # for a "Downloads" selection) - confirmed live 2026-09-02
+            # (a doubled "Downloads/Downloads" in a restored bundle) -
+            # so info.filename is used as-is, not re-prefixed with
+            # item_name on top of what's already there.
             with zipfile.ZipFile(io.BytesIO(content)) as sub:
                 for info in sub.infolist():
-                    entries.append((f"{item_name}/{info.filename}", sub.read(info.filename)))
+                    if info.is_dir():
+                        continue
+                    entries.append((info.filename, sub.read(info.filename)))
         else:
             entries.append((item_name, content))
 

@@ -1726,6 +1726,29 @@ since it completes restore-to-guest rather than standing apart from it.
    the original backup, so it's now removed via one best-effort
    guest-exec call after verification succeeds (a cleanup failure logs a
    note but doesn't fail the otherwise-successful restore).
+
+   **Real-world finding (2026-09-02), a real directory restore:**
+   restoring a `Downloads` directory landed its contents under a doubled
+   `Downloads/Downloads/` in the destination, one level deeper than
+   expected. Root cause: `_add_directory_entries_to_tar()`/
+   `_add_directory_entries_to_zip()` re-prefixed each source zip member's
+   `info.filename` with `{item_name}/` on top of what was already
+   there - but PVE's own zip encoding for a directory selection already
+   roots every entry under the directory's own name (`Downloads/photo.jpg`,
+   not just `photo.jpg`), so the correct arcname is `info.filename` as-is.
+   The corresponding logic in `main.py`'s `download_bundle()` (the
+   ordinary browser-download multi-select feature, §7.7's "reuse the
+   existing multi-select convention") had the exact same bug, unnoticed
+   until now because that feature's own tests never covered a directory
+   selection's exact output paths - fixed there too, in the same change.
+   Both fixes also now skip zip directory-marker entries explicitly
+   (`info.is_dir()`), matching a discipline `restore_bundle.py` already
+   had but `download_bundle()` didn't. This was the first real,
+   live-verified directory selection either code path had seen -
+   confirming this required updating every fixture/test that had
+   fabricated a directory's zip content without a self-referencing
+   prefix, since that fabricated shape had never actually matched what
+   PVE hands back.
 3b. ~~Frontend~~ — **done**: the Restore button's gate/capability check
    now reuses `isSingleFile` (unchanged) to branch between `design_a`
    (a single leaf file - the original fast-path check) and `design_b`

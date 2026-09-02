@@ -201,13 +201,19 @@ class _FakeBundleClient:
         pass
 
 
-def _fake_directory_zip(files: dict[str, bytes]) -> bytes:
+def _fake_directory_zip(files: dict[str, bytes], prefix: str = "") -> bytes:
     """A real, valid zip - what PVE's own default directory encoding
-    would hand back (docs/plan.md §7.7's correction: no tar=1 needed)."""
+    would hand back (docs/plan.md §7.7's correction: no tar=1 needed).
+    `prefix`, when given, roots every entry under it - PVE's own zip for
+    a directory already roots every entry under the directory's own name
+    (confirmed live 2026-09-02 by a doubled `Downloads/Downloads/` when
+    this app's own code re-prefixed on top of that), so callers building
+    a fixture for a directory selection should pass the item's own name
+    here rather than leaving entries unprefixed."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w") as zf:
         for name, content in files.items():
-            zf.writestr(name, content)
+            zf.writestr(f"{prefix}{name}" if prefix else name, content)
     return buf.getvalue()
 
 
@@ -228,7 +234,7 @@ async def test_build_bundle_zip_contains_every_item_plus_manifest(session_data, 
         monkeypatch,
         {
             "L2V0Yy9ob3N0cw==": hosts,
-            "ZXRj": _fake_directory_zip({"passwd": passwd, "shadow": shadow}),
+            "ZXRj": _fake_directory_zip({"passwd": passwd, "shadow": shadow}, prefix="etc/"),
         },
     )
     items = [
@@ -255,6 +261,30 @@ async def test_build_bundle_zip_contains_every_item_plus_manifest(session_data, 
         assert f"{hashlib.sha256(hosts).hexdigest()}  hosts" in manifest_text
         assert f"{hashlib.sha256(passwd).hexdigest()}  etc/passwd" in manifest_text
         assert f"{hashlib.sha256(shadow).hexdigest()}  etc/shadow" in manifest_text
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_directory_entries_are_not_double_prefixed(session_data, monkeypatch, tmp_path):
+    # Confirmed live 2026-09-02: a restored "Downloads" directory landed
+    # as "Downloads/Downloads/..." in the destination - PVE's own zip
+    # for a directory selection already roots every entry under the
+    # directory's own name, and this code used to prepend item.name on
+    # top of that again. Locks in that info.filename is trusted as-is.
+    content = b"family photo bytes"
+    dir_zip = _fake_directory_zip({"photo.jpg": content}, prefix="Downloads/")
+    _patch_bundle_download(monkeypatch, {"ZG93bmxvYWRz==": dir_zip})
+    items = [BundleItem(filepath="ZG93bmxvYWRz==", name="Downloads", leaf=False)]
+
+    output_path, _fmt, manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/133/2026-09-01", items, guest_os_family="linux", zst_capable=False
+    )
+    try:
+        with tarfile.open(output_path, mode="r:gz") as tf:
+            names = tf.getnames()
+            assert "Downloads/photo.jpg" in names
+            assert "Downloads/Downloads/photo.jpg" not in names
+        assert manifest.render() == f"{hashlib.sha256(content).hexdigest()}  Downloads/photo.jpg\n"
     finally:
         tmp_dir_ctx.cleanup()
 
@@ -355,8 +385,8 @@ async def test_build_bundle_manifest_omits_directory_entries_from_source_zip(ses
     # real file behind them.
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w") as zf:
-        zf.writestr("sub/", b"")  # directory marker entry
-        zf.writestr("sub/file.txt", b"hello")
+        zf.writestr("mydir/sub/", b"")  # directory marker entry
+        zf.writestr("mydir/sub/file.txt", b"hello")
     _patch_bundle_download(monkeypatch, {"dir==": buf.getvalue()})
     items = [BundleItem(filepath="dir==", name="mydir", leaf=False)]
 

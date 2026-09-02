@@ -251,20 +251,26 @@ def _add_leaf_to_zip(zf: zipfile.ZipFile, arcname: str, local_path: Path, manife
     manifest.add(arcname, hasher.hexdigest())
 
 
-def _add_directory_entries_to_tar(
-    tf: tarfile.TarFile, item_name: str, local_zip_path: Path, manifest: ManifestBuilder
-) -> None:
+def _add_directory_entries_to_tar(tf: tarfile.TarFile, local_zip_path: Path, manifest: ManifestBuilder) -> None:
     """A directory item's local temp file is PVE's own zip encoding of
     everything under it - this re-expands each member into the outer
-    tar under `item_name/`, matching main.py's download_bundle()'s
-    existing re-expansion logic (just targeting a different output
-    format and also building the manifest). One member at a time,
-    streamed through - never a whole member's content in memory."""
+    tar, matching main.py's download_bundle()'s existing re-expansion
+    logic (just targeting a different output format and also building
+    the manifest). One member at a time, streamed through - never a
+    whole member's content in memory.
+
+    Each member's `info.filename` is used as the arcname as-is, not
+    prefixed with the item's own name - PVE's own zip for a directory
+    already roots every entry under the directory's own name (e.g.
+    `Downloads/file.txt` for a `Downloads` selection), confirmed live
+    2026-09-02 by a real restore landing files under a doubled
+    `Downloads/Downloads/` because this used to re-prefix on top of
+    that."""
     with zipfile.ZipFile(local_zip_path) as sub:
         for info in sub.infolist():
             if info.is_dir():
                 continue
-            arcname = f"{item_name}/{info.filename}"
+            arcname = info.filename
             hasher = hashlib.sha256()
             tinfo = tarfile.TarInfo(name=arcname)
             tinfo.size = info.file_size
@@ -273,14 +279,14 @@ def _add_directory_entries_to_tar(
             manifest.add(arcname, hasher.hexdigest())
 
 
-def _add_directory_entries_to_zip(
-    zf: zipfile.ZipFile, item_name: str, local_zip_path: Path, manifest: ManifestBuilder
-) -> None:
+def _add_directory_entries_to_zip(zf: zipfile.ZipFile, local_zip_path: Path, manifest: ManifestBuilder) -> None:
+    """See `_add_directory_entries_to_tar()`'s docstring - same
+    no-re-prefixing rationale, just for the zip output format."""
     with zipfile.ZipFile(local_zip_path) as sub:
         for info in sub.infolist():
             if info.is_dir():
                 continue
-            arcname = f"{item_name}/{info.filename}"
+            arcname = info.filename
             hasher = hashlib.sha256()
             with sub.open(info.filename) as src, zf.open(arcname, "w") as dst:
                 while piece := src.read(DEFAULT_CHUNK_SIZE_BYTES):
@@ -345,12 +351,12 @@ def _add_item_to_bundle_writer(
         if item.leaf:
             _add_leaf_to_zip(writer.zf, item.name, local_path, manifest)
         else:
-            _add_directory_entries_to_zip(writer.zf, item.name, local_path, manifest)
+            _add_directory_entries_to_zip(writer.zf, local_path, manifest)
     else:
         if item.leaf:
             _add_leaf_to_tar(writer.tf, item.name, local_path, manifest)
         else:
-            _add_directory_entries_to_tar(writer.tf, item.name, local_path, manifest)
+            _add_directory_entries_to_tar(writer.tf, local_path, manifest)
 
 
 def _finish_bundle_writer(writer: _BundleWriter, manifest: ManifestBuilder) -> None:

@@ -689,6 +689,42 @@ def test_download_bundle_builds_zip(client, monkeypatch):
         assert zf.read("a.txt") == b"file-content"
 
 
+def test_download_bundle_directory_entries_are_not_double_prefixed(client, monkeypatch):
+    # Confirmed live 2026-09-02 (in the sibling restore-to-guest code
+    # path, restore_bundle.py): PVE's own zip for a directory selection
+    # already roots every entry under the directory's own name, so
+    # re-prefixing with item_name on top of that doubles it
+    # ("Downloads/Downloads/..."). This endpoint had the same bug.
+    dir_zip_buf = io.BytesIO()
+    with zipfile.ZipFile(dir_zip_buf, mode="w") as zf:
+        zf.writestr("Downloads/photo.jpg", b"family photo bytes")
+
+    async def fake_open(session, volume, filepath, tar=False):
+        class FakeResponse:
+            async def aread(self):
+                return dir_zip_buf.getvalue()
+
+            async def aclose(self):
+                pass
+
+        class FakeClient:
+            async def aclose(self):
+                pass
+
+        return FakeClient(), FakeResponse()
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open)
+    item = '{"filepath": "abc", "name": "Downloads", "leaf": false}'
+    resp = client.get(
+        "/api/download-bundle",
+        params={"volume": "v", "item": [item], "name": "bundle", "format": "zip"},
+    )
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        assert zf.namelist() == ["Downloads/photo.jpg"]
+        assert zf.read("Downloads/photo.jpg") == b"family photo bytes"
+
+
 def test_login_page_renders_even_if_realms_fail(monkeypatch):
     async def boom():
         raise RuntimeError("pve down")
