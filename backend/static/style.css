@@ -854,6 +854,17 @@ body {
   font-size: 13px;
 }
 
+/* Neutral, not alarming - an expired session isn't the user's error. */
+.login-notice {
+  margin: 0 0 14px;
+  padding: 8px 10px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 .login-label {
   font-size: 12px;
   font-weight: 600;

@@ -66,19 +66,32 @@ async def unauthorized_handler(request: Request, exc: HTTPException):
     HX-Redirect header (a plain 302 would just have htmx swap the login
     page's HTML into whatever partial target was requested)."""
     if exc.status_code == 401:
+        # "Not logged in" is a plain unauthenticated visit; anything else
+        # (idle timeout, failed PVE ticket refresh) is a session that
+        # *was* valid, so tell /login to say so (issue #27).
+        target = "/login" if exc.detail == "Not logged in" else "/login?reason=expired"
         if request.headers.get("HX-Request"):
-            return Response(status_code=200, headers={"HX-Redirect": "/login"})
-        return RedirectResponse(url="/login", status_code=302)
+            return Response(status_code=200, headers={"HX-Redirect": target})
+        # fetch() callers (the app.js widgets / poll loop) need a real
+        # 401 to act on - a 302 here just gets transparently followed to
+        # the login HTML and read as a success. Page navigations still
+        # get the redirect.
+        if request.url.path.startswith("/api/"):
+            return JSONResponse(status_code=401, content={"detail": exc.detail})
+        return RedirectResponse(url=target, status_code=302)
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 @app.get("/login")
-async def login_page(request: Request):
+async def login_page(request: Request, reason: str | None = Query(None)):
     # list_realms() handles its own failures - it retries, then returns
     # the pam/pve fallback (issue #31) - so it never raises here and
     # never yields an empty dropdown.
     realms = await auth.list_realms()
-    return templates.TemplateResponse(request, "login.html", {"error": None, "realms": realms})
+    notice = "Your session expired — please sign in again." if reason == "expired" else None
+    return templates.TemplateResponse(
+        request, "login.html", {"error": None, "notice": notice, "realms": realms}
+    )
 
 
 @app.post("/login")
@@ -92,7 +105,7 @@ async def login_submit(
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": "Invalid username or password", "realms": await auth.list_realms()},
+            {"error": "Invalid username or password", "notice": None, "realms": await auth.list_realms()},
             status_code=401,
         )
     response = RedirectResponse(url="/", status_code=303)
@@ -446,20 +459,27 @@ async def restore(
 
 
 @app.get("/api/restore-jobs")
-async def restore_jobs_list(session: SessionData = Depends(auth.get_session)):
+async def restore_jobs_list(session: SessionData = Depends(auth.get_session_keepalive)):
     """PH.5 (docs/plan.md §7.5): the running-jobs indicator's data source,
-    polled from the top bar. Jobs are visible to any logged-in user, not
-    scoped per-requester - a single-admin homelab tool with one shared
-    task list, same as the rest of this design."""
+    polled from the top bar every few seconds. Jobs are visible to any
+    logged-in user, not scoped per-requester - a single-admin homelab
+    tool with one shared task list, same as the rest of this design.
+
+    Uses get_session_keepalive: this poll must not keep an idle session
+    alive (issue #27) - if it 401s, apiFetch() in app.js redirects."""
     return JSONResponse([job.to_dict() for job in restore_jobs.manager.list_jobs()])
 
 
 @app.get("/api/restore-jobs/{job_id}")
-async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.get_session)):
+async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.get_session_keepalive)):
     """A single job's full detail, including its step-by-step log
     (restore_runner.py's job.log() calls) - kept out of the list endpoint
     above to keep that one light on every poll; fetched on demand when a
-    user opens the log viewer for one specific job."""
+    user opens the log viewer for one specific job.
+
+    Also get_session_keepalive: the log viewer re-polls this on the same
+    tick as the list, and watching a log is not activity either (issue
+    #27) - an idle user parked on the log viewer still times out."""
     job = restore_jobs.manager.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No such restore job")
