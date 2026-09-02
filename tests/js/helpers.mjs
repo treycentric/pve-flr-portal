@@ -21,7 +21,7 @@ export function loadApp(env = {}) {
     'window',
     'document',
     'htmx',
-    `${source}\n;return { taskPicker, userMenu, fileGridState, portalApp, restoreJobsWidget };`,
+    `${source}\n;return { taskPicker, userMenu, fileGridState, portalApp, restoreJobsWidget, apiFetch };`,
   );
   return { ...factory(windowStub, documentStub, htmxStub), window: windowStub };
 }

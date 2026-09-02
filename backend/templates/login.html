@@ -55,6 +55,9 @@
       ">
       <img class="about-logo login-logo" src="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}" alt="">
       <h2 class="login-title">Log in</h2>
+      {% if notice %}
+      <p class="login-notice">{{ notice }}</p>
+      {% endif %}
       {% if error %}
       <p class="login-error">{{ error }}</p>
       {% endif %}

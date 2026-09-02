@@ -130,6 +130,26 @@ async def test_get_session_refreshes_activity(session_data):
     assert time.time() - out.last_activity_at < 1
 
 
+async def test_get_session_keepalive_does_not_extend_the_idle_clock(session_data):
+    """A background poll validates the session but is not user activity
+    (issue #27) - last_activity_at is left untouched."""
+    before = time.time() - 600
+    session_data.last_activity_at = before
+    auth._sessions["sid"] = session_data
+    out = await auth.get_session_keepalive(make_request(cookies={"session_id": "sid"}))
+    assert out is session_data
+    assert out.last_activity_at == before
+
+
+async def test_get_session_keepalive_still_evicts_on_idle_timeout(session_data):
+    session_data.last_activity_at = time.time() - (31 * 60)
+    auth._sessions["sid"] = session_data
+    with pytest.raises(HTTPException) as exc:
+        await auth.get_session_keepalive(make_request(cookies={"session_id": "sid"}))
+    assert exc.value.status_code == 401
+    assert "sid" not in auth._sessions
+
+
 @respx.mock
 async def test_ensure_fresh_ticket_refreshes_when_stale(session_data):
     """The standalone helper background restore jobs use (docs/plan.md
@@ -151,6 +171,21 @@ async def test_ensure_fresh_ticket_refreshes_when_stale(session_data):
     await auth.ensure_fresh_ticket(session_data)
     assert route.called
     assert session_data.ticket == "PVE:alice@pam:FRESH2"
+
+
+@respx.mock
+async def test_get_session_evicts_and_401s_when_ticket_refresh_rejected(session_data):
+    """A stale session whose ticket PVE won't renew is expired, not a 500
+    (issue #27) - get_session evicts it and raises 401 so the caller
+    redirects to /login."""
+    respx.post(f"{API}/access/ticket").mock(return_value=httpx.Response(401, json={"data": None}))
+    session_data.ticket_issued_at = time.time() - (auth._TICKET_REFRESH_AGE_SECONDS + 60)
+    auth._sessions["sid"] = session_data
+    with pytest.raises(HTTPException) as exc:
+        await auth.get_session(make_request(cookies={"session_id": "sid"}))
+    assert exc.value.status_code == 401
+    assert exc.value.detail != "Not logged in"
+    assert "sid" not in auth._sessions
 
 
 @respx.mock

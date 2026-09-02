@@ -1,3 +1,32 @@
+// --- Session expiry (issue #27) ---
+// A 401 from any /api call means the server-side session is gone - idle
+// timeout, or a PVE ticket that could no longer be refreshed
+// (auth.get_session). The backend answers fetch() callers with a plain
+// 401 (and htmx with an HX-Redirect it handles itself). Without this,
+// every fetch() call site just bails on the non-OK status - the poll
+// loop especially keeps failing silently every tick, forever, with no
+// hint to the user. Mirror what a fresh page load already does: go to
+// /login, with a reason so that page can explain why.
+let sessionExpiredHandled = false;
+function redirectToLogin() {
+  if (sessionExpiredHandled) return; // a burst of failing polls => one redirect
+  sessionExpiredHandled = true;
+  window.location.href = '/login?reason=expired';
+}
+
+// Drop-in for fetch() on authenticated endpoints. Returns the Response
+// for the caller's own !resp.ok handling; on 401 it triggers the
+// redirect and returns a promise that never settles, so the caller does
+// not also flash its generic error in the moment before navigation.
+async function apiFetch(input, init) {
+  const resp = await fetch(input, init);
+  if (resp.status === 401) {
+    redirectToLogin();
+    return new Promise(() => {});
+  }
+  return resp;
+}
+
 function taskPicker(groups, current) {
   return {
     groups,
@@ -86,7 +115,7 @@ function restoreJobsWidget() {
     },
     async refresh() {
       try {
-        const resp = await fetch('/api/restore-jobs');
+        const resp = await apiFetch('/api/restore-jobs');
         if (!resp.ok) return;
         this.jobs = await resp.json();
       } catch (e) {
@@ -98,7 +127,7 @@ function restoreJobsWidget() {
     async cancelSelected() {
       if (!this.selectedId || !this.selectedCancellable) return;
       try {
-        await fetch('/api/restore-jobs/' + encodeURIComponent(this.selectedId) + '/cancel', { method: 'POST' });
+        await apiFetch('/api/restore-jobs/' + encodeURIComponent(this.selectedId) + '/cancel', { method: 'POST' });
       } finally {
         await this.refresh();
       }
@@ -115,7 +144,7 @@ function restoreJobsWidget() {
       if (!this.logJobId) return;
       this.logLoading = true;
       try {
-        const resp = await fetch('/api/restore-jobs/' + encodeURIComponent(this.logJobId));
+        const resp = await apiFetch('/api/restore-jobs/' + encodeURIComponent(this.logJobId));
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
           this.logError = data.detail || 'Could not load this job’s log.';
@@ -367,7 +396,7 @@ function fileGridState() {
       try {
         const params = new URLSearchParams({ type: this._guestType, vmid: this._guestVmid });
         if (path) params.set('path', path);
-        const resp = await fetch('/api/restore-browse?' + params.toString());
+        const resp = await apiFetch('/api/restore-browse?' + params.toString());
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
           this.restoreBrowseError = data.detail || 'Could not list that folder.';
@@ -425,7 +454,7 @@ function fileGridState() {
           // own copy) so they're deliberately not sent.
           sel.forEach((it) => body.append('item', JSON.stringify(it)));
         }
-        const resp = await fetch('/api/restore', { method: 'POST', body });
+        const resp = await apiFetch('/api/restore', { method: 'POST', body });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
           this.restoreError = data.detail || 'Restore failed to start.';
@@ -579,7 +608,7 @@ function portalApp(rawSnapshots, guest) {
       if (!this.guest || !this.guest.vmid) return;
       try {
         const params = new URLSearchParams({ type: this.guest.type, vmid: this.guest.vmid });
-        const resp = await fetch('/api/restore-capabilities?' + params.toString());
+        const resp = await apiFetch('/api/restore-capabilities?' + params.toString());
         if (!resp.ok) return;
         this.restoreCaps = await resp.json();
       } catch (e) {

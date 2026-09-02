@@ -8,6 +8,7 @@ unauthenticated path.
 
 import asyncio
 import io
+import time
 import zipfile
 
 import httpx
@@ -37,6 +38,7 @@ def client(session_data, monkeypatch):
     monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
 
     main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    main.app.dependency_overrides[auth.get_session_keepalive] = lambda: session_data
     with TestClient(main.app) as c:
         yield c
     main.app.dependency_overrides.clear()
@@ -84,6 +86,73 @@ def test_htmx_unauthorized_returns_hx_redirect():
         resp = c.get("/api/browse", params={"volume": "v"}, headers={"HX-Request": "true"})
     assert resp.status_code == 200
     assert resp.headers["HX-Redirect"] == "/login"
+
+
+def test_api_unauthorized_returns_401_json_not_a_redirect():
+    # fetch() follows a 302 transparently and reads the login HTML as a
+    # success; the app.js widgets need a real 401 to act on (issue #27).
+    main.app.dependency_overrides.clear()
+    with TestClient(main.app) as c:
+        resp = c.get("/api/browse", params={"volume": "v"}, follow_redirects=False)
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Not logged in"
+
+
+def test_expired_session_redirects_page_load_with_reason(session_data):
+    main.app.dependency_overrides.clear()
+    session_data.last_activity_at = time.time() - (31 * 60)
+    auth._sessions["expired-sid"] = session_data
+    with TestClient(main.app) as c:
+        c.cookies.set("session_id", "expired-sid")
+        resp = c.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/login?reason=expired"
+
+
+def test_expired_session_on_api_returns_401_with_expiry_detail(session_data):
+    main.app.dependency_overrides.clear()
+    session_data.last_activity_at = time.time() - (31 * 60)
+    auth._sessions["expired-sid"] = session_data
+    with TestClient(main.app) as c:
+        c.cookies.set("session_id", "expired-sid")
+        resp = c.get("/api/browse", params={"volume": "v"}, headers={"HX-Request": "true"})
+    assert resp.status_code == 200
+    assert resp.headers["HX-Redirect"] == "/login?reason=expired"
+
+
+def test_restore_jobs_poll_does_not_refresh_session_activity(session_data):
+    # The 4s restore-jobs poll must not keep an idle session alive
+    # (issue #27) - so an open-but-unused tab still times out.
+    main.app.dependency_overrides.clear()
+    before = time.time() - 600
+    session_data.last_activity_at = before
+    auth._sessions["poll-sid"] = session_data
+    with TestClient(main.app) as c:
+        c.cookies.set("session_id", "poll-sid")
+        assert c.get("/api/restore-jobs").status_code == 200
+    assert auth._sessions["poll-sid"].last_activity_at == before
+
+
+def test_restore_jobs_poll_401s_once_the_session_has_idled_out(session_data):
+    main.app.dependency_overrides.clear()
+    session_data.last_activity_at = time.time() - (31 * 60)
+    auth._sessions["poll-sid"] = session_data
+    with TestClient(main.app) as c:
+        c.cookies.set("session_id", "poll-sid")
+        resp = c.get("/api/restore-jobs", follow_redirects=False)
+    assert resp.status_code == 401
+    assert "poll-sid" not in auth._sessions
+
+
+def test_login_page_shows_expired_notice(monkeypatch):
+    async def realms():
+        return []
+
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.get("/login?reason=expired")
+    assert resp.status_code == 200
+    assert "session expired" in resp.text.lower()
 
 
 def test_browse_renders_file_grid(client, monkeypatch):

@@ -498,7 +498,13 @@ user must log in again, regardless of whether the underlying PVE
 ticket could still be refreshed.
 
 - Track `last_activity_at` on each server-side session entry, updated
-  on every authenticated request.
+  on every authenticated request **that represents genuine user
+  activity**. The restore-jobs list + log pollers (`app.js` polls
+  `/api/restore-jobs` every ~4s regardless of what the user is doing)
+  explicitly do **not** count — they use `auth.get_session_keepalive`,
+  which validates the session and enforces the timeout but does not
+  reset it. Without that carve-out an open tab refreshes its own
+  session forever and the idle timeout never fires (issue #27).
 - New config value (`.env` + `Settings`, following the existing
   pattern in `backend/config.py`): `SESSION_IDLE_TIMEOUT_MINUTES`,
   admin-configurable, defaulting to something reasonable (30 min is a
@@ -511,6 +517,25 @@ ticket could still be refreshed.
   lapse — any session that's already past the idle threshold, so an
   abandoned session doesn't get artificially kept alive server-side
   just because the refresh timer happened to fire first.
+
+**Client-side reaction to expiry (issue #27).** `get_session()` raises
+`401` for a lapsed session — idle timeout, or a PVE ticket PVE refused
+to renew (`_refresh_ticket` failure is caught and turned into the same
+`401` rather than a 500). The global `HTTPException` handler in
+`backend/main.py` then branches three ways: an `HX-Request` gets an
+`HX-Redirect` header (htmx redirects itself); any other `/api/*` call
+gets a plain `401` JSON body (a `302` would be transparently followed
+by `fetch()` and misread as success); a page navigation gets the `302`.
+`detail != "Not logged in"` (i.e. a session that *was* valid) adds
+`?reason=expired` so `/login` shows a neutral "your session expired"
+notice. On the frontend, every `fetch()` to an authenticated endpoint
+goes through `apiFetch()` in `app.js`, which on `401` redirects to
+`/login?reason=expired` once (guarded against a redirect storm from the
+restore-jobs poll loop) instead of letting each call site fail
+silently. Because the poll no longer keeps the session alive (above),
+that poll's own next `401` is usually what triggers the redirect for a
+user who walked away — within one poll interval of the timeout, with no
+click needed.
 
 ### 7.3 HTTPS by default, admin-replaceable cert
 

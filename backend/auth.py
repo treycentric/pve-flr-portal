@@ -143,7 +143,7 @@ def logout(session_id: str) -> None:
     _sessions.pop(session_id, None)
 
 
-async def get_session(request: Request) -> SessionData:
+async def _resolve_session(request: Request, *, touch: bool) -> SessionData:
     session_id = request.cookies.get("session_id")
     session = _sessions.get(session_id) if session_id else None
     if session is None:
@@ -155,6 +155,33 @@ async def get_session(request: Request) -> SessionData:
         _sessions.pop(session_id, None)
         raise HTTPException(status_code=401, detail="Session expired (idle timeout)")
 
-    session.last_activity_at = now
-    await ensure_fresh_ticket(session)
+    # Only genuine user activity resets the idle clock. Background polls
+    # (the restore-jobs list + log pollers) pass touch=False, so a tab
+    # left open on an otherwise-idle session still times out on schedule
+    # (issue #27, docs/plan.md §7.2) - the poll's own next 401 is then
+    # what bounces the browser to /login.
+    if touch:
+        session.last_activity_at = now
+    try:
+        await ensure_fresh_ticket(session)
+    except httpx.HTTPError as exc:
+        # PVE rejected the ticket refresh (ticket fully expired, account
+        # disabled, PVE unreachable at the moment it was needed). The
+        # session can't be kept alive - evict it and treat it as expired
+        # so the caller redirects to /login rather than 500ing (issue #27).
+        _sessions.pop(session_id, None)
+        raise HTTPException(
+            status_code=401, detail="Session expired (PVE ticket refresh failed)"
+        ) from exc
     return session
+
+
+async def get_session(request: Request) -> SessionData:
+    """Auth dependency for interactive requests - resets the idle timeout."""
+    return await _resolve_session(request, touch=True)
+
+
+async def get_session_keepalive(request: Request) -> SessionData:
+    """Auth dependency for background polls - validates the session and
+    enforces the idle timeout, but does NOT reset it."""
+    return await _resolve_session(request, touch=False)
