@@ -1,13 +1,18 @@
+import hashlib
 import io
 import tarfile
+import zipfile
 
 import pytest
 import zstandard
 
+from backend import pve_client
 from backend.restore_bundle import (
+    MANIFEST_NAME,
     BundleFormat,
     BundleItem,
     ManifestBuilder,
+    build_bundle,
     build_extract_command,
     build_verify_command,
     build_zst_probe_blob,
@@ -172,3 +177,150 @@ def test_build_verify_command_windows_uses_get_filehash():
     script = argv[-1]
     assert "Get-FileHash" in script
     assert "ALL-OK" in script
+
+
+# --- build_bundle (real-library round trip, no live guest) ----------------
+
+
+class _FakeBundleResponse:
+    def __init__(self, content: bytes):
+        self._content = content
+
+    async def aiter_bytes(self, chunk_size: int):
+        for start in range(0, len(self._content), chunk_size):
+            yield self._content[start : start + chunk_size]
+        if not self._content:
+            yield b""
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _FakeBundleClient:
+    async def aclose(self) -> None:
+        pass
+
+
+def _fake_directory_zip(files: dict[str, bytes]) -> bytes:
+    """A real, valid zip - what PVE's own default directory encoding
+    would hand back (docs/plan.md §7.7's correction: no tar=1 needed)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+def _patch_bundle_download(monkeypatch, responses: dict[str, bytes]):
+    """responses maps filepath -> raw bytes PVE would return for it."""
+
+    async def fake_open_download(session, volume, filepath, tar=False):
+        return _FakeBundleClient(), _FakeBundleResponse(responses[filepath])
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open_download)
+
+
+async def test_build_bundle_zip_contains_every_item_plus_manifest(session_data, monkeypatch, tmp_path):
+    hosts = b"127.0.0.1 localhost\n"
+    passwd = b"root:x:0:0::/root:/bin/bash\n"
+    shadow = b"root:!:19000:0:99999:7:::\n"
+    _patch_bundle_download(
+        monkeypatch,
+        {
+            "L2V0Yy9ob3N0cw==": hosts,
+            "ZXRj": _fake_directory_zip({"passwd": passwd, "shadow": shadow}),
+        },
+    )
+    items = [
+        BundleItem(filepath="L2V0Yy9ob3N0cw==", name="hosts", leaf=True),
+        BundleItem(filepath="ZXRj", name="etc", leaf=False),
+    ]
+
+    output_path, fmt, manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/133/2026-09-01", items, guest_os_family="linux", zst_capable=False
+    )
+    try:
+        assert fmt == BundleFormat.TAR_GZ  # not zst-capable, linux -> targz fallback
+        with tarfile.open(output_path, mode="r:gz") as tf:
+            names = tf.getnames()
+            assert "hosts" in names
+            assert "etc/passwd" in names
+            assert "etc/shadow" in names
+            assert MANIFEST_NAME in names
+            assert tf.extractfile("hosts").read() == hosts
+            assert tf.extractfile("etc/passwd").read() == passwd
+            manifest_text = tf.extractfile(MANIFEST_NAME).read().decode()
+
+        assert len(manifest) == 3  # hosts, etc/passwd, etc/shadow - not the manifest itself
+        assert f"{hashlib.sha256(hosts).hexdigest()}  hosts" in manifest_text
+        assert f"{hashlib.sha256(passwd).hexdigest()}  etc/passwd" in manifest_text
+        assert f"{hashlib.sha256(shadow).hexdigest()}  etc/shadow" in manifest_text
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_zip_format_when_windows_and_not_zst_capable(session_data, monkeypatch, tmp_path):
+    content = b"some file content"
+    _patch_bundle_download(monkeypatch, {"abc==": content})
+    items = [BundleItem(filepath="abc==", name="notes.txt", leaf=True)]
+
+    output_path, fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/202/2026-09-01", items, guest_os_family="windows", zst_capable=False
+    )
+    try:
+        assert fmt == BundleFormat.ZIP
+        with zipfile.ZipFile(output_path) as zf:
+            assert zf.read("notes.txt") == content
+            manifest_text = zf.read(MANIFEST_NAME).decode()
+        assert f"{hashlib.sha256(content).hexdigest()}  notes.txt" in manifest_text
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_tarzst_when_capable(session_data, monkeypatch, tmp_path):
+    content = b"a" * 5000
+    _patch_bundle_download(monkeypatch, {"abc==": content})
+    items = [BundleItem(filepath="abc==", name="bigfile.bin", leaf=True)]
+
+    output_path, fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/202/2026-09-01", items, guest_os_family="linux", zst_capable=True
+    )
+    try:
+        assert fmt == BundleFormat.TAR_ZST
+        # A streaming-compressed frame (zstandard's stream_writer, as
+        # build_bundle() uses) doesn't record its total content size in
+        # the frame header, so the one-shot decompress() API can't
+        # handle it - stream_reader() is the correct way to decompress
+        # this shape, matching what a real guest's `tar` would do too.
+        with output_path.open("rb") as compressed:
+            raw_tar = zstandard.ZstdDecompressor().stream_reader(compressed).read()
+        with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
+            assert tf.extractfile("bigfile.bin").read() == content
+            assert MANIFEST_NAME in tf.getnames()
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_manifest_omits_directory_entries_from_source_zip(session_data, monkeypatch, tmp_path):
+    # A real zip from a nested directory selection often includes
+    # explicit directory-marker entries (names ending in "/", zero
+    # size) - these shouldn't end up as bogus manifest lines with no
+    # real file behind them.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr("sub/", b"")  # directory marker entry
+        zf.writestr("sub/file.txt", b"hello")
+    _patch_bundle_download(monkeypatch, {"dir==": buf.getvalue()})
+    items = [BundleItem(filepath="dir==", name="mydir", leaf=False)]
+
+    _output_path, _fmt, manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/202/2026-09-01", items, guest_os_family="linux", zst_capable=False
+    )
+    try:
+        # Exactly one real entry - the directory-marker "sub/" itself
+        # never becomes a bogus manifest line, but the real subdirectory
+        # structure inside it is preserved correctly.
+        assert len(manifest) == 1
+        assert manifest.render() == f"{hashlib.sha256(b'hello').hexdigest()}  mydir/sub/file.txt\n"
+    finally:
+        tmp_dir_ctx.cleanup()

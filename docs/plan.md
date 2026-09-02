@@ -1473,21 +1473,29 @@ this section designs that, covering both individual multi-selected
 files and whole directories (mixed together in one selection, matching
 how multi-select download already works). "A directory" here means the
 **full recursive tree** under it, not one flat level - already how
-`leaf: false` entries behave in `download_bundle()` today (`tar=1`
-against a directory returns everything PVE finds under it, nested
-subdirectories included; the existing code already iterates every entry
-the resulting sub-archive contains, not just its top level), so this
-falls out of the existing mechanism rather than needing new design.
+`leaf: false` entries behave in `download_bundle()` today (a directory
+path, fetched from PVE without `tar=1`, returns everything PVE finds
+under it as a zip - `file-restore/download`'s own default encoding for
+a directory, §3 - nested subdirectories included; the existing code
+already iterates every entry the resulting zip contains, not just its
+top level), so this falls out of the existing mechanism rather than
+needing new design. (Correction from an earlier draft of this section:
+directories don't need `tar=1` at all - that flag only switches PVE's
+*encoding* to `.tar.zst` instead of the default zip, which
+`download_bundle()` doesn't currently use. The restore path's own
+output-bundle format, chosen separately below, is an independent
+question from how directory content gets fetched from PVE in the first
+place.)
 
-**Mechanism: reuse the existing multi-select convention and PVE's
-`tar=1` capability, both already proven by `/api/download-bundle`.**
-That endpoint already accepts `item: list[str] = Query(...)`, each a
-JSON `{filepath, name, leaf}` (`leaf: false` = a directory, fetched from
-PVE with `tar=1` and re-expanded), and already builds zip/tar.gz/tar.zst
-bundles from a mixed multi-file/directory selection. The restore path
-reuses that same `item` request shape and the same directory-via-`tar=1`
-mechanism - no new PVE API surface - but **does not reuse
-`download_bundle()`'s implementation as-is**: that function buffers the
+**Mechanism: reuse the existing multi-select convention already proven
+by `/api/download-bundle`.** That endpoint already accepts
+`item: list[str] = Query(...)`, each a JSON `{filepath, name, leaf}`
+(`leaf: false` = a directory, fetched from PVE as PVE's own default zip
+encoding and re-expanded), and already builds zip/tar.gz/tar.zst bundles
+from a mixed multi-file/directory selection. The restore path reuses
+that same `item` request shape and the same directory-fetch mechanism -
+no new PVE API surface - but **does not reuse `download_bundle()`'s
+implementation as-is**: that function buffers the
 entire bundle in memory (`content = await response.aread()`,
 `io.BytesIO()`) - a known, already-documented limitation acceptable for
 an ad-hoc human-triggered browser download, but exactly the class of
@@ -1585,19 +1593,33 @@ since it completes restore-to-guest rather than standing apart from it.
      including a round-trip test that the probe blob is genuinely a
      valid, extractable `.tar.zst` via the real `zstandard`/`tarfile`
      libraries, not just internally self-consistent.
-2. **Not started.** The streaming bundle builder itself: given a list of
-   `BundleItem`s, download each from PVE (files directly, directories
-   via `tar=1`, already covering the full recursive tree) and produce
-   one output bundle stream (native `.tar.zst` pass-through, or a
-   server-side-rebuilt `.zip`/`.tar.gz` with the manifest embedded) -
-   without ever buffering the whole thing in memory, the same
-   discipline §7.6's memory fix established for a single file. This is
-   the genuinely hard remaining piece: Python's `tarfile`/`zipfile` are
-   synchronous, blocking APIs, so producing their output as an async
-   stream needs a real bridge (most likely a background thread writing
-   into an `os.pipe()`, with the async side reading the other end) -
-   not yet designed in detail, and worth its own careful pass rather
-   than folding into the same commit as step 1's pure pieces.
+2. ~~The streaming bundle builder~~ — **done**: `build_bundle()`
+   downloads every selected item (files directly, directories via
+   PVE's own default zip encoding - already covering the full recursive
+   tree) to its own local temp file (streamed, one piece at a time,
+   never fully in RAM), then `_build_bundle_sync()` combines them into
+   one output bundle - format chosen by `select_bundle_format()`, with
+   the manifest embedded last - synchronously against those already-
+   local files in a background thread (`asyncio.to_thread`), since
+   `tarfile`/`zipfile` are blocking APIs. Staged through local temp
+   files rather than a true zero-buffer `os.pipe()` bridge deliberately
+   (2026-09-01 design review) - simpler, no fragile hand-rolled
+   sync/async pipe to get right without live testing, at the cost of
+   real disk usage proportional to bundle size and some extra latency.
+   That zero-buffer alternative is tracked separately as issue #25, to
+   build only if staging through disk turns out to actually be a
+   problem in practice (disk space, throughput) once this ships and
+   gets used for real. Every entry - a whole leaf item, or one member
+   inside a fetched directory's zip - streams through in fixed-size
+   pieces during both passes (`_HashingReader` lets `tarfile`'s/
+   `zipfile`'s own internal chunked reads double as the manifest hash
+   computation, no second pass over the same content), and directory-
+   marker entries in a source zip are correctly skipped rather than
+   becoming bogus zero-byte manifest lines. Fully round-trip tested
+   (`tests/test_restore_bundle.py`) against the real `zipfile`/
+   `tarfile`/`zstandard` libraries for all three output formats, not
+   just internally self-consistent - still not run against a real PVE
+   instance or guest.
 3. **Not started.** Wiring into `RestoreJob`/`run_restore()`/
    `POST /api/restore` (multi-item request body, a target-directory
    destination instead of a single file path) and the frontend
