@@ -299,6 +299,36 @@ def test_restore_bundle_submits_a_queued_job(client, monkeypatch):
     assert job.items[1].leaf is True
 
 
+def test_restore_bundle_tolerates_extra_fields_in_item_json(client, monkeypatch):
+    # Confirmed live 2026-09-01: the checkbox value each `item` entry
+    # comes from (main.py's own item_json, browse()) always includes
+    # `mtime` too - only relevant to the single-file restore path, but
+    # still present on every multi-select entry. A strict
+    # BundleItem(**spec) unpack broke on it; this must tolerate it, the
+    # same way download_bundle()'s own item-parsing already does for
+    # this exact JSON shape.
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    form = _restore_form(filepath=None, name=None, dest_dir="/home/user/restore")
+    form["item"] = ['{"filepath": "L2V0Yw==", "name": "etc", "leaf": false, "mtime": 1700000000, "size": null}']
+    resp = client.post("/api/restore", data=form)
+
+    assert resp.status_code == 200
+    job = restore_jobs.manager.get(resp.json()["id"])
+    assert job.items[0].filepath == "L2V0Yw=="
+    assert job.items[0].name == "etc"
+    assert job.items[0].leaf is False
+
+
 def test_restore_bundle_checks_design_b_not_design_a(client, monkeypatch):
     # A bundle restore always needs guest-exec - design_a availability
     # (the single-call fast path) is irrelevant to it.

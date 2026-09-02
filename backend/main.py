@@ -382,8 +382,21 @@ async def restore(
                 detail=caps.design_b.reason or "Multi-file/directory restore needs VM.GuestAgent.Unrestricted",
             )
         try:
-            items = [restore_bundle.BundleItem(**json.loads(raw)) for raw in item]
-        except (json.JSONDecodeError, TypeError) as exc:
+            # Extracts only the fields BundleItem needs, same as
+            # download_bundle() above already does for the same `item`
+            # JSON shape - the checkbox value each entry comes from also
+            # carries fields irrelevant here (e.g. `mtime`, used only by
+            # the single-file restore path), so this can't be a strict
+            # BundleItem(**spec) unpack.
+            items = [
+                restore_bundle.BundleItem(
+                    filepath=(spec := json.loads(raw))["filepath"],
+                    name=spec["name"],
+                    leaf=spec.get("leaf", True),
+                )
+                for raw in item
+            ]
+        except (json.JSONDecodeError, TypeError, KeyError) as exc:
             raise HTTPException(status_code=400, detail=f"Invalid item entry: {exc}") from None
 
         destination = dest_dir.rstrip("\\/")
