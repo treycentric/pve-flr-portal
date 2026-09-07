@@ -21,8 +21,19 @@ from .auth import SessionData, pve_headers
 from .config import settings
 from .guest_agent_lock import call_with_retries, guest_agent_command
 
-_BASE = f"https://{settings.pve_host}:8006/api2/json/nodes/localhost/storage/{settings.pve_storage}/file-restore"
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
+
+
+def _storage_of(volume: str) -> str:
+    """"pbs-ns-a:backup/vm/133/2026-…Z" -> "pbs-ns-a". The volid's own
+    prefix is the storage a snapshot lives on - with multiple configured
+    storages (issue #43) the /storage/{id}/ URL segment for file-restore
+    has to come from here, not from a single global setting."""
+    return volume.split(":", 1)[0]
+
+
+def _file_restore_base(volume: str) -> str:
+    return f"{_API_ROOT}/nodes/localhost/storage/{_storage_of(volume)}/file-restore"
 
 # Conservative denylist, not a full shell-safety abstraction - acceptable
 # for a single-admin homelab tool where a path reaching this check is
@@ -72,8 +83,18 @@ async def list_guest_names(session: SessionData) -> dict[str, str]:
         return {str(item["vmid"]): item["name"] for item in resp.json()["data"] if item.get("name")}
 
 
+async def _list_backup_archives_one(client: httpx.AsyncClient, session: SessionData, storage: str) -> list[dict]:
+    resp = await client.get(
+        f"{_API_ROOT}/nodes/localhost/storage/{storage}/content",
+        params={"content": "backup"},
+        headers=pve_headers(session),
+    )
+    resp.raise_for_status()
+    return resp.json()["data"]
+
+
 async def list_backup_archives(session: SessionData) -> list[dict]:
-    """All backup archives on the configured storage, straight from PVE
+    """All backup archives across every configured storage, straight from PVE
     (GET /nodes/localhost/storage/{storage}/content?content=backup) -
     replaces the old direct-to-PBS admin API calls entirely (docs/plan.md
     §7.1). Confirmed response shape against the real environment
@@ -90,21 +111,32 @@ async def list_backup_archives(session: SessionData) -> list[dict]:
     Results are gated by the same VM.Backup permission file-restore
     itself requires, so a caller only ever sees archives for guests
     their own PVE account has that permission on.
+
+    Issue #43: iterates every configured storage (my cluster runs 3, one
+    per PBS namespace) and merges. A storage the caller can't see (403)
+    or that is momentarily unreachable is skipped so the portal still
+    shows the rest; only an all-storages failure re-raises (the last
+    error seen).
     """
+    results: list[dict] = []
+    last_error: Exception | None = None
+    any_ok = False
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
-        resp = await client.get(
-            f"{_API_ROOT}/nodes/localhost/storage/{settings.pve_storage}/content",
-            params={"content": "backup"},
-            headers=pve_headers(session),
-        )
-        resp.raise_for_status()
-        return resp.json()["data"]
+        for storage in settings.pve_storages:
+            try:
+                results.extend(await _list_backup_archives_one(client, session, storage))
+                any_ok = True
+            except httpx.HTTPError as exc:
+                last_error = exc
+    if not any_ok and last_error is not None:
+        raise last_error
+    return results
 
 
 async def list_path(session: SessionData, volume: str, filepath: str = "/") -> list[dict]:
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client:
         resp = await client.get(
-            f"{_BASE}/list",
+            f"{_file_restore_base(volume)}/list",
             params={"volume": volume, "filepath": filepath},
             headers=pve_headers(session),
         )
@@ -223,7 +255,9 @@ async def open_download(
         params["tar"] = 1
     # No timeout: cold lookups + large archives can legitimately take a while (§3).
     client = httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=None)
-    request = client.build_request("GET", f"{_BASE}/download", params=params, headers=pve_headers(session))
+    request = client.build_request(
+        "GET", f"{_file_restore_base(volume)}/download", params=params, headers=pve_headers(session)
+    )
     response = await client.send(request, stream=True)
     if response.status_code >= 400:
         await response.aread()

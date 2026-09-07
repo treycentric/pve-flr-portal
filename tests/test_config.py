@@ -83,6 +83,34 @@ def test_data_dir_default_and_ensure_creates_it(tmp_path, monkeypatch):
         importlib.reload(config)
 
 
+def test_csv_parsing_trims_dedupes_and_preserves_order(monkeypatch):
+    monkeypatch.setenv("STORES", " a , b ,a,  , c ")
+    assert config._csv("STORES", "") == ("a", "b", "c")
+    monkeypatch.delenv("STORES", raising=False)
+    assert config._csv("STORES", "x") == ("x",)
+
+
+def test_multiple_storages_parsed_and_pve_storage_is_the_first(monkeypatch):
+    monkeypatch.setenv("PVE_HOST", "example.org")
+    monkeypatch.setenv("PVE_STORAGE", "pbs-ns-a, pbs-ns-b ,pbs-ns-c")
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.settings.pve_storages == ("pbs-ns-a", "pbs-ns-b", "pbs-ns-c")
+        assert reloaded.settings.pve_storage == "pbs-ns-a"
+    finally:
+        monkeypatch.setenv("PVE_HOST", "pve.test.local")
+        monkeypatch.setenv("PVE_STORAGE", "pbs")
+        importlib.reload(config)
+
+
+def test_storages_required_raises_on_empty(monkeypatch):
+    monkeypatch.setenv("PVE_STORAGE", "  , ")
+    with pytest.raises(RuntimeError, match="PVE_STORAGE"):
+        importlib.reload(config)
+    monkeypatch.setenv("PVE_STORAGE", "pbs")
+    importlib.reload(config)
+
+
 def test_get_required_missing_raises(monkeypatch):
     monkeypatch.delenv("NEEDED", raising=False)
     with pytest.raises(RuntimeError, match="NEEDED"):

@@ -1,11 +1,24 @@
+import dataclasses
+
 import httpx
 import pytest
 import respx
 
 from backend import pve_client
 
-BASE = pve_client._BASE
+
+def _with_storages(monkeypatch, *ids):
+    monkeypatch.setattr(
+        pve_client, "settings", dataclasses.replace(pve_client.settings, pve_storages=tuple(ids))
+    )
+
 API = pve_client._API_ROOT
+
+
+def base(volume: str) -> str:
+    """file-restore URL base for a volume - the storage segment now comes
+    from the volid's own prefix, not a global setting (issue #43)."""
+    return pve_client._file_restore_base(volume)
 
 
 def test_api_node_type_maps_app_internal_names():
@@ -122,9 +135,39 @@ async def test_list_backup_archives_returns_data(session_data):
     assert route.calls.last.request.url.params["content"] == "backup"
 
 
+def test_storage_of_reads_the_volid_prefix():
+    assert pve_client._storage_of("pbs-ns-a:backup/vm/133/2026-01-01T00:00:00Z") == "pbs-ns-a"
+    assert pve_client._storage_of("vol") == "vol"
+
+
+@respx.mock
+async def test_list_backup_archives_merges_every_configured_storage(session_data, monkeypatch):
+    _with_storages(monkeypatch, "s1", "s2", "s3")
+    respx.get(f"{API}/nodes/localhost/storage/s1/content").mock(
+        return_value=httpx.Response(200, json={"data": [{"vmid": 1, "volid": "s1:backup/vm/1/x"}]})
+    )
+    respx.get(f"{API}/nodes/localhost/storage/s2/content").mock(
+        return_value=httpx.Response(403, text="no access")  # skipped, not fatal
+    )
+    respx.get(f"{API}/nodes/localhost/storage/s3/content").mock(
+        return_value=httpx.Response(200, json={"data": [{"vmid": 2, "volid": "s3:backup/ct/2/y"}]})
+    )
+    out = await pve_client.list_backup_archives(session_data)
+    assert [a["volid"] for a in out] == ["s1:backup/vm/1/x", "s3:backup/ct/2/y"]
+
+
+@respx.mock
+async def test_list_backup_archives_raises_only_when_every_storage_fails(session_data, monkeypatch):
+    _with_storages(monkeypatch, "s1", "s2")
+    respx.get(f"{API}/nodes/localhost/storage/s1/content").mock(return_value=httpx.Response(500, text="boom"))
+    respx.get(f"{API}/nodes/localhost/storage/s2/content").mock(return_value=httpx.Response(503, text="down"))
+    with pytest.raises(httpx.HTTPStatusError):
+        await pve_client.list_backup_archives(session_data)
+
+
 @respx.mock
 async def test_list_path_passes_volume_and_filepath(session_data):
-    route = respx.get(f"{BASE}/list").mock(
+    route = respx.get(f"{base('pbs:backup/vm/133/x')}/list").mock(
         return_value=httpx.Response(200, json={"data": [{"text": "etc", "leaf": False}]})
     )
     out = await pve_client.list_path(session_data, "pbs:backup/vm/133/x", "/")
@@ -136,7 +179,7 @@ async def test_list_path_passes_volume_and_filepath(session_data):
 
 @respx.mock
 async def test_list_path_raises_on_http_error(session_data):
-    respx.get(f"{BASE}/list").mock(return_value=httpx.Response(500, text="boom"))
+    respx.get(f"{base('vol')}/list").mock(return_value=httpx.Response(500, text="boom"))
     with pytest.raises(httpx.HTTPStatusError):
         await pve_client.list_path(session_data, "vol", "/")
 
@@ -191,7 +234,7 @@ async def test_write_guest_file_does_not_retry_on_timeout(session_data):
 
 @respx.mock
 async def test_open_download_streams_and_sets_tar_param(session_data):
-    route = respx.get(f"{BASE}/download").mock(
+    route = respx.get(f"{base('vol')}/download").mock(
         return_value=httpx.Response(200, content=b"file-bytes", headers={"content-type": "application/x-tar"})
     )
     client, response = await pve_client.open_download(session_data, "vol", "Zm9v", tar=True)
@@ -205,6 +248,6 @@ async def test_open_download_streams_and_sets_tar_param(session_data):
 
 @respx.mock
 async def test_open_download_error_response_is_raised_and_cleaned_up(session_data):
-    respx.get(f"{BASE}/download").mock(return_value=httpx.Response(404, text="missing"))
+    respx.get(f"{base('vol')}/download").mock(return_value=httpx.Response(404, text="missing"))
     with pytest.raises(httpx.HTTPStatusError):
         await pve_client.open_download(session_data, "vol", "bad", tar=False)
