@@ -232,6 +232,16 @@ sets the floor. A guest whose only fetch tool can't do the resolved
 mode (`certutil`/`bitsadmin`/`bash` under `insecure`, `bash` under
 `verify`) falls back to the chunked write path.
 
+**If the portal container's IP changes** (or you point a data NIC at a
+different address): update `local_ip` in `RESTORE_DATA_NICS` to match and
+restart. The auto-generated `certs/data-plane.{crt,key}` regenerates
+itself with the new IP SAN on restart — no manual step. If you supplied
+your **own** data-plane cert, reissue it with the new IP/hostname in the
+SAN; the portal won't touch an admin-supplied cert, it only logs a
+"does not cover" warning and `verify` clients then reject it. (The main
+UI cert is unaffected — it's keyed to `PVE_HOST`/`localhost`, not the
+container IP.)
+
 ## Tests
 
 ```

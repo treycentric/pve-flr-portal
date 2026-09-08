@@ -1681,7 +1681,12 @@ for every configured data-NIC IP — an IP-literal URL needs IP SANs, not
 a CN (modern clients ignore CN for IPs). A per-NIC `"hostname"` field in
 the `RESTORE_DATA_NICS` entry (optional) puts a DNS name in the URL and
 SAN instead, sidestepping old-Windows IP-SAN quirks for admins with
-data-segment name resolution.
+data-segment name resolution. The auto-generated cert is regenerated on
+startup whenever the configured SAN set no longer matches it — so
+**changing a data NIC's IP is just: update `local_ip`, restart.** An
+admin-supplied cert is never regenerated; after an IP change, reissue it
+with the new SAN yourself (the portal logs a "does not cover" warning
+and `verify` clients reject it until you do).
 
 **Guest trust-store management.** `RESTORE_DATA_NIC_TLS_INSTALL_CA` =
 `never` (default is `never`, but the shipped `PREFERRED` default is
