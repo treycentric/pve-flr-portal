@@ -866,6 +866,7 @@ async def test_design_c_default_mode_is_verify_over_https(manager, session_data,
     assert "-k" not in argv  # verify, not skip-verify
     assert argv[-1].startswith("https://10.0.5.5:8008/api/restore-downloads/")
     assert any("TLS: verify" in line for line in job.log_lines)
+    assert any("guest validated the TLS certificate" in line for line in job.log_lines)
 
 
 async def test_design_c_preferred_insecure_adds_skip_verify(manager, session_data, monkeypatch):

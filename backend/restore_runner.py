@@ -491,7 +491,15 @@ async def _try_direct_network_transfer(
     if exitcode != 0:
         raise RuntimeError(f"Direct Network Transfer failed via {tool}: {err.strip() or out.strip()}")
     await _verify_destination_exists(job, guest_os_family, path=fetch_dest)
-    job.log("Direct Network Transfer: fetch complete.")
+    if mode == "verify":
+        # `curl -fsSL` / `wget -q` / `Invoke-WebRequest` do full chain +
+        # hostname validation by default and fail the fetch on any cert
+        # problem, so a clean exit here means the guest trusted the
+        # data-plane cert. (`insecure` skipped that check; `plaintext`
+        # had no TLS.)
+        job.log(f"Direct Network Transfer: fetch complete - the guest validated the TLS certificate ({tool}).")
+    else:
+        job.log(f"Direct Network Transfer: fetch complete (TLS: {mode}).")
     return True
 
 
