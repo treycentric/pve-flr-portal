@@ -8,33 +8,26 @@ timeline code) is archived at
 Current architecture/reference docs live in
 [`docs/plan.md`](docs/plan.md).
 
-## PH.5 — Push-to-guest (#5, #22, #24 — built, live-verified, not yet merged to main)
+## PH.5 — Push-to-guest — SHIPPED (v1.1.0, #5/#22/#24)
 
 Restore file(s)/directories directly into the *running* guest via
-`qemu-guest-agent` (QGA) — done, on branch `feat/ph5-push-to-guest`,
-not yet squash-merged to `main`. Covers: capability-detected dual path
-(a single small `agent/file-write` call when it fits, otherwise
-chunked scratch-write+concat via guest-exec), Direct Network Transfer
-(the guest fetches large content itself over a configured data NIC -
-issue #22) as a faster alternative to chunking, and full multi-file/
-directory bundle restore with an embedded, guest-side-verified
-checksum manifest (issue #24). Live-verified against both a real Linux
-CT (multi-item bundle via Direct Network Transfer) and a real Windows
-VM (single-directory restore, zip-fallback + chunked write). Full
-design/build/live-testing history is in `docs/plan.md` §7.5-§7.7 -
-each real bug found along the way (directory double-nesting, disk
-exhaustion, misleading progress display, timeouts, memory blow-ups,
-Windows quoting) has its own "Real-world finding" entry there with the
-fix, test, and commit.
+`qemu-guest-agent` (QGA). Released in v1.1.0. Covers: capability-detected
+dual path (a single small `agent/file-write` call when it fits,
+otherwise chunked scratch-write+concat via guest-exec), Direct Network
+Transfer (the guest fetches large content itself over a configured data
+NIC — issue #22) as a faster alternative to chunking, and full
+multi-file/directory bundle restore with an embedded, guest-side-verified
+checksum manifest (issue #24). Live-verified against a real Linux CT
+(multi-item bundle via Direct Network Transfer) and a real Windows VM
+(single-directory restore, zip-fallback + chunked write). Full
+design/build/live-testing history is in `docs/plan.md` §7.5–§7.7 — each
+real bug found along the way (directory double-nesting, disk exhaustion,
+misleading progress display, timeouts, memory blow-ups, Windows quoting)
+has its own "Real-world finding" entry there with the fix, test, and
+commit.
 
-**Remaining before this is really "done":**
-- [ ] Squash-merge `feat/ph5-push-to-guest` into `main` (paused at the
-  user's request pending their own live testing - testing is now
-  complete, ready whenever they say go).
-- [ ] Version bump + `CHANGELOG.md` entry via `scripts/release.py` as
-  part of that merge, per `docs/dev/versioning.md`.
+### Push-to-guest follow-ons (open, not blockers)
 
-**Deliberately deferred follow-ons, not blockers:**
 - #25 — zero-buffer streaming bundle builder (vs. today's local-disk
   staging), tracked separately since staging-through-disk's cost
   (confirmed real live: a multi-hundred-MB selection can matter on a

@@ -95,9 +95,9 @@ class Settings:
     # restore is observed crowding out other guest-agent users.
     guest_agent_min_command_gap_seconds: float
 
-    # Design C (docs/plan.md §7.6, issue #22 - not yet wired into a live
-    # restore): the data-plane NIC(s) a restore's network-pull download
-    # endpoint may be served from, one entry per non-routable subnet a
+    # Design C / "Direct Network Transfer" (docs/plan.md §7.6, issue #22,
+    # shipped v1.1.0): the data-plane NIC(s) a restore's network-pull
+    # download endpoint may be served from, one entry per non-routable subnet a
     # target guest might live in. Raw JSON here, parsed by
     # restore_network_pull.parse_data_nics() - kept as a plain string
     # rather than parsed eagerly so a malformed value fails where it's

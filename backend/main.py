@@ -499,10 +499,11 @@ async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.g
 
 @app.get("/api/restore-downloads/{token}")
 async def restore_download_fetch(token: str):
-    """Design C (docs/plan.md §7.6, issue #22) - not yet reachable from a
-    live restore (nothing mints a token yet; that's a later step). The
-    endpoint a Design C bootstrap script's `curl`/`Invoke-WebRequest`/etc.
-    fetches its file from, once wired in. Deliberately **not** gated by
+    """Design C / "Direct Network Transfer" (docs/plan.md §7.6, issue
+    #22). The endpoint a restore's bootstrap `curl`/`Invoke-WebRequest`/
+    etc. in the guest fetches its file from; `restore_runner.py`'s
+    `_try_direct_network_transfer()` mints the token per eligible job.
+    Deliberately **not** gated by
     `Depends(auth.get_session)` - the guest has no PVE session and must
     never be handed one; the single-use token minted by
     restore_download.mint_token() is the only credential here, consumed
