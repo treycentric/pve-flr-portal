@@ -217,6 +217,16 @@ gives the container the host's real interfaces directly (on Windows/Mac
 this needs Docker Desktop's "Enable host networking" setting on first):
 `docker compose --profile hostnet up --build pve-flr-portal-hostnet`.
 
+**Data-plane TLS (issue #47, docs/plan.md §7.6.1).** Once
+`RESTORE_DATA_NICS` is set, the download route is served over **HTTPS**
+by default — `RESTORE_DATA_NIC_TLS_PREFERRED` (`verify` / `insecure` /
+`plaintext`) and `..._MINIMUM` bound a per-guest ladder; a self-signed
+data-plane cert with the right IP SANs is generated at
+`certs/data-plane.{crt,key}` unless you supply your own. Set
+`RESTORE_DATA_NIC_TLS_PREFERRED=plaintext` for the pre-#47 HTTP
+behaviour. Guests whose only fetch tool can't do the resolved TLS mode
+(`certutil`/`bitsadmin`/`bash`) fall back to the chunked write path.
+
 ## Tests
 
 ```

@@ -28,6 +28,8 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from .config import TLS_MODES
+
 ExecFn = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
 
 
@@ -35,6 +37,11 @@ ExecFn = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
 class DataNic:
     cidr: str
     local_ip: str
+    # Optional DNS name for this segment (issue #47). When set it's used
+    # in the download URL and the data-plane cert's SAN instead of the
+    # bare IP - sidesteps old-Windows IP-SAN quirks for `verify`. The
+    # guest must be able to resolve it.
+    hostname: str | None = None
 
     def __post_init__(self) -> None:
         # Validated eagerly so a typo in the admin's config surfaces
@@ -42,6 +49,12 @@ class DataNic:
         # deep inside subnet-matching later.
         ipaddress.ip_network(self.cidr, strict=False)
         ipaddress.ip_address(self.local_ip)
+        if self.hostname is not None and not self.hostname.strip():
+            raise ValueError("data NIC 'hostname', when given, must be non-empty")
+
+    @property
+    def url_host(self) -> str:
+        return self.hostname or self.local_ip
 
 
 class InvalidDataNicConfig(ValueError):
@@ -50,11 +63,11 @@ class InvalidDataNicConfig(ValueError):
 
 def parse_data_nics(raw: str) -> list[DataNic]:
     """Parses RESTORE_DATA_NICS - a JSON array of {"cidr": ..., "local_ip":
-    ...} objects, one per non-routable subnet a target guest might live
-    in. Empty/blank input means Design C is unconfigured (not an error -
-    the feature is opt-in); a non-empty value that fails to parse is a
-    real admin mistake and raises, rather than silently disabling the
-    feature the admin thought they'd just turned on."""
+    ..., "hostname"?: ...} objects, one per non-routable subnet a target
+    guest might live in. Empty/blank input means Design C is unconfigured
+    (not an error - the feature is opt-in); a non-empty value that fails
+    to parse is a real admin mistake and raises, rather than silently
+    disabling the feature the admin thought they'd just turned on."""
     raw = (raw or "").strip()
     if not raw or raw == "[]":
         return []
@@ -65,7 +78,7 @@ def parse_data_nics(raw: str) -> list[DataNic]:
     if not isinstance(entries, list):
         raise InvalidDataNicConfig("RESTORE_DATA_NICS must be a JSON array")
     try:
-        return [DataNic(cidr=e["cidr"], local_ip=e["local_ip"]) for e in entries]
+        return [DataNic(cidr=e["cidr"], local_ip=e["local_ip"], hostname=e.get("hostname")) for e in entries]
     except (KeyError, TypeError) as exc:
         raise InvalidDataNicConfig(f"Each RESTORE_DATA_NICS entry needs 'cidr' and 'local_ip': {exc}") from exc
     except ValueError as exc:  # from DataNic.__post_init__'s ipaddress parsing
@@ -120,6 +133,42 @@ def _candidates_for(guest_os_family: str | None) -> list[tuple[str, list[str]]]:
     return []  # unknown OS family - nothing to safely probe
 
 
+# --- data-plane TLS ladder (issue #47) --------------------------------
+
+# Tools that cannot skip certificate verification, so they can only do a
+# TLS fetch when the guest already trusts the cert (`verify` mode):
+# certutil goes through WinINet and bitsadmin's one-shot /transfer form
+# has no ignore-cert switch. `bash` has no TLS at all (handled below).
+_NO_SKIP_VERIFY = frozenset({"certutil", "bitsadmin"})
+
+
+def tool_supports_tls(tool: str, mode: str) -> bool:
+    """Can `tool` fetch over the given data-plane TLS mode?
+    `plaintext` - anything. `bash` (/dev/tcp, no TLS) - only plaintext.
+    `insecure` - every tool except certutil/bitsadmin (no skip-verify).
+    `verify` - every tool except bash."""
+    if mode == "plaintext":
+        return True
+    if tool == "bash":
+        return False
+    if mode == "insecure":
+        return tool not in _NO_SKIP_VERIFY
+    return True  # verify
+
+
+def resolve_tls_mode(tool: str, preferred: str, minimum: str) -> str | None:
+    """The strongest TLS mode in [minimum, preferred] that `tool` can
+    actually do, or None if nothing in that range qualifies (the caller
+    then applies RESTORE_DATA_NIC_TLS_ON_UNMET). Walks the ladder down
+    from preferred - `verify` -> `insecure` -> `plaintext` - stopping at
+    minimum."""
+    hi, lo = TLS_MODES.index(preferred), TLS_MODES.index(minimum)
+    for i in range(hi, lo - 1, -1):
+        if tool_supports_tls(tool, TLS_MODES[i]):
+            return TLS_MODES[i]
+    return None
+
+
 @dataclass(frozen=True)
 class FetchPlan:
     """What it takes to actually run one fetch-tool's command in the
@@ -135,7 +184,13 @@ class FetchPlan:
 
 
 def build_fetch_command(
-    tool: str, url: str, destination: str, guest_os_family: str | None, stage_path: str | None = None
+    tool: str,
+    url: str,
+    destination: str,
+    guest_os_family: str | None,
+    stage_path: str | None = None,
+    *,
+    tls: str = "plaintext",
 ) -> FetchPlan:
     """Builds the guest-exec command for one detected fetch tool. `url`
     and `destination` are embedded directly in shell/PowerShell-
@@ -145,8 +200,21 @@ def build_fetch_command(
     passed `pve_client.check_path_safe()` (done once, up front, by the
     caller before any of this runs), and `url` is never user input - it's
     built entirely from this app's own validated pieces (a configured
-    data-NIC IP, this app's own port, a random token), never anything a
+    data-NIC host, this app's own port, a random token), never anything a
     guest or a user supplies.
+
+    `tls` (issue #47) is the resolved data-plane mode for this fetch:
+    - `plaintext` - `url` must be `http://`; no cert handling.
+    - `insecure` - `url` must be `https://`; the command is built to
+      skip certificate verification (`curl -k`, `wget
+      --no-check-certificate`, an unverified `ssl` context for python,
+      a `ServerCertificateValidationCallback` for Invoke-WebRequest, the
+      `SslErrorIgnoreFlags` option for the cscript WinHttpRequest). Not
+      expressible for `certutil`/`bitsadmin`/`bash` - raises (the caller
+      resolves that via the ladder / ON_UNMET).
+    - `verify` - `url` must be `https://`; the guest verifies the cert
+      normally (works only if it already trusts it - PR2 adds CA
+      install). `bash` still raises (no TLS at all).
 
     `stage_path` is required for `cscript` (see FetchPlan's docstring)
     and ignored for every other tool - the caller picks the actual path
@@ -158,8 +226,26 @@ def build_fetch_command(
     applies elsewhere (certutil's hash-output shape, `copy /b`'s exit
     code) before trusting a Windows/POSIX command's exact behavior.
     """
+    from urllib.parse import urlsplit
+
+    scheme = urlsplit(url).scheme
+    want_scheme = "http" if tls == "plaintext" else "https"
+    if scheme != want_scheme:
+        raise ValueError(f"tls={tls!r} needs a {want_scheme}:// URL, got {url!r}")
+    insecure = tls == "insecure"
+    if insecure and not tool_supports_tls(tool, "insecure"):
+        raise ValueError(f"{tool} cannot skip TLS certificate verification (needs a trusted cert / `verify` mode)")
+
     if tool == "Invoke-WebRequest":
-        script = f"Invoke-WebRequest -Uri '{url}' -OutFile '{destination}'"
+        # Old Windows PowerShell (5.1 on .NET 4.5) may not offer TLS 1.2
+        # by default; force it whenever we're on HTTPS. Skip-verify is a
+        # process-wide validation callback (5.1 has no -SkipCertificateCheck).
+        pre = ""
+        if tls != "plaintext":
+            pre += "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+        if insecure:
+            pre += "[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; "
+        script = f"{pre}Invoke-WebRequest -Uri '{url}' -OutFile '{destination}'"
         return FetchPlan(exec_argv=["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
     if tool == "certutil":
         return FetchPlan(exec_argv=["certutil", "-urlcache", "-split", "-f", url, destination])
@@ -179,10 +265,14 @@ def build_fetch_command(
     if tool == "cscript":
         if not stage_path:
             raise ValueError("cscript needs a stage_path to write its .vbs script to")
+        # WinHttpRequestOption_SslErrorIgnoreFlags = 4; 0x3300 = ignore
+        # unknown-CA + wrong-usage + CN-mismatch + expired.
+        ignore_ssl = "http.Option(4) = 13056\n" if insecure else ""
         vbs = (
             'Dim http, stream\n'
             'Set http = CreateObject("WinHttp.WinHttpRequest.5.1")\n'
             f'http.Open "GET", "{url}", False\n'
+            f"{ignore_ssl}"
             "http.Send\n"
             'Set stream = CreateObject("ADODB.Stream")\n'
             "stream.Type = 1\n"  # binary
@@ -197,11 +287,24 @@ def build_fetch_command(
             stage_path=stage_path,
         )
     if tool == "curl":
-        return FetchPlan(exec_argv=["curl", "-fsSL", "-o", destination, url])
+        argv = ["curl", "-fsSL", *(["-k"] if insecure else []), "-o", destination, url]
+        return FetchPlan(exec_argv=argv)
     if tool == "wget":
-        return FetchPlan(exec_argv=["wget", "-q", "-O", destination, url])
+        argv = ["wget", "-q", *(["--no-check-certificate"] if insecure else []), "-O", destination, url]
+        return FetchPlan(exec_argv=argv)
     if tool in ("python3", "python"):
-        py = f"import urllib.request; urllib.request.urlretrieve({url!r}, {destination!r})"
+        # Streaming copy (not urlretrieve) so an unverified ssl context
+        # can be threaded in for `insecure`, and so a large file never
+        # lands wholly in the guest's RAM.
+        py = (
+            "import urllib.request,shutil"
+            + (",ssl" if insecure else "")
+            + "\n"
+            + ("ctx=ssl._create_unverified_context()\n" if insecure else "")
+            + f"r=urllib.request.urlopen({url!r}"
+            + (",context=ctx" if insecure else "")
+            + f")\nf=open({destination!r},'wb')\nshutil.copyfileobj(r,f)\nf.close()\nr.close()\n"
+        )
         return FetchPlan(exec_argv=[tool, "-c", py])
     if tool == "bash":
         # Last resort: a hand-rolled HTTP/1.0 GET over bash's /dev/tcp
@@ -213,21 +316,19 @@ def build_fetch_command(
         # before writing the rest to the destination.
         #
         # Real limitation, not an oversight: /dev/tcp is a plain TCP
-        # socket - bash has no built-in TLS, so this cannot speak HTTPS.
-        # Every other tool on this list (even certutil/bitsadmin) handles
-        # TLS natively; this is the one candidate that can't, which is
-        # exactly why it's last in the priority list. Rather than
-        # generate a script that will fail confusingly against an https
-        # URL, this raises clearly so the caller finds out now.
-        from urllib.parse import urlsplit
-
+        # socket - bash has no built-in TLS, so this cannot speak HTTPS
+        # at all (not even skip-verify). This is the one candidate that
+        # can't, which is why it's last in the priority list and why
+        # `tool_supports_tls("bash", ...)` is False for anything but
+        # plaintext. Rather than generate a script that fails confusingly
+        # in the guest, raise so the caller finds out now and the ladder
+        # / ON_UNMET can take over.
         parts = urlsplit(url)
         if parts.scheme != "http":
             raise ValueError(
                 "The bash /dev/tcp fetch fallback cannot speak TLS - it only works against a plain "
-                f"http:// download URL, got {url!r}. If this is the only available fetch tool for this "
-                "guest, Design C isn't usable here unless the data-NIC download route is served over "
-                "plain HTTP (acceptable given it's already firewalled/token-gated, per docs/plan.md §7.6)."
+                f"http:// download URL, got {url!r}. With a non-plaintext data-plane TLS mode this guest "
+                "falls back to Design B (chunked write over QMP), per docs/plan.md §7.6.1."
             )
         host = parts.hostname
         port = parts.port or 80

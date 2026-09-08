@@ -33,7 +33,7 @@ import httpx
 
 from . import guest_agent, pve_client, restore_bundle, restore_download, restore_network_pull
 from .auth import ensure_fresh_ticket
-from .config import settings
+from .config import TLS_MODES, settings
 from .restore_chunking import (
     DEFAULT_CHUNK_SIZE_BYTES,
     bytes_to_wire_str,
@@ -292,17 +292,19 @@ async def _try_direct_network_transfer(
     behavior, fetching straight to `job.destination` via a token that
     re-proxies `job.source_volume`/`job.source_filepath` from PVE.
 
-    **Why the download URL is plain HTTP, never HTTPS:** every guest
-    fetch tool this app might use would otherwise have to be individually
-    taught to trust this app's own (self-signed by default, docs/plan.md
-    §7.3) certificate, and `bash`'s `/dev/tcp` fallback cannot speak TLS
-    at all regardless. The token (restore_download.py - single-use,
-    short TTL) is the real access control on this one route; the NIC
-    segmentation design (§7.6) firewalls it to begin with. Skipping TLS
-    here is a deliberate, narrow tradeoff, not an oversight - the rest of
-    this app (UI, PVE API calls) stays HTTPS-only as always. Being
-    revisited in issue #47 / docs/plan.md §7.6.1: opt-in HTTPS on the
-    data plane with a configurable verify/insecure/plaintext policy.
+    **Data-plane TLS (issue #47, docs/plan.md §7.6.1).** The download URL
+    is `http://` only when `RESTORE_DATA_NIC_TLS_PREFERRED` is
+    `plaintext` (the legacy behaviour: the token is the access control,
+    NIC segmentation + firewalling the perimeter). Otherwise this
+    resolves the strongest TLS mode in
+    [`RESTORE_DATA_NIC_TLS_MINIMUM`, `..._PREFERRED`] the detected fetch
+    tool supports - `verify` (guest validates the data-plane cert; PR1
+    needs it pre-trusted, PR2 adds CA install) or `insecure` (encryption
+    only) - builds an `https://` URL, and threads the mode into
+    `build_fetch_command()`. If no mode qualifies (a certutil/bitsadmin
+    /bash-only guest under an HTTPS floor), `RESTORE_DATA_NIC_TLS_ON_UNMET`
+    picks `fallback` (return False -> chunked write over QMP, off the
+    data network entirely) or `fail`.
 
     **Not yet wired: `cscript` staging.** Detected as a candidate by
     `detect_fetch_tool()`, but building its command needs a scratch file
@@ -333,16 +335,42 @@ async def _try_direct_network_transfer(
 
     fetch_dest = job.destination if dest_path is None else dest_path
     port = settings.restore_data_nic_port or settings.port
+
+    # Resolve the data-plane TLS mode for this guest (issue #47): the
+    # strongest mode in [minimum, preferred] the detected fetch tool can
+    # actually do. PR1's data listener is HTTPS-only whenever preferred
+    # isn't `plaintext`, so a `plaintext` rung below it can't be served
+    # over the network - clamp the floor up to `insecure` in that case.
+    pref = settings.restore_data_nic_tls_preferred
+    minimum = settings.restore_data_nic_tls_minimum
+    if pref != "plaintext" and TLS_MODES.index(minimum) < TLS_MODES.index("insecure"):
+        minimum = "insecure"
+    mode = restore_network_pull.resolve_tls_mode(tool, pref, minimum)
+    if mode is None:
+        msg = (
+            f"no data-plane TLS mode between {minimum!r} and {pref!r} that {tool} supports "
+            "(certutil/bitsadmin can't skip-verify; bash has no TLS)"
+        )
+        if settings.restore_data_nic_tls_on_unmet == "fail":
+            raise RuntimeError(f"Direct Network Transfer required but unavailable for this guest: {msg}")
+        job.log(f"Direct Network Transfer not available: {msg}.")
+        return False
+
+    scheme = "http" if mode == "plaintext" else "https"
+    host = nic.url_host
     token = restore_download.mint_token(job.id, local_path=None if local_path is None else str(local_path))
-    url = f"http://{nic.local_ip}:{port}/api/restore-downloads/{token}"
+    url = f"{scheme}://{host}:{port}/api/restore-downloads/{token}"
 
     try:
-        plan = restore_network_pull.build_fetch_command(tool, url, fetch_dest, guest_os_family)
+        plan = restore_network_pull.build_fetch_command(tool, url, fetch_dest, guest_os_family, tls=mode)
     except ValueError as exc:
         job.log(f"Direct Network Transfer not available: {tool} can't be used for this download ({exc}).")
         return False
 
-    job.log(f"Direct Network Transfer: fetching via {tool} over {nic.local_ip} (matches the guest's own subnet).")
+    job.log(
+        f"Direct Network Transfer: fetching via {tool} over {host} (TLS: {mode}) - "
+        "matches the guest's own subnet."
+    )
     # The fetch itself scales with file size (and network throughput),
     # not the ~15s "fast command" default that every other guest-exec
     # call in this module uses - confirmed live 2026-09-01: the default

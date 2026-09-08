@@ -111,6 +111,53 @@ def test_storages_required_raises_on_empty(monkeypatch):
     importlib.reload(config)
 
 
+def test_data_nic_tls_defaults_and_parsing(monkeypatch):
+    monkeypatch.setenv("PVE_HOST", "example.org")
+    monkeypatch.setenv("PVE_STORAGE", "pbs")
+    for var in (
+        "RESTORE_DATA_NIC_TLS_PREFERRED",
+        "RESTORE_DATA_NIC_TLS_MINIMUM",
+        "RESTORE_DATA_NIC_TLS_ON_UNMET",
+        "RESTORE_DATA_NIC_TLS_MIN_VERSION",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        s = reloaded.settings
+        assert s.restore_data_nic_tls_preferred == "insecure"
+        assert s.restore_data_nic_tls_minimum == "insecure"
+        assert s.restore_data_nic_tls_on_unmet == "fallback"
+        assert s.restore_data_nic_tls_min_version == "1.2"
+        assert s.restore_data_nic_tls_cert_file == "certs/data-plane.crt"
+    finally:
+        monkeypatch.setenv("PVE_HOST", "pve.test.local")
+        importlib.reload(config)
+
+
+def test_data_nic_tls_rejects_minimum_stricter_than_preferred(monkeypatch):
+    monkeypatch.setenv("PVE_HOST", "example.org")
+    monkeypatch.setenv("PVE_STORAGE", "pbs")
+    monkeypatch.setenv("RESTORE_DATA_NIC_TLS_PREFERRED", "insecure")
+    monkeypatch.setenv("RESTORE_DATA_NIC_TLS_MINIMUM", "verify")
+    with pytest.raises(RuntimeError, match="stricter"):
+        importlib.reload(config)
+    monkeypatch.setenv("PVE_HOST", "pve.test.local")
+    monkeypatch.delenv("RESTORE_DATA_NIC_TLS_PREFERRED", raising=False)
+    monkeypatch.delenv("RESTORE_DATA_NIC_TLS_MINIMUM", raising=False)
+    importlib.reload(config)
+
+
+def test_data_nic_tls_rejects_unknown_mode(monkeypatch):
+    monkeypatch.setenv("PVE_HOST", "example.org")
+    monkeypatch.setenv("PVE_STORAGE", "pbs")
+    monkeypatch.setenv("RESTORE_DATA_NIC_TLS_MIN_VERSION", "1.1")
+    with pytest.raises(RuntimeError, match="RESTORE_DATA_NIC_TLS_MIN_VERSION"):
+        importlib.reload(config)
+    monkeypatch.setenv("PVE_HOST", "pve.test.local")
+    monkeypatch.delenv("RESTORE_DATA_NIC_TLS_MIN_VERSION", raising=False)
+    importlib.reload(config)
+
+
 def test_get_required_missing_raises(monkeypatch):
     monkeypatch.delenv("NEEDED", raising=False)
     with pytest.raises(RuntimeError, match="NEEDED"):

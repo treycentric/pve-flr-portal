@@ -43,11 +43,13 @@ commit.
   separate from restore-to-guest) still buffers the whole archive in
   RAM; the streaming techniques #24 built are directly reusable there
   but haven't been applied yet.
-- #47 — HTTPS on the Direct Network Transfer data plane (currently
-  plain HTTP): opt-in `verify`/`insecure`/`plaintext` policy with a
-  downgrade ladder, configurable cert/key/CA paths and IP-SAN
-  generation, optional guest CA install, and a minimum TLS version.
-  Design in `docs/plan.md` §7.6.1.
+- #47 — HTTPS on the Direct Network Transfer data plane. **PR1 landed:**
+  `verify`/`insecure`/`plaintext` policy + downgrade ladder, self-signed
+  data-plane cert with IP SANs, HTTPS data listener, `insecure` skip-verify
+  per fetch tool, per-NIC `hostname`, minimum TLS version. **PR2:**
+  automatic guest CA install (`RESTORE_DATA_NIC_TLS_INSTALL_CA`), and
+  the `PREFERRED` default flips to `verify`. Neither PR is live-verified
+  yet. Design in `docs/plan.md` §7.6.1.
 
 ## PH.6 — Directory-listing cache (optional, perf only)
 
