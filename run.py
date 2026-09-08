@@ -76,7 +76,12 @@ def _bind_error(ip: str, port: int) -> str | None:
 def _prepare_data_plane_cert(data_nics) -> tuple[Path, Path]:
     cert_path = Path(settings.restore_data_nic_tls_cert_file)
     key_path = Path(settings.restore_data_nic_tls_key_file)
-    ip_sans = tuple(dict.fromkeys(nic.local_ip for nic in data_nics))
+    # The cert only needs to cover what the download URL will actually
+    # present: a NIC's `hostname` when it has one, otherwise its IP. A
+    # NIC with a hostname doesn't need an IP SAN (the URL uses the name),
+    # so an admin's DNS-only cert (Let's Encrypt / step-ca) isn't flagged
+    # as "does not cover".
+    ip_sans = tuple(dict.fromkeys(nic.local_ip for nic in data_nics if not nic.hostname))
     dns_sans = tuple(dict.fromkeys(nic.hostname for nic in data_nics if nic.hostname))
     ensure_data_plane_cert(cert_path, key_path, ip_sans, dns_sans)
     return cert_path, key_path

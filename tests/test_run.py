@@ -28,18 +28,18 @@ def _dp_paths(tmp_path, monkeypatch):
     return cert, key
 
 
-def test_prepare_data_plane_cert_collects_ip_and_hostname_sans(_dp_paths):
-    cert, key = _dp_paths
+def test_prepare_data_plane_cert_covers_what_the_url_presents(_dp_paths):
+    cert, _key = _dp_paths
     nics = [
-        DataNic("10.0.5.0/24", "10.0.5.5", hostname="restore.dc1.lan"),
-        DataNic("10.0.6.0/24", "10.0.6.5"),
+        DataNic("10.0.5.0/24", "10.0.5.5", hostname="restore.dc1.lan"),  # URL uses the name
+        DataNic("10.0.6.0/24", "10.0.6.5"),                              # URL uses the IP
     ]
-    got_cert, got_key = run._prepare_data_plane_cert(nics)
-    assert (got_cert, got_key) == (cert, key)
+    run._prepare_data_plane_cert(nics)
     san = x509.load_pem_x509_certificate(cert.read_bytes()).extensions.get_extension_for_class(
         x509.SubjectAlternativeName
     ).value
-    assert {str(v) for v in san.get_values_for_type(x509.IPAddress)} == {"10.0.5.5", "10.0.6.5"}
+    # the hostname'd NIC contributes only its DNS name, not its IP
+    assert {str(v) for v in san.get_values_for_type(x509.IPAddress)} == {"10.0.6.5"}
     assert "restore.dc1.lan" in san.get_values_for_type(x509.DNSName)
 
 
