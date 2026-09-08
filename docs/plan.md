@@ -1714,10 +1714,14 @@ things surfaced immediately, both fixed:
   address (easy to do — you want the *portal's* IP on that segment, not
   the guest's) made uvicorn's `create_server` raise `EADDRNOTAVAIL`,
   which `sys.exit()`s the process — the **whole portal** went down, not
-  just that one listener. `run.py` now preflight-checks each data IP with
-  a throwaway `bind((ip, 0))` and skips it with a clear log line, and
-  wraps each data listener so a later bind failure is logged, not fatal.
-  The main UI/PVE listener's lifetime alone governs the process.
+  just that one listener. And even with a correct IP, a specific-IP
+  listener on the same port as the main `0.0.0.0` bind is `EADDRINUSE`
+  on Linux. `run.py` now (a) defaults the data port to `PORT+1`, not
+  `PORT`; (b) preflight-`bind()`s each `(local_ip, data_port)` and skips
+  it with a reason (`not a local address` vs `already in use — set
+  RESTORE_DATA_NIC_PORT`); (c) wraps each data listener so a later bind
+  failure is logged, not fatal. The main UI/PVE listener's lifetime
+  alone governs the process.
 - A large single-file restore that fell through to the chunked path
   (DNT unconfigured) sat at a displayed ~99% for a long time with no log
   output — the "+1 ahead of current" placeholder pinning near 100%, and

@@ -126,7 +126,9 @@ class Settings:
     restore_download_token_ttl_seconds: float
     # The port a Direct Network Transfer download URL points at on the
     # chosen data NIC, and that run.py binds the data-plane listener(s)
-    # on. 0 (default) means "same as PORT".
+    # on. 0 (default) resolves to PORT+1 - a specific-IP listener on the
+    # same port as the main 0.0.0.0 bind collides (EADDRINUSE) on most
+    # kernels. Set it explicitly to share the port if your setup allows.
     restore_data_nic_port: int
 
     # Direct Network Transfer data-plane TLS (issue #47, docs/plan.md

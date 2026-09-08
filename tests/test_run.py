@@ -55,7 +55,21 @@ def test_min_tls_map_covers_both_configured_values():
     assert set(run._MIN_TLS) == {"1.2", "1.3"}
 
 
-def test_bindable_true_for_loopback_false_for_a_non_local_address():
-    assert run._bindable("127.0.0.1") is True
+def test_bind_error_none_for_loopback_reason_for_a_non_local_address():
+    assert run._bind_error("127.0.0.1", 0) is None
     # TEST-NET-1 (RFC 5737) - never a local address on a real host.
-    assert run._bindable("192.0.2.123") is False
+    reason = run._bind_error("192.0.2.123", 0)
+    assert reason is not None and "not a local address" in reason
+
+
+def test_bind_error_reports_a_port_collision(tmp_path):
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    try:
+        reason = run._bind_error("127.0.0.1", port)
+        assert reason is not None and "already in use" in reason
+    finally:
+        s.close()

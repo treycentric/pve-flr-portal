@@ -28,6 +28,7 @@ self-signed data-plane cert (IP SANs for the configured NICs) unless the
 admin drops their own at RESTORE_DATA_NIC_TLS_CERT_FILE/_KEY_FILE.
 """
 import asyncio
+import errno
 import logging
 import socket
 import ssl
@@ -48,20 +49,26 @@ def _data_plane_tls_enabled() -> bool:
     return settings.restore_data_nic_tls_preferred != "plaintext"
 
 
-def _bindable(ip: str) -> bool:
-    """True if this host can bind a socket to `ip` (i.e. it's a local
-    address). Used to skip a misconfigured data NIC before it takes the
-    whole process down with a startup bind error."""
+def _bind_error(ip: str, port: int) -> str | None:
+    """None if this host can bind `(ip, port)`, else a short reason -
+    used to skip a misconfigured data NIC before it takes the whole
+    process down with a startup bind error. Distinguishes "not a local
+    address" (wrong local_ip) from "port already in use" (usually a
+    collision with the main 0.0.0.0 listener - set RESTORE_DATA_NIC_PORT)."""
     family = socket.AF_INET6 if ":" in ip else socket.AF_INET
     try:
         probe = socket.socket(family, socket.SOCK_STREAM)
-    except OSError:
-        return False
+    except OSError as exc:
+        return str(exc)
     try:
-        probe.bind((ip, 0))
-        return True
-    except OSError:
-        return False
+        probe.bind((ip, port))
+        return None
+    except OSError as exc:
+        if exc.errno == errno.EADDRNOTAVAIL:
+            return f"{ip} is not a local address on this host - fix local_ip or attach that interface"
+        if exc.errno == errno.EADDRINUSE:
+            return f"{ip}:{port} is already in use - set RESTORE_DATA_NIC_PORT to a free port"
+        return str(exc)
     finally:
         probe.close()
 
@@ -98,7 +105,11 @@ async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> N
         ssl_keyfile=str(key_path),
     )
 
-    data_port = settings.restore_data_nic_port or settings.port
+    # A specific-IP listener on the same port as the main 0.0.0.0 bind
+    # collides (EADDRINUSE) on most kernels, so default the data plane to
+    # PORT+1 rather than PORT. An admin can still pin it with
+    # RESTORE_DATA_NIC_PORT if their setup allows sharing.
+    data_port = settings.restore_data_nic_port or (settings.port + 1)
     tls = _data_plane_tls_enabled()
     dp_cert = dp_key = dp_ca = None
     if tls:
@@ -114,12 +125,13 @@ async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> N
     # whole point of keeping the data plane separate from the
     # UI/PVE-management listener above.
     for ip in sorted({nic.local_ip for nic in data_nics}):
-        if not _bindable(ip):
+        reason = _bind_error(ip, data_port)
+        if reason is not None:
             _log.error(
-                "RESTORE_DATA_NICS lists local_ip %s, which is not a local address on this host - "
-                "skipping its data listener. Fix local_ip or attach that interface. DNT stays "
-                "unavailable for that subnet.",
+                "Skipping the Direct Network Transfer data listener for %s: %s. The portal is "
+                "running normally; DNT stays unavailable for that subnet.",
                 ip,
+                reason,
             )
             continue
         if tls:
