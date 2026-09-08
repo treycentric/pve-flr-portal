@@ -264,7 +264,19 @@ def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monke
     body = resp.json()
     assert body["design_a"]["available"] is False
     assert body["design_b"]["available"] is False
-    assert body["design_a"]["reason"]
+    assert "VM.Audit" in body["design_a"]["reason"]  # 403 -> a permissions hint
+
+
+def test_restore_capabilities_degrades_on_connect_error(client, monkeypatch):
+    from backend import guest_agent
+
+    async def unreachable(session, guest_type, vmid):
+        raise httpx.ConnectError("nope", request=httpx.Request("GET", "http://x"))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", unreachable)
+    resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
+    assert resp.status_code == 200
+    assert "reach PVE" in resp.json()["design_a"]["reason"]
 
 
 def _available_caps(**overrides):

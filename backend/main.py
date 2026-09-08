@@ -1,6 +1,7 @@
 import dataclasses
 import io
 import json
+import logging
 import tarfile
 import zipfile
 from datetime import UTC, datetime
@@ -31,6 +32,7 @@ from .restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 from .version import REPO_URL, __version__
 
 app = FastAPI(title="pve-flr-portal")
+_log = logging.getLogger("pve_flr_portal.main")
 
 _TEMPLATES_DIR = "backend/templates"
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
@@ -323,8 +325,22 @@ async def restore_capabilities(
         raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
     try:
         caps = await guest_agent.get_restore_capabilities(session, type, vmid)
-    except httpx.HTTPStatusError:
-        reason = "could not read this guest's configuration/permissions"
+    except httpx.HTTPError as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            code, path = exc.response.status_code, exc.request.url.path
+            _log.warning("restore-capabilities for %s %s: HTTP %s from %s", type, vmid, code, path)
+            if code in (401, 403):
+                reason = f"your PVE account can't read this guest ({code} from {path}) - needs VM.Audit on /vms/{vmid}"
+            elif code >= 500:
+                reason = (
+                    f"PVE returned {code} for {path} - on a cluster the guest may live on a node other than "
+                    "the one serving the API (the portal always asks 'localhost'; docs/plan.md §9)"
+                )
+            else:
+                reason = f"could not read this guest's configuration/permissions (HTTP {code} from {path})"
+        else:
+            _log.warning("restore-capabilities for %s %s: %s", type, vmid, exc)
+            reason = f"couldn't reach PVE to check this guest ({exc.__class__.__name__})"
         unavailable = guest_agent.PathAvailability(False, reason)
         caps = guest_agent.RestoreCapabilities(
             agent_running=False,
