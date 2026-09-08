@@ -144,6 +144,9 @@ def test_storage_of_reads_the_volid_prefix():
 @respx.mock
 async def test_list_backup_archives_merges_every_configured_storage(session_data, monkeypatch):
     _with_storages(monkeypatch, "s1", "s2", "s3")
+    respx.get(f"{API}/nodes/localhost/storage").mock(
+        return_value=httpx.Response(200, json={"data": [{"storage": "s1"}, {"storage": "s2"}, {"storage": "s3"}]})
+    )
     respx.get(f"{API}/nodes/localhost/storage/s1/content").mock(
         return_value=httpx.Response(200, json={"data": [{"vmid": 1, "volid": "s1:backup/vm/1/x"}]})
     )
@@ -164,11 +167,30 @@ async def test_list_backup_archives_never_raises_when_every_storage_fails(sessio
     """A totally inaccessible storage set must not 500 the portal - it
     comes back as an empty listing with per-storage errors (issue #43)."""
     _with_storages(monkeypatch, "s1", "s2")
+    respx.get(f"{API}/nodes/localhost/storage").mock(return_value=httpx.Response(200, json={"data": []}))
     respx.get(f"{API}/nodes/localhost/storage/s1/content").mock(return_value=httpx.Response(500, text="boom"))
     respx.get(f"{API}/nodes/localhost/storage/s2/content").mock(return_value=httpx.Response(403, text="nope"))
     out = await pve_client.list_backup_archives(session_data)
     assert out.archives == []
     assert {e.storage for e in out.errors} == {"s1", "s2"}
+
+
+@respx.mock
+async def test_list_backup_archives_flags_a_typo_storage_id_distinctly(session_data, monkeypatch):
+    """PVE's path ACL check returns 403 for a storage id that doesn't
+    exist, same as for one the account can't see - the visible-storage
+    list disambiguates so the banner can say "typo" (issue #43)."""
+    _with_storages(monkeypatch, "pbs-real", "pbs-tpyo")
+    respx.get(f"{API}/nodes/localhost/storage").mock(
+        return_value=httpx.Response(200, json={"data": [{"storage": "pbs-real"}, {"storage": "local"}]})
+    )
+    respx.get(f"{API}/nodes/localhost/storage/pbs-real/content").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    respx.get(f"{API}/nodes/localhost/storage/pbs-tpyo/content").mock(return_value=httpx.Response(403, text="denied"))
+    out = await pve_client.list_backup_archives(session_data)
+    assert [e.storage for e in out.errors] == ["pbs-tpyo"]
+    assert "typo" in out.errors[0].detail
 
 
 @respx.mock

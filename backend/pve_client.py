@@ -101,11 +101,36 @@ class BackupListing:
     errors: list[StorageError] = field(default_factory=list)
 
 
-def _storage_error_detail(exc: httpx.HTTPError) -> str:
+async def list_visible_storages(session: SessionData) -> set[str] | None:
+    """Ids of the storages this caller can see - GET /nodes/localhost/storage
+    is filtered to exactly the ones they hold Datastore.Audit or
+    Datastore.AllocateSpace on, and FileRestoreReader grants the latter,
+    so a correctly-provisioned storage always shows up here. Returns
+    None (not an empty set) if the call itself fails, so a caller can
+    tell "checked, not there" apart from "couldn't check". Used only to
+    turn an opaque 403 on a per-storage call into a "check PVE_STORAGE
+    for a typo" hint - PVE's path-based ACL check returns the same 403
+    for a storage id that simply doesn't exist as for one the account
+    lacks access to (issue #43)."""
+    try:
+        async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+            resp = await client.get(f"{_API_ROOT}/nodes/localhost/storage", headers=pve_headers(session))
+            resp.raise_for_status()
+            return {s["storage"] for s in resp.json()["data"] if "storage" in s}
+    except (httpx.HTTPError, KeyError, TypeError):
+        return None
+
+
+def _storage_error_detail(exc: httpx.HTTPError, storage: str, visible: set[str] | None) -> str:
+    if visible is not None and storage not in visible:
+        return (
+            "not found on this PVE node — check PVE_STORAGE for a typo "
+            f"(or grant the FileRestoreReader role on /storage/{storage} if the id is right)"
+        )
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
-        if code == 403:
-            return "permission denied — grant the FileRestoreReader role on this storage (see the README)"
+        if code in (401, 403):
+            return f"permission denied — grant the FileRestoreReader role on /storage/{storage} (see the README)"
         if code == 404:
             return "no such storage on this PVE node — check the id in PVE_STORAGE"
         return f"PVE returned HTTP {code}"
@@ -149,20 +174,31 @@ async def list_backup_archives(session: SessionData) -> "BackupListing":
     regression the first cut of this feature shipped). The one exception
     is a 401: that means the ticket is bad and belongs to the auth
     handler (re-login), so it propagates.
+
+    On any per-storage failure the visible-storage list is fetched once
+    (lazily) to tell a PVE_STORAGE typo apart from a missing grant - see
+    list_visible_storages().
     """
     listing = BackupListing()
+    visible: set[str] | None = None
+    checked_visible = False
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         for storage in settings.pve_storages:
             try:
                 listing.archives.extend(await _list_backup_archives_one(client, session, storage))
+                continue
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 401:
                     raise
-                _log.warning("skipping storage %r: %s", storage, exc)
-                listing.errors.append(StorageError(storage, _storage_error_detail(exc)))
+                failure: httpx.HTTPError = exc
             except httpx.HTTPError as exc:
-                _log.warning("skipping storage %r: %s", storage, exc)
-                listing.errors.append(StorageError(storage, _storage_error_detail(exc)))
+                failure = exc
+
+            if not checked_visible:
+                visible = await list_visible_storages(session)
+                checked_visible = True
+            _log.warning("skipping storage %r: %s", storage, failure)
+            listing.errors.append(StorageError(storage, _storage_error_detail(failure, storage, visible)))
     return listing
 
 
