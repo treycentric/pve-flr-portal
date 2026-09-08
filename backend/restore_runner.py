@@ -907,7 +907,11 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
             job.session, job.source_volume, job.source_filepath, tar=False
         )
         try:
-            content_length = _parse_content_length(response.headers.get("content-length"))
+            # PVE's file-restore download stream has no Content-Length in
+            # practice, so the size the frontend sent from
+            # file-restore/list (job.source_size) is what actually drives
+            # a real progress %; the header is a fallback.
+            size_hint = job.source_size or _parse_content_length(response.headers.get("content-length"))
             # Read just enough (at most two pieces) to know whether this
             # is the small, single-call case, without buffering the rest
             # of a possibly-large file just to find out. See
@@ -1013,8 +1017,8 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                 # above) that RestoreJob.progress_percent clamps to <100
                 # until the count is actually known.
                 extra_units = (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
-                if content_length is not None:
-                    job.progress_total = chunk_count(content_length, DEFAULT_CHUNK_SIZE_BYTES) + 1 + extra_units
+                if size_hint is not None:
+                    job.progress_total = chunk_count(size_hint, DEFAULT_CHUNK_SIZE_BYTES) + 1 + extra_units
                 else:
                     job.progress_total = 2 + extra_units
 
@@ -1035,7 +1039,7 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
                     await _create_scratch_dir(job, guest_os_family, scratch_dir)
                     chunk_paths, total_bytes = await _write_chunks_to_scratch(
-                        job, guest_os_family, scratch_dir, pieces, hasher, total_bytes_hint=content_length
+                        job, guest_os_family, scratch_dir, pieces, hasher, total_bytes_hint=size_hint
                     )
                     job.log(f"Downloaded {total_bytes} byte(s) from the backup.")
                     if job.cancel_requested:

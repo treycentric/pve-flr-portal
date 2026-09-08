@@ -110,6 +110,11 @@ def select_data_nic(guest_ips: list[str], data_nics: list[DataNic]) -> DataNic |
 # the tool is actually usable). Order matters: the first one that's
 # present wins, most-capable/most-common first.
 _WINDOWS_CANDIDATES: list[tuple[str, list[str]]] = [
+    # Real curl.exe (Win10 1803+ / Server 2019+) - uses schannel, `-k`
+    # disables validation cleanly. Far more predictable than
+    # Invoke-WebRequest's process-wide validation-callback hack, so it's
+    # first when present.
+    ("curl", ["where", "curl.exe"]),
     ("Invoke-WebRequest", ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Command Invoke-WebRequest"]),
     ("certutil", ["where", "certutil.exe"]),
     ("bitsadmin", ["where", "bitsadmin.exe"]),
@@ -341,7 +346,8 @@ def build_fetch_command(
             stage_path=stage_path,
         )
     if tool == "curl":
-        argv = ["curl", "-fsSL", *(["-k"] if insecure else []), "-o", destination, url]
+        binary = "curl.exe" if guest_os_family == "windows" else "curl"
+        argv = [binary, "-fsSL", *(["-k"] if insecure else []), "-o", destination, url]
         return FetchPlan(exec_argv=argv)
     if tool == "wget":
         argv = ["wget", "-q", *(["--no-check-certificate"] if insecure else []), "-O", destination, url]

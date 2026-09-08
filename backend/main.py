@@ -255,7 +255,7 @@ async def browse(request: Request, volume: str, filepath: str = "/", session: Se
         text = entry.get("text", "")
         entry["download_name"] = text + (".zip" if not leaf else "")
         entry["item_json"] = json.dumps(
-            {"filepath": entry["filepath"], "leaf": leaf, "name": text, "mtime": entry["mtime"]}
+            {"filepath": entry["filepath"], "leaf": leaf, "name": text, "mtime": entry["mtime"], "size": entry["size"]}
         )
         entry["type_label"] = _type_label(entry, at_root)
     entries.sort(key=lambda e: (bool(e.get("leaf", True)), e.get("text", "").lower()))
@@ -368,6 +368,7 @@ async def restore(
     restore_metadata: bool = Form(False),
     verify: bool = Form(False),
     source_mtime: int | None = Form(None),
+    source_size: int | None = Form(None),
     session: SessionData = Depends(auth.get_session),
 ):
     """PH.5 restore (docs/plan.md §7.5): submits a background job and
@@ -470,6 +471,7 @@ async def restore(
             restore_metadata=restore_metadata,
             verify=verify,
             source_mtime=source_mtime,
+            source_size=source_size if source_size and source_size >= 0 else None,
         )
 
     restore_jobs.manager.submit(job, lambda j: restore_runner.run_restore(j, restore_jobs.manager))

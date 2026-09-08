@@ -98,25 +98,29 @@ def test_select_data_nic_first_match_wins_when_multiple_nics_could_match():
 # --- detect_fetch_tool ---------------------------------------------------
 
 def _exec_returning(results: dict[str, tuple[int, str, str]]):
-    """Fake exec_fn: looks up a canned result by the probe's first argv
-    element (good enough to distinguish candidates in these tests)."""
+    """Fake exec_fn: matches a canned result by a substring of the probe
+    argv (e.g. 'curl.exe', 'Invoke-WebRequest', 'command -v curl')."""
 
     async def fake(argv):
-        key = argv[0]
-        if key not in results:
-            raise AssertionError(f"unexpected probe: {argv}")
-        return results[key]
+        joined = " ".join(argv)
+        for key, res in results.items():
+            if key in joined:
+                return res
+        raise AssertionError(f"unexpected probe: {argv}")
 
     return fake
 
 
-async def test_detect_fetch_tool_windows_prefers_invoke_webrequest_when_present():
-    fake = _exec_returning({"powershell": (0, "", "")})
+async def test_detect_fetch_tool_windows_prefers_curl_then_invoke_webrequest():
+    assert await detect_fetch_tool(_exec_returning({"curl.exe": (0, "", "")}), "windows") == "curl"
+    fake = _exec_returning({"curl.exe": (1, "", ""), "Invoke-WebRequest": (0, "", "")})
     assert await detect_fetch_tool(fake, "windows") == "Invoke-WebRequest"
 
 
 async def test_detect_fetch_tool_windows_falls_back_down_the_list():
-    fake = _exec_returning({"powershell": (1, "", "not found"), "where": (0, "", "")})
+    fake = _exec_returning(
+        {"curl.exe": (1, "", ""), "Invoke-WebRequest": (1, "", "not found"), "certutil.exe": (0, "", "")}
+    )
     assert await detect_fetch_tool(fake, "windows") == "certutil"
 
 
@@ -144,13 +148,14 @@ async def test_detect_fetch_tool_tolerates_a_probe_raising_and_tries_the_next_on
     calls = []
 
     async def flaky(argv):
-        calls.append(argv[0])
-        if argv[0] == "powershell":
+        joined = " ".join(argv)
+        calls.append(joined)
+        if "curl.exe" in joined:
             raise TimeoutError("guest-exec timed out")
-        return 0, "", ""
+        return 0, "", ""  # Invoke-WebRequest probe succeeds
 
-    assert await detect_fetch_tool(flaky, "windows") == "certutil"
-    assert calls == ["powershell", "where"]
+    assert await detect_fetch_tool(flaky, "windows") == "Invoke-WebRequest"
+    assert calls == ["where curl.exe", "powershell -NoProfile -NonInteractive -Command Get-Command Invoke-WebRequest"]
 
 
 # --- data-plane TLS ladder (issue #47) ----------------------------------
@@ -256,6 +261,8 @@ def test_build_fetch_command_curl_plaintext_and_insecure():
         "curl", "-fsSL", "-k", "-o", DEST_POSIX, HTTPS_URL,
     ]
     assert "-k" not in build_fetch_command("curl", HTTPS_URL, DEST_POSIX, "linux", tls="verify").exec_argv
+    # Windows guest -> the real curl.exe binary (not the PowerShell alias).
+    assert build_fetch_command("curl", HTTPS_URL, DEST_WIN, "windows", tls="insecure").exec_argv[0] == "curl.exe"
 
 
 def test_build_fetch_command_wget_insecure_adds_no_check_certificate():

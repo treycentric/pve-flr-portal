@@ -314,6 +314,33 @@ async def test_multi_chunk_progress_total_is_exact_with_content_length(manager, 
     assert (job.progress_current, job.progress_total) == (6, 6)
 
 
+async def test_multi_chunk_progress_uses_job_source_size_when_no_content_length(manager, session_data, monkeypatch):
+    """PVE's download has no Content-Length in practice, so the size the
+    frontend sent (job.source_size, from file-restore/list) is what
+    drives a real % - not the ~99% placeholder."""
+    job = _make_job(manager, session_data, destination="/etc/hosts", source_size=61440 * 4 + 10)  # 5 chunks
+    _patch_download(monkeypatch, b"a" * (61440 * 4 + 10))  # no content-length header
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    totals = []
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        totals.append(job.progress_total)
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+
+    assert totals == [6, 6, 6, 6, 6]
+    assert (job.progress_current, job.progress_total) == (6, 6)
+
+
 async def test_multi_chunk_write_logs_a_percent_heartbeat(manager, session_data, monkeypatch):
     job = _make_job(manager, session_data, destination="/etc/hosts")
     _patch_download(monkeypatch, b"a" * (61440 * 20), content_length=True)  # 20 chunks, one = 5%

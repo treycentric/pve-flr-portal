@@ -447,6 +447,12 @@ function fileGridState() {
           if (sel[0].mtime !== null && sel[0].mtime !== undefined) {
             body.set('source_mtime', String(sel[0].mtime));
           }
+          // The download stream from PVE has no Content-Length, so pass
+          // the size from file-restore/list - lets the chunked-write
+          // progress bar track real progress instead of jumping to ~99%.
+          if (sel[0].size !== null && sel[0].size !== undefined && sel[0].size >= 0) {
+            body.set('source_size', String(sel[0].size));
+          }
         } else {
           // Multi-file/directory bundle restore - restore_metadata/
           // verify don't apply here (mtime is automatic via the bundle
