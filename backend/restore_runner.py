@@ -300,7 +300,9 @@ async def _try_direct_network_transfer(
     short TTL) is the real access control on this one route; the NIC
     segmentation design (§7.6) firewalls it to begin with. Skipping TLS
     here is a deliberate, narrow tradeoff, not an oversight - the rest of
-    this app (UI, PVE API calls) stays HTTPS-only as always.
+    this app (UI, PVE API calls) stays HTTPS-only as always. Being
+    revisited in issue #47 / docs/plan.md §7.6.1: opt-in HTTPS on the
+    data plane with a configurable verify/insecure/plaintext policy.
 
     **Not yet wired: `cscript` staging.** Detected as a candidate by
     `detect_fetch_tool()`, but building its command needs a scratch file

@@ -118,7 +118,8 @@ class Settings:
     # the same process/port the main UI+PVE-API listener already uses.
     # Deliberately plain HTTP, never HTTPS, on this one route/NIC pair -
     # see the "why HTTP, not HTTPS" note in restore_runner.py's
-    # _try_design_c().
+    # _try_direct_network_transfer(). Being revisited in issue #47 /
+    # docs/plan.md §7.6.1 (opt-in data-plane HTTPS).
     restore_data_nic_port: int
 
     # pve_client.run_guest_exec()'s default ~15s poll budget is sized for
