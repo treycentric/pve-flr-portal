@@ -1455,7 +1455,10 @@ record):**
    one route; the NIC segmentation design above firewalls it further.
    The rest of the app (UI, PVE API calls) stays HTTPS-only as always —
    this is a narrow, deliberate tradeoff on one specific route, not a
-   general relaxation.
+   general relaxation. **Being revisited in issue #47 (§7.6.1):** the
+   token and the file bytes still cross the data segment in cleartext,
+   which segmentation doesn't address; #47 adds opt-in HTTPS with a
+   configurable verify/insecure/plaintext policy.
 5. ~~The actual dual-listener bind~~ — **done**: `run.py` now runs a
    second, plain-HTTP `uvicorn.Server` per distinct configured data-NIC
    IP, concurrently with the main HTTPS one, in the *same process* -
@@ -1618,6 +1621,85 @@ provisioning steps (the `pct set -netN`/Docker Compose `networks:`
 config an admin actually runs), firewall rule examples, and the
 user-facing provisioning documentation (README.md section or
 `docs/network-provisioning.md` — not `docs/dev/`, see above).
+
+#### 7.6.1 HTTPS on the data plane — planned (issue #47)
+
+The data-NIC listener serves the download route over **plain HTTP**
+today (the "why HTTP, not HTTPS" callout in the sequencing above). NIC
+segmentation limits *who can reach* the listener but does nothing about
+*passive eavesdropping* on the data VLAN — a sniffer on the segment
+captures the single-use token **and** the file bytes. Issue #47 adds
+HTTPS with a configurable security policy. Full per-tool capability
+matrix, config reference, and open questions live in #47; the shape:
+
+**Three modes, a downgrade ladder, and a floor.** The download can run
+`verify` (HTTPS, full chain + IP/hostname validation in the guest),
+`insecure` (HTTPS, encryption only — never touches a guest trust
+store), or `plaintext` (today). Two policy knobs:
+`RESTORE_DATA_NIC_TLS_PREFERRED` (best mode to attempt, default
+`plaintext` so this is a pure opt-in with zero behaviour change) and
+`RESTORE_DATA_NIC_TLS_MINIMUM` (the floor; validated ≤ PREFERRED).
+Per guest the app resolves the best achievable mode from the detected
+fetch tool's TLS capability, whether the guest trusts the cert, and the
+negotiated protocol version, stepping `verify → insecure → plaintext`
+down to MINIMUM. If even MINIMUM can't be met,
+`RESTORE_DATA_NIC_TLS_ON_UNMET` decides: `fallback` (Design B — the
+chunked write over QMP/virtio-serial, which never puts bytes on the
+data network at all) or `fail` (stop with a clear message so the
+operator fixes the setup). `RESTORE_DATA_NIC_TLS_MIN_VERSION`
+(`1.2`/`1.3`) sets the listener's floor; a guest tool that can't
+negotiate it fails the handshake and is handled by the same ladder.
+
+**Per-tool reality.** skip-verify (`insecure`) is expressible for
+`curl -k` / `wget --no-check-certificate` / python's unverified
+`ssl` context / `Invoke-WebRequest`'s `ServicePointManager` callback /
+WinHttpRequest's `SslErrorIgnoreFlags` — but **not** `certutil`
+(WinINet, no flag), `bitsadmin` (one-shot form), or `bash` `/dev/tcp`
+(no TLS at all). Those raise from `build_fetch_command()` under
+`insecure` — like the `bash`/`https` case already does — so the caller
+steps the ladder down or falls back. Trusting an injected CA, by
+contrast, works for every Windows tool and every POSIX tool that
+honours the system store, so it is the *more* capable path on Windows
+(the only way `certutil`/`bitsadmin` reach HTTPS at all). Adding
+`openssl s_client` to the POSIX candidate list ahead of `bash` (a
+TLS-capable last resort) is under consideration.
+
+**Server identity.** `RESTORE_DATA_NIC_TLS_CERT_FILE` /
+`_KEY_FILE` / `_CA_FILE` — separate paths for the listener's leaf, its
+key, and the CA/chain (the CA is both what the listener presents and
+what gets injected into guests for `verify`). Self-signed setup:
+`CA_FILE` defaults to the cert file. Real internal PKI: leaf signed by
+the admin's CA, `CA_FILE` = the issuing CA/root, so guests trust the
+stable CA rather than a rotating leaf. If cert+key are absent, `tls.py`
+auto-generates a short-lived self-signed cert (same bootstrap pattern
+as §7.3's main cert), **with `IP:<addr>` Subject Alternative Names**
+for every configured data-NIC IP — an IP-literal URL needs IP SANs, not
+a CN (modern clients ignore CN for IPs). `RESTORE_DATA_NIC_HOSTNAME`
+(optional) uses a DNS name in the URL and SAN instead, sidestepping
+old-Windows IP-SAN quirks for admins with data-segment name resolution.
+
+**Guest trust-store management.** `RESTORE_DATA_NIC_TLS_INSTALL_CA` =
+`never` (default — `verify` then needs a pre-provisioned CA) /
+`if-missing` (fingerprint-check the guest Root store, install only if
+absent) / `always`. Install = `agent/file-write` the CA PEM to a
+scratch path, then `guest-exec` `certutil -addstore -f Root` (Windows,
+run as SYSTEM) or `/usr/local/share/ca-certificates` +
+`update-ca-certificates` / `/etc/pki/ca-trust/source/anchors` +
+`update-ca-trust` (Linux, whichever exists). The trusted CA persists
+after the job — mitigated with short-lived certs and a clear job-log
+line; a `UNINSTALL_CA_AFTER` knob is possible later, not the first cut.
+
+**Fallback semantics.** Mode resolution happens *before* the fetch
+wherever possible (tool capability and whether verification is even
+attempted are known up front), so a chosen mode that then fails
+mid-transfer still raises — unchanged from today. The one runtime-only
+case is a TLS-version/handshake mismatch (fails at connect, 0 bytes):
+detect the known "never started" exit codes per tool and treat it as
+"mode not achievable" → ladder step-down / `ON_UNMET`.
+
+**Explicitly out of scope of #47** (separate follow-ups): route-scoping
+the data listener so it serves *only* the token route rather than the
+whole app on that IP; `cscript` staging.
 
 ### 7.7 Multi-file / directory restore-to-guest
 

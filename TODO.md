@@ -43,6 +43,11 @@ commit.
   separate from restore-to-guest) still buffers the whole archive in
   RAM; the streaming techniques #24 built are directly reusable there
   but haven't been applied yet.
+- #47 — HTTPS on the Direct Network Transfer data plane (currently
+  plain HTTP): opt-in `verify`/`insecure`/`plaintext` policy with a
+  downgrade ladder, configurable cert/key/CA paths and IP-SAN
+  generation, optional guest CA install, and a minimum TLS version.
+  Design in `docs/plan.md` §7.6.1.
 
 ## PH.6 — Directory-listing cache (optional, perf only)
 
