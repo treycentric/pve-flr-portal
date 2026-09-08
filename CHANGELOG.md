@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See [`docs/dev/versioning.md`](docs/dev/versioning.md) for how entries
 here are generated from commit messages.
 
+## [1.3.0] - 2026-09-08
+
+### Added
+- **storage:** support multiple PBS storages/namespaces (#43) (2b5ab02)
+- **release:** automate the release PR and post-merge tag (#41) (#42) (0068500)
+
 ## [1.2.0] - 2026-09-02
 
 ### Added
