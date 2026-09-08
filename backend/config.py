@@ -1,4 +1,5 @@
 import os
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,30 @@ def _bool(name: str, default: bool) -> bool:
     if val is None:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("0", "false", "no", "off", "")
+
+
+def _pve_verify() -> "bool | ssl.SSLContext | str":
+    """PVE_VERIFY_SSL for the portal -> Proxmox API connection:
+      false            -> don't verify Proxmox's cert (Proxmox default
+                          is self-signed; the common homelab setting);
+      true (default)   -> verify against the *system* trust store
+                          (Debian /etc/ssl/certs - so a CA you added
+                          with `update-ca-certificates` is honoured -
+                          plus SSL_CERT_FILE if set), not just the
+                          bundled certifi list;
+      <path>           -> verify against that CA file or directory.
+    """
+    raw = os.environ.get("PVE_VERIFY_SSL")
+    low = (raw or "true").strip().lower()
+    if low in _FALSY:
+        return False
+    if low in _TRUTHY:
+        return ssl.create_default_context()
+    return raw.strip()  # explicit CA bundle / dir; httpx loads it as-is
 
 
 def _int(name: str, default: int) -> int:
@@ -82,7 +107,9 @@ class Settings:
     # per-snapshot calls key the /storage/{id}/ URL segment off the
     # volid's own prefix, not this list (pve_client.py).
     pve_storages: tuple[str, ...]
-    pve_verify_ssl: bool
+    # bool | ssl.SSLContext | str - passed straight to httpx's `verify=`.
+    # See _pve_verify().
+    pve_verify_ssl: object
 
     # PH.4: per-user PVE ticket auth replaces the old shared PVE/PBS API
     # tokens (docs/plan.md §7.1) - no PBS credentials or static PVE token
@@ -229,7 +256,7 @@ _tls_preferred, _tls_minimum = _tls_preferred_and_minimum()
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
     pve_storages=_storages_required(),
-    pve_verify_ssl=_bool("PVE_VERIFY_SSL", True),
+    pve_verify_ssl=_pve_verify(),
     session_idle_timeout_minutes=_int("SESSION_IDLE_TIMEOUT_MINUTES", 30),
     port=_int("PORT", 8008),
     tls_cert_file=_get("TLS_CERT_FILE", "certs/portal.crt"),

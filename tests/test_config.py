@@ -1,4 +1,5 @@
 import importlib
+import ssl
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,18 @@ def test_get_required_missing_raises(monkeypatch):
         config._get("NEEDED", required=True)
 
 
+def test_pve_verify_ssl_modes(monkeypatch):
+    monkeypatch.setenv("PVE_VERIFY_SSL", "false")
+    assert config._pve_verify() is False
+    monkeypatch.setenv("PVE_VERIFY_SSL", "true")
+    assert isinstance(config._pve_verify(), ssl.SSLContext)
+    monkeypatch.delenv("PVE_VERIFY_SSL", raising=False)
+    assert isinstance(config._pve_verify(), ssl.SSLContext)  # default
+    monkeypatch.setenv("PVE_VERIFY_SSL", "/etc/ssl/certs/ca-certificates.crt")
+    assert config._pve_verify() == "/etc/ssl/certs/ca-certificates.crt"
+    monkeypatch.setenv("PVE_VERIFY_SSL", "false")
+
+
 def test_settings_reads_environment(monkeypatch):
     monkeypatch.setenv("PVE_HOST", "example.org")
     monkeypatch.setenv("PVE_STORAGE", "store1")
@@ -177,7 +190,7 @@ def test_settings_reads_environment(monkeypatch):
     try:
         assert reloaded.settings.pve_host == "example.org"
         assert reloaded.settings.pve_storage == "store1"
-        assert reloaded.settings.pve_verify_ssl is True
+        assert isinstance(reloaded.settings.pve_verify_ssl, ssl.SSLContext)  # "true" -> system trust store
         assert reloaded.settings.session_idle_timeout_minutes == 15
         assert reloaded.settings.port == 9000
         assert reloaded.settings.guest_agent_min_command_gap_seconds == 0.25
