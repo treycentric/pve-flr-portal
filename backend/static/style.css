@@ -994,6 +994,25 @@ select.login-input {
   opacity: 0.6;
 }
 
+.storage-warning {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 4px;
+  color: var(--danger-text);
+  font-size: 0.9rem;
+}
+
+.storage-warning ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.storage-warning code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 [x-cloak] {
   display: none !important;
 }

@@ -238,6 +238,52 @@ unchanged — still no database and no extra service, at most a single
 small file written from the request path. `config.ensure_data_dir()`
 creates it; `run.py` calls that before serving.
 
+### Multiple backup storages / PBS namespaces (issue #43)
+
+`PVE_STORAGE` accepts a **comma-separated list** of PBS-backed storage
+ids, not just one (a single value still works unchanged). The motivating
+case: one PVE cluster with three `pbs`-type storages configured, each
+pointing at a **different PBS namespace** of the same datastore.
+
+PVE keeps the namespace *inside* the storage config
+(`/etc/pve/storage.cfg`'s `namespace` line) and never surfaces it in the
+volid — a namespaced backup's volid is still the plain
+`<storage-id>:backup/<vm|ct>/<vmid>/<iso>Z`. So from this app's side
+"three namespaces" is simply "three storage ids"; no namespace-aware API
+call is needed anywhere.
+
+How it works:
+
+- **Enumeration** (`pve_client.list_backup_archives`) queries
+  `storage/{id}/content?content=backup` for **every** configured storage
+  and concatenates the results, returning a `BackupListing(archives,
+  errors)`. A storage the logged-in user can't read (403 — `content` is
+  permission-filtered per storage as well as per guest, and the
+  `FileRestoreReader` grant has to be made on each storage path) or that
+  is briefly unreachable is recorded in `errors` and **skipped** — it is
+  never raised, so one misconfigured storage can't 500 the whole portal
+  (the regression the first cut of this feature shipped: an all-403 set
+  raised `HTTPStatusError` straight out of `index()`). `index()` passes
+  `errors` to the template, which shows a non-blocking warning banner
+  listing the storages that were skipped and why. The one exception is a
+  **401**, which means the ticket is bad and belongs to the auth handler
+  (re-login) — that still propagates.
+- **Per-snapshot calls** (`file-restore/list`, `download`, every
+  push-to-guest path) take the full volid as `volume` and derive the
+  `/nodes/localhost/storage/{id}/file-restore/…` URL segment from the
+  volid's own prefix (`pve_client._storage_of`) — there is no longer a
+  module-level `_BASE` bound to one storage.
+- **Grouping / timeline:** a guest's recovery points from all storages
+  merge into one per-guest timeline, keyed by `(type, vmid)`. Each
+  snapshot already carries its own full volid, so `volume` stays opaque
+  to the frontend and nothing there changed. This assumes `vmid` is
+  unique cluster-wide (true within a single PVE cluster); two genuinely
+  different guests sharing a vmid across clusters would collide into one
+  timeline — a documented limitation, not a supported topology.
+- **Config:** `settings.pve_storages` (tuple) is the real value;
+  `settings.pve_storage` remains as a convenience property returning the
+  first id for the few callers/tests that only need "a" storage.
+
 ### The indexer / scheduled PBS poll — obsolete, not pending
 
 The original design had a background job polling **PBS's** admin API for

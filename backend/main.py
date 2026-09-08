@@ -139,7 +139,8 @@ def _parse_volid(volid: str) -> tuple[str, str, str]:
 
 @app.get("/")
 async def index(request: Request, task: str | None = None, session: SessionData = Depends(auth.get_session)):
-    archives = await pve_client.list_backup_archives(session)
+    listing = await pve_client.list_backup_archives(session)
+    archives = listing.archives
     try:
         guest_names = await pve_client.list_guest_names(session)
     except httpx.HTTPStatusError:
@@ -207,6 +208,7 @@ async def index(request: Request, task: str | None = None, session: SessionData 
             "guest_json": json.dumps({"type": guest_type, "vmid": guest_vmid, "label": guest_label}),
             "groups_json": json.dumps(groups),
             "current_identity": session.username,
+            "storage_errors": [dataclasses.asdict(e) for e in listing.errors],
             "app_version": __version__,
             "repo_url": REPO_URL,
         },

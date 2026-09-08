@@ -13,7 +13,9 @@ for each entry, so callers should treat filepath as an opaque token
 from the API rather than re-deriving it from a display path.
 """
 import asyncio
+import logging
 import re
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -21,8 +23,21 @@ from .auth import SessionData, pve_headers
 from .config import settings
 from .guest_agent_lock import call_with_retries, guest_agent_command
 
-_BASE = f"https://{settings.pve_host}:8006/api2/json/nodes/localhost/storage/{settings.pve_storage}/file-restore"
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
+
+_log = logging.getLogger("pve_flr_portal.pve_client")
+
+
+def _storage_of(volume: str) -> str:
+    """"pbs-ns-a:backup/vm/133/2026-…Z" -> "pbs-ns-a". The volid's own
+    prefix is the storage a snapshot lives on - with multiple configured
+    storages (issue #43) the /storage/{id}/ URL segment for file-restore
+    has to come from here, not from a single global setting."""
+    return volume.split(":", 1)[0]
+
+
+def _file_restore_base(volume: str) -> str:
+    return f"{_API_ROOT}/nodes/localhost/storage/{_storage_of(volume)}/file-restore"
 
 # Conservative denylist, not a full shell-safety abstraction - acceptable
 # for a single-admin homelab tool where a path reaching this check is
@@ -72,8 +87,68 @@ async def list_guest_names(session: SessionData) -> dict[str, str]:
         return {str(item["vmid"]): item["name"] for item in resp.json()["data"] if item.get("name")}
 
 
-async def list_backup_archives(session: SessionData) -> list[dict]:
-    """All backup archives on the configured storage, straight from PVE
+@dataclass
+class StorageError:
+    """One configured storage the current user couldn't enumerate."""
+
+    storage: str
+    detail: str
+
+
+@dataclass
+class BackupListing:
+    archives: list[dict] = field(default_factory=list)
+    errors: list[StorageError] = field(default_factory=list)
+
+
+async def list_visible_storages(session: SessionData) -> set[str] | None:
+    """Ids of the storages this caller can see - GET /nodes/localhost/storage
+    is filtered to exactly the ones they hold Datastore.Audit or
+    Datastore.AllocateSpace on, and FileRestoreReader grants the latter,
+    so a correctly-provisioned storage always shows up here. Returns
+    None (not an empty set) if the call itself fails, so a caller can
+    tell "checked, not there" apart from "couldn't check". Used only to
+    turn an opaque 403 on a per-storage call into a "check PVE_STORAGE
+    for a typo" hint - PVE's path-based ACL check returns the same 403
+    for a storage id that simply doesn't exist as for one the account
+    lacks access to (issue #43)."""
+    try:
+        async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+            resp = await client.get(f"{_API_ROOT}/nodes/localhost/storage", headers=pve_headers(session))
+            resp.raise_for_status()
+            return {s["storage"] for s in resp.json()["data"] if "storage" in s}
+    except (httpx.HTTPError, KeyError, TypeError):
+        return None
+
+
+def _storage_error_detail(exc: httpx.HTTPError, storage: str, visible: set[str] | None) -> str:
+    if visible is not None and storage not in visible:
+        return (
+            "not found on this PVE node — check PVE_STORAGE for a typo "
+            f"(or grant the FileRestoreReader role on /storage/{storage} if the id is right)"
+        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code in (401, 403):
+            return f"permission denied — grant the FileRestoreReader role on /storage/{storage} (see the README)"
+        if code == 404:
+            return "no such storage on this PVE node — check the id in PVE_STORAGE"
+        return f"PVE returned HTTP {code}"
+    return f"could not reach PVE ({exc.__class__.__name__})"
+
+
+async def _list_backup_archives_one(client: httpx.AsyncClient, session: SessionData, storage: str) -> list[dict]:
+    resp = await client.get(
+        f"{_API_ROOT}/nodes/localhost/storage/{storage}/content",
+        params={"content": "backup"},
+        headers=pve_headers(session),
+    )
+    resp.raise_for_status()
+    return resp.json()["data"]
+
+
+async def list_backup_archives(session: SessionData) -> "BackupListing":
+    """All backup archives across every configured storage, straight from PVE
     (GET /nodes/localhost/storage/{storage}/content?content=backup) -
     replaces the old direct-to-PBS admin API calls entirely (docs/plan.md
     §7.1). Confirmed response shape against the real environment
@@ -90,21 +165,47 @@ async def list_backup_archives(session: SessionData) -> list[dict]:
     Results are gated by the same VM.Backup permission file-restore
     itself requires, so a caller only ever sees archives for guests
     their own PVE account has that permission on.
+
+    Issue #43: iterates every configured storage (my cluster runs 3, one
+    per PBS namespace) and merges. A storage the caller can't read (403)
+    or that is momentarily unreachable is recorded in the returned
+    `.errors` and skipped, never raised — a single misconfigured or
+    inaccessible storage must not 500 the whole portal (that was the
+    regression the first cut of this feature shipped). The one exception
+    is a 401: that means the ticket is bad and belongs to the auth
+    handler (re-login), so it propagates.
+
+    On any per-storage failure the visible-storage list is fetched once
+    (lazily) to tell a PVE_STORAGE typo apart from a missing grant - see
+    list_visible_storages().
     """
+    listing = BackupListing()
+    visible: set[str] | None = None
+    checked_visible = False
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
-        resp = await client.get(
-            f"{_API_ROOT}/nodes/localhost/storage/{settings.pve_storage}/content",
-            params={"content": "backup"},
-            headers=pve_headers(session),
-        )
-        resp.raise_for_status()
-        return resp.json()["data"]
+        for storage in settings.pve_storages:
+            try:
+                listing.archives.extend(await _list_backup_archives_one(client, session, storage))
+                continue
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 401:
+                    raise
+                failure: httpx.HTTPError = exc
+            except httpx.HTTPError as exc:
+                failure = exc
+
+            if not checked_visible:
+                visible = await list_visible_storages(session)
+                checked_visible = True
+            _log.warning("skipping storage %r: %s", storage, failure)
+            listing.errors.append(StorageError(storage, _storage_error_detail(failure, storage, visible)))
+    return listing
 
 
 async def list_path(session: SessionData, volume: str, filepath: str = "/") -> list[dict]:
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client:
         resp = await client.get(
-            f"{_BASE}/list",
+            f"{_file_restore_base(volume)}/list",
             params={"volume": volume, "filepath": filepath},
             headers=pve_headers(session),
         )
@@ -223,7 +324,9 @@ async def open_download(
         params["tar"] = 1
     # No timeout: cold lookups + large archives can legitimately take a while (§3).
     client = httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=None)
-    request = client.build_request("GET", f"{_BASE}/download", params=params, headers=pve_headers(session))
+    request = client.build_request(
+        "GET", f"{_file_restore_base(volume)}/download", params=params, headers=pve_headers(session)
+    )
     response = await client.send(request, stream=True)
     if response.status_code >= 400:
         await response.aread()

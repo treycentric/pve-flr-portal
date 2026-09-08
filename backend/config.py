@@ -35,6 +35,20 @@ def _path(name: str, default: str) -> Path:
     return Path(os.environ.get(name) or default).expanduser()
 
 
+def _csv(name: str, default: str) -> tuple[str, ...]:
+    """Comma-separated env var -> tuple of trimmed, non-empty entries,
+    order preserved, duplicates dropped. Used for PVE_STORAGE, which
+    accepts one *or more* storage ids (issue #43)."""
+    raw = os.environ.get(name)
+    raw = default if raw is None else raw
+    seen: dict[str, None] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            seen.setdefault(part, None)
+    return tuple(seen)
+
+
 _THEMES = ("auto", "light", "dark", "proxmox-dark")
 
 
@@ -48,7 +62,13 @@ def _theme(name: str, default: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     pve_host: str
-    pve_storage: str
+    # One or more PBS-backed storage ids (issue #43). My cluster has 3
+    # PBS storages, each on a different PBS namespace; PVE hides the
+    # namespace inside the storage config, so from here "3 namespaces" is
+    # just "3 storage ids". Enumeration queries every entry and merges;
+    # per-snapshot calls key the /storage/{id}/ URL segment off the
+    # volid's own prefix, not this list (pve_client.py).
+    pve_storages: tuple[str, ...]
     pve_verify_ssl: bool
 
     # PH.4: per-user PVE ticket auth replaces the old shared PVE/PBS API
@@ -126,10 +146,24 @@ class Settings:
     # single small file written from the request path.
     data_dir: Path
 
+    @property
+    def pve_storage(self) -> str:
+        """The first configured storage id. Kept for the handful of
+        callers/tests that only need "a" storage; new code that lists
+        backups should iterate `pve_storages` (issue #43)."""
+        return self.pve_storages[0]
+
+
+def _storages_required() -> tuple[str, ...]:
+    val = _csv("PVE_STORAGE", "")
+    if not val:
+        raise RuntimeError("Missing required env var: PVE_STORAGE")
+    return val
+
 
 settings = Settings(
     pve_host=_get("PVE_HOST", required=True),
-    pve_storage=_get("PVE_STORAGE", required=True),
+    pve_storages=_storages_required(),
     pve_verify_ssl=_bool("PVE_VERIFY_SSL", True),
     session_idle_timeout_minutes=_int("SESSION_IDLE_TIMEOUT_MINUTES", 30),
     port=_int("PORT", 8008),

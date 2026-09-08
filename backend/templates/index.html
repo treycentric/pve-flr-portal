@@ -176,6 +176,15 @@
 {% block content %}
 <script id="snapshot-data" type="application/json">{{ snapshots_json | safe }}</script>
 <script id="guest-data" type="application/json">{{ guest_json | safe }}</script>
+{% if storage_errors %}
+<div class="storage-warning" role="alert">
+  <strong>{{ storage_errors | length }} configured backup storage{{ 's' if storage_errors | length != 1 }} could not be read</strong>
+  and {{ 'is' if storage_errors | length == 1 else 'are' }} not shown below:
+  <ul>
+    {% for e in storage_errors %}<li><code>{{ e.storage }}</code> — {{ e.detail }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
 <div class="page" x-data="portalApp(JSON.parse(document.getElementById('snapshot-data').textContent), JSON.parse(document.getElementById('guest-data').textContent))" x-init="init()">
   <section class="browser">
     <div id="loading" class="htmx-indicator">

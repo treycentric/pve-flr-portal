@@ -62,6 +62,8 @@ pip install -r requirements.txt
 
 cp .env.example .env
 # edit .env: fill in PVE_HOST/PVE_STORAGE for your environment
+# (PVE_STORAGE takes several comma-separated ids if you back up to more
+#  than one PBS storage/namespace)
 
 python run.py
 ```
@@ -107,7 +109,9 @@ Replace `<storage-id>` with your PBS storage ID (matches `PVE_STORAGE`
 in `.env`) and `<user>@<realm>` with the account (e.g. `alice@pam`,
 `bob@ad`). Scope the second command to `/vms/<vmid>` instead of `/vms`
 to limit which guests that user can see, rather than everything on the
-datastore.
+datastore. If `PVE_STORAGE` lists several storages, run the first grant
+once per storage id (or grant it on a parent path such as `/storage`) —
+a storage a user has no access to is simply skipped, not an error.
 
 **Equivalent GUI steps** (Datacenter → Permissions):
 1. **Users** — confirm the account exists. Local `pve`-realm accounts
