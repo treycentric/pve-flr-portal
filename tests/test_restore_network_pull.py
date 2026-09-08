@@ -167,6 +167,20 @@ def test_tool_supports_tls_capability_matrix():
     assert not tool_supports_tls("bash", "verify")
 
 
+def test_is_tls_negotiation_failure():
+    from backend.restore_network_pull import is_tls_negotiation_failure
+
+    assert is_tls_negotiation_failure("curl", 60, "curl: (60) SSL certificate problem: self-signed certificate")
+    assert is_tls_negotiation_failure("curl", 35, "")  # SSL connect error by exit code
+    assert is_tls_negotiation_failure("wget", 5, "")
+    assert is_tls_negotiation_failure(
+        "Invoke-WebRequest", 1, "Could not establish trust relationship for the SSL/TLS secure channel"
+    )
+    assert not is_tls_negotiation_failure("curl", 0, "")  # success
+    assert not is_tls_negotiation_failure("curl", 7, "curl: (7) Failed to connect")  # plain connect failure
+    assert not is_tls_negotiation_failure("curl", 23, "curl: (23) Failure writing output")  # mid-transfer
+
+
 def test_resolve_tls_mode_walks_the_ladder_down_from_preferred():
     assert resolve_tls_mode("curl", "verify", "insecure") == "verify"
     # certutil can't skip-verify, so verify is the only rung it can do

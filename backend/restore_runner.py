@@ -45,6 +45,13 @@ from .restore_chunking import (
 from .restore_jobs import RestoreJob, RestoreJobManager, RestoreStatus
 
 
+def _one_rung_down(mode: str) -> str:
+    """The next weaker data-plane TLS mode (verify -> insecure ->
+    plaintext), or `mode` itself if already the weakest."""
+    i = TLS_MODES.index(mode)
+    return TLS_MODES[i - 1] if i > 0 else mode
+
+
 def _pve_error_message(exc: httpx.HTTPStatusError) -> str:
     reason = exc.response.reason_phrase
     if reason and reason.strip().lower() not in ("bad request", ""):
@@ -465,30 +472,58 @@ async def _try_direct_network_transfer(
             job.log(f"Continuing this transfer with TLS: {stepped}.")
             mode = stepped
 
-    scheme = "http" if mode == "plaintext" else "https"
     host = nic.url_host
-    token = restore_download.mint_token(job.id, local_path=None if local_path is None else str(local_path))
-    url = f"{scheme}://{host}:{port}/api/restore-downloads/{token}"
+    local_path_str = None if local_path is None else str(local_path)
+
+    async def _run_fetch(m: str) -> tuple[int, str, str]:
+        scheme = "http" if m == "plaintext" else "https"
+        tok = restore_download.mint_token(job.id, local_path=local_path_str)
+        url = f"{scheme}://{host}:{port}/api/restore-downloads/{tok}"
+        plan = restore_network_pull.build_fetch_command(tool, url, fetch_dest, guest_os_family, tls=m)
+        job.log(
+            f"Direct Network Transfer: fetching via {tool} over {host} (TLS: {m}) - "
+            "matches the guest's own subnet."
+        )
+        # The fetch scales with file size / network throughput, not the
+        # ~15s "fast command" default (confirmed live 2026-09-01: it
+        # timed out mid-fetch on a real file).
+        return await _exec(job, plan.exec_argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds)
 
     try:
-        plan = restore_network_pull.build_fetch_command(tool, url, fetch_dest, guest_os_family, tls=mode)
-    except ValueError as exc:
+        exitcode, out, err = await _run_fetch(mode)
+    except ValueError as exc:  # build_fetch_command rejected this tool+mode
         job.log(f"Direct Network Transfer not available: {tool} can't be used for this download ({exc}).")
         return False
 
-    job.log(
-        f"Direct Network Transfer: fetching via {tool} over {host} (TLS: {mode}) - "
-        "matches the guest's own subnet."
-    )
-    # The fetch itself scales with file size (and network throughput),
-    # not the ~15s "fast command" default that every other guest-exec
-    # call in this module uses - confirmed live 2026-09-01: the default
-    # timed out mid-fetch on a real file. See
-    # settings.restore_long_running_exec_timeout_seconds's docstring.
-    exitcode, out, err = await _exec(
-        job, plan.exec_argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds
-    )
+    # A TLS handshake/trust failure (0 bytes moved) is safe to retry a
+    # rung down the ladder - the admin set MINIMUM/ON_UNMET for exactly
+    # this. A failure *after* bytes started flowing is a real failure and
+    # still raises.
+    while exitcode != 0 and restore_network_pull.is_tls_negotiation_failure(tool, exitcode, err, out):
+        stepped = restore_network_pull.resolve_tls_mode(tool, _one_rung_down(mode), minimum)
+        if stepped is None or stepped == mode:
+            break
+        job.log(
+            f"Direct Network Transfer: the guest wouldn't complete a '{mode}' TLS connection - "
+            f"retrying as '{stepped}'."
+        )
+        mode = stepped
+        try:
+            exitcode, out, err = await _run_fetch(mode)
+        except ValueError:
+            break
+
     if exitcode != 0:
+        detail = (err.strip() or out.strip()).splitlines()[0] if (err.strip() or out.strip()) else ""
+        if (
+            restore_network_pull.is_tls_negotiation_failure(tool, exitcode, err, out)
+            and settings.restore_data_nic_tls_on_unmet == "fallback"
+        ):
+            job.log(
+                f"Direct Network Transfer: couldn't establish TLS within the configured policy ({detail}) - "
+                "falling back to the chunked write path."
+            )
+            return False
         raise RuntimeError(f"Direct Network Transfer failed via {tool}: {err.strip() or out.strip()}")
     await _verify_destination_exists(job, guest_os_family, path=fetch_dest)
     if mode == "verify":

@@ -869,6 +869,68 @@ async def test_design_c_default_mode_is_verify_over_https(manager, session_data,
     assert any("guest validated the TLS certificate" in line for line in job.log_lines)
 
 
+async def _run_dnt_curl_seq(manager, session_data, monkeypatch, curl_results):
+    """DNT via curl where each curl call returns the next (exit, out, err)
+    from curl_results (the last entry repeats). Returns (job, curl argvs)."""
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 + 100))
+    calls: list[list[str]] = []
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""
+        if argv[0] == "curl":
+            calls.append(argv)
+            return curl_results[min(len(calls) - 1, len(curl_results) - 1)]
+        return 0, "", ""  # mkdir, test -f, Design B concat, etc.
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+    return job, calls
+
+
+_CERT_ERR = (60, "", "curl: (60) SSL certificate problem: self-signed certificate")
+
+
+async def test_design_c_verify_untrusted_cert_steps_down_to_insecure(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch)  # verify / insecure / fallback
+    job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR, (0, "", "")])
+    assert job.status == RestoreStatus.DONE
+    assert len(calls) == 2
+    assert "-k" not in calls[0] and "-k" in calls[1]  # verify, then skip-verify
+    assert any("retrying as 'insecure'" in line for line in job.log_lines)
+
+
+async def test_design_c_verify_untrusted_and_insecure_also_fails_falls_back_to_design_b(
+    manager, session_data, monkeypatch
+):
+    _dnt_settings(monkeypatch)  # on_unmet=fallback
+    job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR, _CERT_ERR])
+    assert job.status == RestoreStatus.DONE  # completed via Design B
+    assert len(calls) == 2
+    assert any("falling back to the chunked write path" in line for line in job.log_lines)
+
+
+async def test_design_c_verify_untrusted_no_step_down_and_on_unmet_fail(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_minimum="verify", restore_data_nic_tls_on_unmet="fail")
+    job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR])
+    assert job.status == RestoreStatus.FAILED
+    assert len(calls) == 1  # no step-down possible below the `verify` floor
+    assert "Direct Network Transfer failed" in job.error
+
+
 async def test_design_c_preferred_insecure_adds_skip_verify(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch, restore_data_nic_tls_preferred="insecure", restore_data_nic_tls_minimum="insecure")
     argv: list[str] = []

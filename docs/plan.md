@@ -1714,14 +1714,17 @@ after the job — mitigated with a bounded cert lifetime and a clear
 job-log line; a `UNINSTALL_CA_AFTER` knob is possible later.
 
 **Fallback semantics.** A *CA-install* failure steps this job's mode
-down to `insecure` when the ladder still allows it, else `ON_UNMET`. A
-failure during the *fetch* itself (bad cert with `verify`, TLS-version
-mismatch, connection refused, mid-transfer error) fails the job with a
-clear message — it is **not** auto-downgraded, matching the pre-#47
-"once DNT is offered, a fetch failure is a real failure" rule.
-Classifying "handshake never completed, 0 bytes" from a tool's exit code
-so *that* specific case could downgrade instead is a possible later
-refinement (issue #47 open question).
+down to `insecure` when the ladder still allows it, else `ON_UNMET`.
+When the *fetch* itself fails, `restore_network_pull.is_tls_negotiation_failure`
+classifies it (per-tool exit codes + error text): a **TLS
+handshake/trust failure** — untrusted/self-signed cert under `verify`, a
+protocol/version mismatch — moved zero bytes, so it retries one rung
+down the ladder (`verify` → `insecure`) and, if still failing (or the
+floor is already `verify`), applies `ON_UNMET` (`fallback` → Design B,
+`fail` → error). Any *other* fetch failure — connection refused, a
+mid-transfer error, disk full in the guest — is a hard failure and
+still raises, matching the pre-#47 "once DNT is offered, a fetch failure
+is a real failure" rule.
 
 **Real-world finding (2026-09-08), first deploy on a real host.** Two
 things surfaced immediately, both fixed:

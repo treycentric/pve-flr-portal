@@ -156,6 +156,42 @@ def tool_supports_tls(tool: str, mode: str) -> bool:
     return True  # verify
 
 
+_TLS_ERR_HINTS = (
+    "certificate",
+    "self-signed",
+    "self signed",
+    "unable to get local issuer",
+    "certificate verify failed",
+    "sslcertverificationerror",
+    "trust relationship",
+    "secure channel",
+    "ssl/tls",
+    "handshake failure",
+    "tlsv1",
+    "wrong version number",
+    "no cipher",
+    "sslv3 alert",
+)
+
+
+def is_tls_negotiation_failure(tool: str, exitcode: int, stderr: str = "", stdout: str = "") -> bool:
+    """Whether a failed fetch looks like a TLS *handshake / trust*
+    failure (bad or untrusted cert, protocol/version mismatch) - i.e.
+    nothing was transferred and it's safe to retry a rung down the ladder
+    (issue #47). A failure after bytes started flowing is deliberately
+    not matched here - that stays a hard error."""
+    if exitcode == 0:
+        return False
+    blob = f"{stderr} {stdout}".lower()
+    if any(h in blob for h in _TLS_ERR_HINTS):
+        return True
+    if tool == "curl" and exitcode in (35, 51, 58, 59, 60, 66, 77, 80, 83, 90, 91):
+        return True
+    if tool == "wget" and exitcode == 5:  # SSL verification failure
+        return True
+    return False
+
+
 def resolve_tls_mode(tool: str, preferred: str, minimum: str) -> str | None:
     """The strongest TLS mode in [minimum, preferred] that `tool` can
     actually do, or None if nothing in that range qualifies (the caller
