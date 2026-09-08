@@ -17,6 +17,7 @@ code can tell "ours, safe to refresh" from "the admin's, hands off".
 import datetime
 import ipaddress
 import logging
+import os
 from pathlib import Path
 
 from cryptography import x509
@@ -73,14 +74,23 @@ def _write_self_signed(
         builder = builder.add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
     cert = builder.sign(key, hashes.SHA256())
 
-    key_path.write_bytes(
-        key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
+    key_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
     )
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+
+    # Write both to temp files first, then os.replace() each into place -
+    # a crash/restart mid-write (this app has been observed in a systemd
+    # restart loop) must never leave a NEW key next to an OLD cert, which
+    # is its own KEY_VALUES_MISMATCH startup failure.
+    key_tmp = key_path.with_suffix(key_path.suffix + ".tmp")
+    cert_tmp = cert_path.with_suffix(cert_path.suffix + ".tmp")
+    key_tmp.write_bytes(key_pem)
+    cert_tmp.write_bytes(cert_pem)
+    os.replace(key_tmp, key_path)
+    os.replace(cert_tmp, cert_path)
 
 
 def _is_autogen(cert: x509.Certificate) -> bool:
