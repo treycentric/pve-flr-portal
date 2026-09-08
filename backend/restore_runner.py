@@ -167,13 +167,11 @@ async def _write_chunks_to_scratch(
     expected_chunks = chunk_count(total_bytes_hint, DEFAULT_CHUNK_SIZE_BYTES) if total_bytes_hint else 0
     if expected_chunks:
         job.progress_total = max(job.progress_total, expected_chunks + 1)
-    # Heartbeat cadence: ~every 10% of a known total, clamped so a small
-    # file stays quiet and a huge one doesn't flood the log.
-    log_every = max(200, min(1000, expected_chunks // 10)) if expected_chunks else 500
     sep = scratch_path_sep(guest_os_family)
     paths: list[str] = []
     total = 0
     index = 0
+    last_logged_pct = 0  # heartbeat: one log line per whole percent, like PVE's disk move
     async for piece in pieces:
         if job.cancel_requested:
             break
@@ -197,14 +195,15 @@ async def _write_chunks_to_scratch(
         # A big chunked write logs nothing between "creating scratch dir"
         # and "downloaded N bytes" otherwise - a heartbeat keeps it from
         # looking hung (issue #47 live testing).
-        if index % log_every == 0:
-            if expected_chunks:
+        if expected_chunks:
+            pct = index * 100 // expected_chunks
+            if pct > last_logged_pct:
+                last_logged_pct = pct
                 job.log(
-                    f"Sent {index:,} / {expected_chunks:,} chunks to the guest "
-                    f"({index * 100 // expected_chunks}%, {total:,} bytes)."
+                    f"Sent {index:,} / {expected_chunks:,} chunks to the guest ({pct}%, {total:,} bytes)."
                 )
-            else:
-                job.log(f"Sent {index:,} chunks ({total:,} bytes) to the guest so far.")
+        elif index % 500 == 0:  # unknown total - fall back to a fixed cadence
+            job.log(f"Sent {index:,} chunks ({total:,} bytes) to the guest so far.")
     return paths, total
 
 

@@ -314,6 +314,32 @@ async def test_multi_chunk_progress_total_is_exact_with_content_length(manager, 
     assert (job.progress_current, job.progress_total) == (6, 6)
 
 
+async def test_multi_chunk_write_logs_a_percent_heartbeat(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 * 20), content_length=True)  # 20 chunks, one = 5%
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    hb = [ln for ln in job.log_lines if "chunks to the guest (" in ln]
+    assert any("(5%," in ln for ln in hb)
+    assert any("(100%," in ln for ln in hb)
+    assert not any("(0%," in ln for ln in hb)  # no premature 0% line
+    assert len(hb) == 20  # one per 5% step, no repeats
+
+
 async def test_progress_total_includes_metadata_and_verify_units(manager, session_data, monkeypatch):
     import hashlib
 

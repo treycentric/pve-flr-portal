@@ -1726,7 +1726,8 @@ things surfaced immediately, both fixed:
   the download's `Content-Length` (present for a single file, absent for
   a directory stream) and passes it as `total_bytes_hint`, so the bar
   tracks the real chunk count from the first write; and the write loop
-  emits a `Sent X / Y chunks (NN%)` heartbeat roughly every 10%.
+  emits a `Sent X / Y chunks (NN%)` heartbeat once per whole percent
+  (like PVE's own disk-move progress).
   `_try_direct_network_transfer` also now logs when it bails because
   `RESTORE_DATA_NICS` is empty.
 
