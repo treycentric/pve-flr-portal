@@ -600,6 +600,16 @@ admin hasn't supplied their own.
   admin-supplied cert/key dropped at those same paths is used as-is
   and is never overwritten — that's the whole "admin-replaceable"
   story, no separate config flag needed.
+  - **Refined 2026-09-08** after a real deployment tore its own cert in
+    a restart loop: auto-generated certs are now tagged with an
+    `O = pve-flr-portal (auto-generated)` name, and `tls.py` writes the
+    pair atomically (`.tmp` + `os.replace`). A broken pair
+    (cert/key mismatch, unreadable, expired) is *re-issued in place only
+    if it's one of ours*; a broken **admin-supplied** cert is logged as
+    an error and left exactly as the operator left it — the app never
+    deletes or overwrites a cert it didn't generate. `run.py` also wraps
+    each data-plane listener's SSL-context load so a bad data-plane cert
+    skips that one listener instead of failing the whole process.
 - This generation has to happen *before* uvicorn binds its SSL
   context, which is too late to do from a FastAPI startup event —
   needs a small entrypoint script (e.g. `python -m backend` or
@@ -1740,15 +1750,16 @@ things surfaced immediately, both fixed:
   `_try_direct_network_transfer` also now logs when it bails because
   `RESTORE_DATA_NICS` is empty.
 - Iterating on `local_ip` left a stale `certs/data-plane.*` behind, and
-  at one point a cert/key that didn't match each other — uvicorn's
-  `create_ssl_context` then raised `KEY_VALUES_MISMATCH` at `config.load()`,
-  fatal again. `backend/tls.py` now: (a) tags auto-generated certs with
-  a recognisable Organization name; (b) `ensure_self_signed_cert` /
-  `ensure_data_plane_cert` **regenerate a broken pair** (mismatched,
-  unreadable, expired) rather than hand uvicorn a cert that can't load;
-  (c) the data-plane cert regenerates its *own* (auto-generated) cert
-  when the configured SANs change, but only *warns* about a valid
-  admin-supplied cert with wrong SANs; (d) `run.py` wraps
+  a restart landing between `_write_self_signed`'s two writes left a
+  fresh key next to a stale cert — uvicorn's `create_ssl_context` then
+  raised `KEY_VALUES_MISMATCH` at `config.load()`, fatal. `backend/tls.py`
+  now: (a) tags its own certs `O = pve-flr-portal (auto-generated)` and
+  writes the pair atomically (`.tmp` + `os.replace`); (b) re-issues a
+  broken pair (mismatch, unreadable, expired) **only when it's one of
+  ours** — a broken *admin-supplied* cert is logged as an error and left
+  exactly in place, never overwritten or deleted; (c) re-issues its own
+  data-plane cert when the configured SANs change, only *warns* about a
+  valid admin cert with wrong SANs; (d) `run.py` wraps
   `data_config.load()` so a bad data-plane cert skips that one listener
   instead of taking the portal down.
 
