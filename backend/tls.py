@@ -10,10 +10,13 @@ if it's valid it's used as-is; if it's broken (mismatched, unreadable,
 expired) the app logs a clear error and leaves it in place for the
 operator to fix.
 
-The one exception is *this app's own* auto-generated certs, tagged with
-a recognisable Organization name: a broken one of those is refreshed in
-place (a restart-loop can tear the pair), and the data-plane one is also
-re-issued when the configured data-NIC IP/DNS SANs change.
+The exception is a broken **self-signed** cert (our own - tagged with a
+recognisable Organization name - or an unmarked one from before that
+tag, or a throwaway): a broken self-signed pair is useless, so it's
+re-issued in place rather than left to crash uvicorn at startup. A
+broken **CA-issued** cert, or one that won't parse at all, is always
+left for the operator. The data-plane cert is also re-issued when the
+configured data-NIC IP/DNS SANs change.
 """
 import datetime
 import ipaddress
@@ -106,9 +109,18 @@ def _is_autogen(cert: x509.Certificate) -> bool:
     return bool(orgs) and orgs[0].value == _AUTOGEN_ORG
 
 
-def _is_our_autogen_file(cert_path: Path) -> bool:
+def _safe_to_reissue(cert_path: Path) -> bool:
+    """True if a *broken* cert at this path can be replaced with a fresh
+    self-signed one without stepping on the operator's own work: it
+    carries our autogen marker, or it's self-signed (ours from before
+    the marker existed, or a throwaway - a broken one is useless either
+    way). A broken **CA-issued** cert (issuer != subject), or one we
+    can't even parse, is left in place for the operator to deal with.
+    """
     cert = _load_cert(cert_path)
-    return cert is not None and _is_autogen(cert)
+    if cert is None:
+        return False
+    return _is_autogen(cert) or cert.issuer == cert.subject
 
 
 def _spki(pubkey) -> bytes:
@@ -150,10 +162,10 @@ def ensure_self_signed_cert(cert_path: Path, key_path: Path, common_name: str = 
         reason = _pair_broken_reason(cert_path, key_path)
         if reason is None:
             return  # valid pair (ours or the admin's) - use as-is
-        if not _is_our_autogen_file(cert_path):
+        if not _safe_to_reissue(cert_path):
             _broken_admin_cert(cert_path, key_path, reason, "portal")
-            return  # never overwrite something the operator put here
-        _log.warning("refreshing this app's own auto-generated cert %s: %s", cert_path, reason)
+            return  # never overwrite a CA-issued cert the operator put here
+        _log.warning("re-issuing a broken self-signed portal cert %s: %s", cert_path, reason)
     _write_self_signed(cert_path, key_path, common_name, dns_sans=("localhost",))
 
 
@@ -178,23 +190,25 @@ def ensure_data_plane_cert(
     Generates a self-signed one (IP/DNS SANs for the configured data
     NICs) only if absent. An existing pair:
       - valid, covers every SAN -> use as-is;
-      - OUR auto-generated one, broken or missing a SAN -> re-issue;
-      - admin-supplied, broken -> error, left untouched;
+      - broken and safe to re-issue (self-signed / ours) -> re-issue;
+      - broken and CA-issued -> error, left untouched;
+      - our own, valid but missing a SAN -> re-issue to add it;
       - admin-supplied, valid but missing a SAN -> warn, left untouched.
     """
     cn = dns_sans[0] if dns_sans else (ip_sans[0] if ip_sans else "pve-flr-portal-data-plane")
 
     if cert_path.exists() and key_path.exists():
-        ours = _is_our_autogen_file(cert_path)
+        cert = _load_cert(cert_path)
+        is_autogen = cert is not None and _is_autogen(cert)
         reason = _pair_broken_reason(cert_path, key_path)
         if reason is not None:
-            if not ours:
+            if not _safe_to_reissue(cert_path):
                 _broken_admin_cert(cert_path, key_path, reason, "data-plane")
                 return
-            _log.warning("re-issuing this app's own data-plane cert %s: %s", cert_path, reason)
+            _log.warning("re-issuing a broken self-signed data-plane cert %s: %s", cert_path, reason)
         elif _san_covers(cert_path, ip_sans, dns_sans):
             return  # valid and complete
-        elif ours:
+        elif is_autogen:
             _log.info("re-issuing data-plane cert %s to cover IPs=%s DNS=%s", cert_path, list(ip_sans), list(dns_sans))
         else:
             _log.warning(

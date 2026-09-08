@@ -1755,9 +1755,11 @@ things surfaced immediately, both fixed:
   raised `KEY_VALUES_MISMATCH` at `config.load()`, fatal. `backend/tls.py`
   now: (a) tags its own certs `O = pve-flr-portal (auto-generated)` and
   writes the pair atomically (`.tmp` + `os.replace`); (b) re-issues a
-  broken pair (mismatch, unreadable, expired) **only when it's one of
-  ours** — a broken *admin-supplied* cert is logged as an error and left
-  exactly in place, never overwritten or deleted; (c) re-issues its own
+  broken pair (mismatch, expired) **only when the cert is self-signed**
+  (ours, marked or not; a broken self-signed cert is useless anyway) —
+  a broken **CA-issued** cert, or one that won't parse, is logged as an
+  error and left exactly in place, never overwritten or deleted;
+  (c) re-issues its own
   data-plane cert when the configured SANs change, only *warns* about a
   valid admin cert with wrong SANs; (d) `run.py` wraps
   `data_config.load()` so a bad data-plane cert skips that one listener
