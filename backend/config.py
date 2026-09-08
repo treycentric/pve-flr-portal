@@ -43,7 +43,21 @@ def _pve_verify() -> "bool | ssl.SSLContext | str":
         return False
     if low in _TRUTHY:
         return ssl.create_default_context()
-    return raw.strip()  # explicit CA bundle / dir; httpx loads it as-is
+    # An explicit CA file or directory. Validate now so a typo is a
+    # clear startup error, not a per-request 500 (httpx would raise
+    # FileNotFoundError deep inside a request handler).
+    path = raw.strip()
+    p = Path(path)
+    try:
+        if p.is_dir():
+            return ssl.create_default_context(capath=path)
+        if p.is_file():
+            return ssl.create_default_context(cafile=path)
+    except ssl.SSLError as exc:
+        raise RuntimeError(f"PVE_VERIFY_SSL={path!r} is not a usable CA file: {exc}") from exc
+    raise RuntimeError(
+        f"PVE_VERIFY_SSL={path!r} is not 'true'/'false' and not an existing CA file or directory"
+    )
 
 
 def _int(name: str, default: int) -> int:

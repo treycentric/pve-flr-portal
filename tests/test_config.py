@@ -167,15 +167,26 @@ def test_get_required_missing_raises(monkeypatch):
         config._get("NEEDED", required=True)
 
 
-def test_pve_verify_ssl_modes(monkeypatch):
+def test_pve_verify_ssl_modes(monkeypatch, tmp_path):
     monkeypatch.setenv("PVE_VERIFY_SSL", "false")
     assert config._pve_verify() is False
     monkeypatch.setenv("PVE_VERIFY_SSL", "true")
     assert isinstance(config._pve_verify(), ssl.SSLContext)
     monkeypatch.delenv("PVE_VERIFY_SSL", raising=False)
     assert isinstance(config._pve_verify(), ssl.SSLContext)  # default
-    monkeypatch.setenv("PVE_VERIFY_SSL", "/etc/ssl/certs/ca-certificates.crt")
-    assert config._pve_verify() == "/etc/ssl/certs/ca-certificates.crt"
+
+    # A real CA file -> an SSLContext loaded from it.
+    from backend.tls import _write_self_signed
+
+    ca = tmp_path / "ca.crt"
+    _write_self_signed(ca, tmp_path / "ca.key", "test-ca", is_ca=True)
+    monkeypatch.setenv("PVE_VERIFY_SSL", str(ca))
+    assert isinstance(config._pve_verify(), ssl.SSLContext)
+
+    # A path that doesn't exist -> a clear startup error, not a 500 later.
+    monkeypatch.setenv("PVE_VERIFY_SSL", "/no/such/ca.pem")
+    with pytest.raises(RuntimeError, match="PVE_VERIFY_SSL"):
+        config._pve_verify()
     monkeypatch.setenv("PVE_VERIFY_SSL", "false")
 
 
