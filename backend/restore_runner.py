@@ -178,6 +178,11 @@ async def _write_chunks_to_scratch(
             # avoids it reading a premature 100% mid-write.
             job.progress_total = max(job.progress_total, job.progress_current + 1)
         index += 1
+        # A big chunked write logs nothing between "creating scratch dir"
+        # and "downloaded N bytes" otherwise - a heartbeat every ~30 MiB
+        # keeps it from looking hung (issue #47 live testing).
+        if index % 512 == 0:
+            job.log(f"Written {index} chunks ({total:,} bytes) to the guest so far.")
     return paths, total
 
 
@@ -377,7 +382,15 @@ async def _try_direct_network_transfer(
     """
     data_nics = restore_network_pull.parse_data_nics(settings.restore_data_nics_json)
     if not data_nics:
-        return False  # Design C unconfigured - the common case, cheapest check first
+        # Only reached on a multi-chunk restore (the caller gates on
+        # that), where the slow chunked path is about to be a lot of
+        # sequential agent/file-write calls - worth saying why out loud
+        # rather than silently grinding.
+        job.log(
+            "Direct Network Transfer is not configured (RESTORE_DATA_NICS is empty) - using the chunked "
+            "write path over the guest agent, which is slow for a large file."
+        )
+        return False
 
     guest_ips = await guest_agent.get_guest_ip_addresses(job.session, job.guest_type, job.vmid)
     nic = restore_network_pull.select_data_nic(guest_ips, data_nics)

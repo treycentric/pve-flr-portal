@@ -551,6 +551,8 @@ async def test_design_c_unconfigured_falls_back_to_design_b_without_any_extra_ca
     assert job.status == RestoreStatus.DONE
     # Went through the ordinary Design B path (mkdir, sh -c cat ..., test -f).
     assert any(c[:2] == ["sh", "-c"] for c in exec_calls)
+    # ...and said why, rather than silently grinding (issue #47 live testing).
+    assert any("Direct Network Transfer is not configured" in line for line in job.log_lines)
 
 
 async def test_design_c_no_subnet_match_falls_back_to_design_b(manager, session_data, monkeypatch):
