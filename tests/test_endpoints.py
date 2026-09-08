@@ -29,7 +29,7 @@ ARCHIVES = [
 @pytest.fixture
 def client(session_data, monkeypatch):
     async def fake_archives(session):
-        return ARCHIVES
+        return pve_client.BackupListing(archives=list(ARCHIVES))
 
     async def fake_names(session):
         return {"133": "webserver"}
@@ -70,6 +70,28 @@ def test_index_renders_version_and_repo_link_in_about_box(client, project_root):
     body = resp.text
     assert f"v{(project_root / 'VERSION').read_text().strip()}" in body
     assert REPO_URL in body
+
+
+def test_index_shows_a_banner_and_still_renders_when_a_storage_is_inaccessible(session_data, monkeypatch):
+    async def fake_archives(session):
+        return pve_client.BackupListing(
+            archives=[], errors=[pve_client.StorageError("pbs-tier1-external", "permission denied — grant the role")]
+        )
+
+    async def fake_names(session):
+        return {}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    try:
+        with TestClient(main.app) as c:
+            resp = c.get("/")
+    finally:
+        main.app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert "pbs-tier1-external" in resp.text
+    assert "could not be read" in resp.text
 
 
 def test_index_requires_auth():

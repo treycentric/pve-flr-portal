@@ -131,7 +131,8 @@ async def test_list_backup_archives_returns_data(session_data):
         return_value=httpx.Response(200, json={"data": payload})
     )
     out = await pve_client.list_backup_archives(session_data)
-    assert out == payload
+    assert out.archives == payload
+    assert out.errors == []
     assert route.calls.last.request.url.params["content"] == "backup"
 
 
@@ -153,14 +154,27 @@ async def test_list_backup_archives_merges_every_configured_storage(session_data
         return_value=httpx.Response(200, json={"data": [{"vmid": 2, "volid": "s3:backup/ct/2/y"}]})
     )
     out = await pve_client.list_backup_archives(session_data)
-    assert [a["volid"] for a in out] == ["s1:backup/vm/1/x", "s3:backup/ct/2/y"]
+    assert [a["volid"] for a in out.archives] == ["s1:backup/vm/1/x", "s3:backup/ct/2/y"]
+    assert [e.storage for e in out.errors] == ["s2"]
+    assert "permission denied" in out.errors[0].detail
 
 
 @respx.mock
-async def test_list_backup_archives_raises_only_when_every_storage_fails(session_data, monkeypatch):
+async def test_list_backup_archives_never_raises_when_every_storage_fails(session_data, monkeypatch):
+    """A totally inaccessible storage set must not 500 the portal - it
+    comes back as an empty listing with per-storage errors (issue #43)."""
     _with_storages(monkeypatch, "s1", "s2")
     respx.get(f"{API}/nodes/localhost/storage/s1/content").mock(return_value=httpx.Response(500, text="boom"))
-    respx.get(f"{API}/nodes/localhost/storage/s2/content").mock(return_value=httpx.Response(503, text="down"))
+    respx.get(f"{API}/nodes/localhost/storage/s2/content").mock(return_value=httpx.Response(403, text="nope"))
+    out = await pve_client.list_backup_archives(session_data)
+    assert out.archives == []
+    assert {e.storage for e in out.errors} == {"s1", "s2"}
+
+
+@respx.mock
+async def test_list_backup_archives_propagates_401_for_reauth(session_data, monkeypatch):
+    _with_storages(monkeypatch, "s1")
+    respx.get(f"{API}/nodes/localhost/storage/s1/content").mock(return_value=httpx.Response(401, text="ticket expired"))
     with pytest.raises(httpx.HTTPStatusError):
         await pve_client.list_backup_archives(session_data)
 

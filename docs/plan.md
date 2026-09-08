@@ -256,10 +256,18 @@ How it works:
 
 - **Enumeration** (`pve_client.list_backup_archives`) queries
   `storage/{id}/content?content=backup` for **every** configured storage
-  and concatenates the results. A storage the logged-in user can't read
-  (403 — `content` is permission-filtered per storage as well as per
-  guest) or that is briefly unreachable is **skipped**, so the portal
-  still shows everything else; only an all-storages failure re-raises.
+  and concatenates the results, returning a `BackupListing(archives,
+  errors)`. A storage the logged-in user can't read (403 — `content` is
+  permission-filtered per storage as well as per guest, and the
+  `FileRestoreReader` grant has to be made on each storage path) or that
+  is briefly unreachable is recorded in `errors` and **skipped** — it is
+  never raised, so one misconfigured storage can't 500 the whole portal
+  (the regression the first cut of this feature shipped: an all-403 set
+  raised `HTTPStatusError` straight out of `index()`). `index()` passes
+  `errors` to the template, which shows a non-blocking warning banner
+  listing the storages that were skipped and why. The one exception is a
+  **401**, which means the ticket is bad and belongs to the auth handler
+  (re-login) — that still propagates.
 - **Per-snapshot calls** (`file-restore/list`, `download`, every
   push-to-guest path) take the full volid as `volume` and derive the
   `/nodes/localhost/storage/{id}/file-restore/…` URL segment from the

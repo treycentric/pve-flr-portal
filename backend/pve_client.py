@@ -13,7 +13,9 @@ for each entry, so callers should treat filepath as an opaque token
 from the API rather than re-deriving it from a display path.
 """
 import asyncio
+import logging
 import re
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -22,6 +24,8 @@ from .config import settings
 from .guest_agent_lock import call_with_retries, guest_agent_command
 
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
+
+_log = logging.getLogger("pve_flr_portal.pve_client")
 
 
 def _storage_of(volume: str) -> str:
@@ -83,6 +87,31 @@ async def list_guest_names(session: SessionData) -> dict[str, str]:
         return {str(item["vmid"]): item["name"] for item in resp.json()["data"] if item.get("name")}
 
 
+@dataclass
+class StorageError:
+    """One configured storage the current user couldn't enumerate."""
+
+    storage: str
+    detail: str
+
+
+@dataclass
+class BackupListing:
+    archives: list[dict] = field(default_factory=list)
+    errors: list[StorageError] = field(default_factory=list)
+
+
+def _storage_error_detail(exc: httpx.HTTPError) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code == 403:
+            return "permission denied — grant the FileRestoreReader role on this storage (see the README)"
+        if code == 404:
+            return "no such storage on this PVE node — check the id in PVE_STORAGE"
+        return f"PVE returned HTTP {code}"
+    return f"could not reach PVE ({exc.__class__.__name__})"
+
+
 async def _list_backup_archives_one(client: httpx.AsyncClient, session: SessionData, storage: str) -> list[dict]:
     resp = await client.get(
         f"{_API_ROOT}/nodes/localhost/storage/{storage}/content",
@@ -93,7 +122,7 @@ async def _list_backup_archives_one(client: httpx.AsyncClient, session: SessionD
     return resp.json()["data"]
 
 
-async def list_backup_archives(session: SessionData) -> list[dict]:
+async def list_backup_archives(session: SessionData) -> "BackupListing":
     """All backup archives across every configured storage, straight from PVE
     (GET /nodes/localhost/storage/{storage}/content?content=backup) -
     replaces the old direct-to-PBS admin API calls entirely (docs/plan.md
@@ -113,24 +142,28 @@ async def list_backup_archives(session: SessionData) -> list[dict]:
     their own PVE account has that permission on.
 
     Issue #43: iterates every configured storage (my cluster runs 3, one
-    per PBS namespace) and merges. A storage the caller can't see (403)
-    or that is momentarily unreachable is skipped so the portal still
-    shows the rest; only an all-storages failure re-raises (the last
-    error seen).
+    per PBS namespace) and merges. A storage the caller can't read (403)
+    or that is momentarily unreachable is recorded in the returned
+    `.errors` and skipped, never raised — a single misconfigured or
+    inaccessible storage must not 500 the whole portal (that was the
+    regression the first cut of this feature shipped). The one exception
+    is a 401: that means the ticket is bad and belongs to the auth
+    handler (re-login), so it propagates.
     """
-    results: list[dict] = []
-    last_error: Exception | None = None
-    any_ok = False
+    listing = BackupListing()
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         for storage in settings.pve_storages:
             try:
-                results.extend(await _list_backup_archives_one(client, session, storage))
-                any_ok = True
+                listing.archives.extend(await _list_backup_archives_one(client, session, storage))
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 401:
+                    raise
+                _log.warning("skipping storage %r: %s", storage, exc)
+                listing.errors.append(StorageError(storage, _storage_error_detail(exc)))
             except httpx.HTTPError as exc:
-                last_error = exc
-    if not any_ok and last_error is not None:
-        raise last_error
-    return results
+                _log.warning("skipping storage %r: %s", storage, exc)
+                listing.errors.append(StorageError(storage, _storage_error_detail(exc)))
+    return listing
 
 
 async def list_path(session: SessionData, volume: str, filepath: str = "/") -> list[dict]:
