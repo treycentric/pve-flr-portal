@@ -1444,21 +1444,15 @@ record):**
    tool is `cscript` falls back to Design B. (The per-interface bind
    that was also outstanding here is done — step 5 below.)
 
-   **Deliberate design decision made while wiring this in: the download
-   URL is `http://`, never `https://`.** Teaching every one of six
-   different guest-side fetch tools to trust this app's own (self-signed
-   by default, §7.3) certificate individually would be its own source of
-   subtle bugs, and `bash`'s `/dev/tcp` fallback cannot speak TLS at all
-   regardless (`build_fetch_command()` raises clearly if asked to, rather
-   than generating a script that would fail confusingly in the guest).
-   The single-use, short-TTL token is the real access control on this
-   one route; the NIC segmentation design above firewalls it further.
-   The rest of the app (UI, PVE API calls) stays HTTPS-only as always —
-   this is a narrow, deliberate tradeoff on one specific route, not a
-   general relaxation. **Being revisited in issue #47 (§7.6.1):** the
-   token and the file bytes still cross the data segment in cleartext,
-   which segmentation doesn't address; #47 adds opt-in HTTPS with a
-   configurable verify/insecure/plaintext policy.
+   **Original decision while wiring this in: the download URL was
+   `http://`, never `https://`** — teaching six guest-side fetch tools to
+   trust a self-signed cert individually looked like its own source of
+   subtle bugs, and `bash`'s `/dev/tcp` fallback can't speak TLS at all;
+   the single-use short-TTL token plus NIC segmentation were the access
+   control. **Superseded by issue #47 (§7.6.1):** segmentation doesn't
+   stop passive eavesdropping on the segment, so the download route now
+   serves HTTPS by default (`RESTORE_DATA_NIC_TLS_PREFERRED`), dropping
+   to plain HTTP only when explicitly set to `plaintext`.
 5. ~~The actual dual-listener bind~~ — **done**: `run.py` now runs a
    second, plain-HTTP `uvicorn.Server` per distinct configured data-NIC
    IP, concurrently with the main HTTPS one, in the *same process* -
@@ -1622,27 +1616,39 @@ config an admin actually runs), firewall rule examples, and the
 user-facing provisioning documentation (README.md section or
 `docs/network-provisioning.md` — not `docs/dev/`, see above).
 
-#### 7.6.1 HTTPS on the data plane — planned (issue #47)
+#### 7.6.1 HTTPS on the data plane (issue #47)
 
-The data-NIC listener serves the download route over **plain HTTP**
-today (the "why HTTP, not HTTPS" callout in the sequencing above). NIC
-segmentation limits *who can reach* the listener but does nothing about
-*passive eavesdropping* on the data VLAN — a sniffer on the segment
-captures the single-use token **and** the file bytes. Issue #47 adds
-HTTPS with a configurable security policy. Full per-tool capability
-matrix, config reference, and open questions live in #47; the shape:
+NIC segmentation limits *who can reach* the data-NIC download listener
+but does nothing about *passive eavesdropping* on the data VLAN — a
+sniffer on the segment captures the single-use token **and** the file
+bytes. Issue #47 adds HTTPS with a configurable security policy. Full
+per-tool capability matrix, config reference, and open questions live in
+#47.
+
+**Implementation status.** *PR1 (landed):* config knobs, the
+`ensure_data_plane_cert` self-signed cert with IP SANs
+(`backend/tls.py`), the HTTPS data listener in `run.py`, the ladder, and
+`insecure` mode's per-tool skip-verify in `build_fetch_command()`.
+`verify` mode is a valid value and works when the guest already trusts
+the data-plane cert; PR1's `PREFERRED` default is `insecure`.
+*PR2:* automatic guest CA install (`RESTORE_DATA_NIC_TLS_INSTALL_CA` =
+`never`/`if-missing`/`always`), and the `PREFERRED` default flips to
+`verify`. Still **unverified against a real guest** — the same caveat
+DNT itself carries.
 
 **Three modes, a downgrade ladder, and a floor.** The download can run
 `verify` (HTTPS, full chain + IP/hostname validation in the guest),
 `insecure` (HTTPS, encryption only — never touches a guest trust
-store), or `plaintext` (today). Two policy knobs:
-`RESTORE_DATA_NIC_TLS_PREFERRED` (best mode to attempt, default
-`plaintext` so this is a pure opt-in with zero behaviour change) and
-`RESTORE_DATA_NIC_TLS_MINIMUM` (the floor; validated ≤ PREFERRED).
-Per guest the app resolves the best achievable mode from the detected
-fetch tool's TLS capability, whether the guest trusts the cert, and the
-negotiated protocol version, stepping `verify → insecure → plaintext`
-down to MINIMUM. If even MINIMUM can't be met,
+store), or `plaintext` (HTTP, as before #47). Two policy knobs:
+`RESTORE_DATA_NIC_TLS_PREFERRED` (best mode to attempt) and
+`RESTORE_DATA_NIC_TLS_MINIMUM` (the floor; validated ≤ PREFERRED at
+config load). Per guest the app resolves the strongest achievable mode
+from the detected fetch tool's TLS capability, stepping
+`verify → insecure → plaintext` down to MINIMUM. When `PREFERRED` isn't
+`plaintext` the data listener is HTTPS, so a `plaintext` rung below it
+can't be served over the network in PR1 (no second HTTP port) — the
+floor is clamped up to `insecure` for the network path. If nothing
+qualifies,
 `RESTORE_DATA_NIC_TLS_ON_UNMET` decides: `fallback` (Design B — the
 chunked write over QMP/virtio-serial, which never puts bytes on the
 data network at all) or `fail` (stop with a clear message so the

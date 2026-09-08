@@ -756,6 +756,111 @@ async def test_design_c_fetch_failure_fails_the_job_rather_than_falling_back(man
     assert "Direct Network Transfer failed" in job.error
 
 
+# --- data-plane TLS (issue #47) ------------------------------------------
+
+
+def _dnt_settings(monkeypatch, **kw):
+    kw.setdefault("restore_data_nics_json", '[{"cidr": "10.0.5.0/24", "local_ip": "10.0.5.5"}]')
+    monkeypatch.setattr(restore_runner, "settings", _replace(restore_runner.settings, **kw))
+
+
+async def _run_dnt_with_curl(manager, session_data, monkeypatch, curl_argv_sink):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 + 100))
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""
+        if argv[0] == "curl":
+            curl_argv_sink[:] = argv
+            return 0, "", ""
+        if argv[:2] == ["test", "-f"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+    return job
+
+
+async def test_design_c_default_mode_serves_https_and_skips_verify(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch)  # defaults: preferred=insecure, minimum=insecure
+    argv: list[str] = []
+    job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
+    assert job.status == RestoreStatus.DONE
+    assert "-k" in argv
+    assert argv[-1].startswith("https://10.0.5.5:8008/api/restore-downloads/")
+    assert any("TLS: insecure" in line for line in job.log_lines)
+
+
+async def test_design_c_preferred_plaintext_keeps_http_and_no_skip_verify(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_preferred="plaintext", restore_data_nic_tls_minimum="plaintext")
+    argv: list[str] = []
+    job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
+    assert job.status == RestoreStatus.DONE
+    assert "-k" not in argv
+    assert argv[-1].startswith("http://10.0.5.5:8008/api/restore-downloads/")
+    assert any("TLS: plaintext" in line for line in job.log_lines)
+
+
+async def _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 + 100))
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_calls.append(argv)
+        if argv[:2] == ["sh", "-c"] and "command -v" in argv[2]:
+            return (0, "/bin/bash", "") if "command -v bash" in argv[2] else (1, "", "not found")
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+    return job
+
+
+async def test_design_c_bash_only_guest_falls_back_to_design_b_under_tls(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch)  # insecure floor; bash can't do TLS at all
+    exec_calls: list[list[str]] = []
+    job = await _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls)
+    assert job.status == RestoreStatus.DONE
+    assert any("no data-plane TLS mode" in line and "bash" in line for line in job.log_lines)
+    assert any(c[:2] == ["sh", "-c"] and "cat" in c[2] for c in exec_calls)  # Design B concat ran
+
+
+async def test_design_c_on_unmet_fail_fails_the_job_when_no_tls_mode_qualifies(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_on_unmet="fail")
+    exec_calls: list[list[str]] = []
+    job = await _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls)
+    assert job.status == RestoreStatus.FAILED
+    assert "Direct Network Transfer required but unavailable" in job.error
+
+
 # --- cancellation / errors / cleanup ---------------------------------------
 
 
