@@ -143,8 +143,17 @@ async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> N
                 ssl_keyfile=str(dp_key),
                 ssl_ca_certs=dp_ca,
             )
-            data_config.load()
-            data_config.ssl.minimum_version = _MIN_TLS[settings.restore_data_nic_tls_min_version]
+            try:
+                data_config.load()  # builds the SSL context - raises on a bad cert/key
+                data_config.ssl.minimum_version = _MIN_TLS[settings.restore_data_nic_tls_min_version]
+            except (ssl.SSLError, OSError, ValueError) as exc:
+                _log.error(
+                    "Skipping the Direct Network Transfer data listener for %s: bad data-plane "
+                    "cert/key (%s). The portal is running normally; DNT stays unavailable for that subnet.",
+                    ip,
+                    exc,
+                )
+                continue
             scheme = "https"
         else:
             data_config = uvicorn.Config("backend.main:app", host=ip, port=data_port)

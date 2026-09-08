@@ -1734,6 +1734,18 @@ things surfaced immediately, both fixed:
   (like PVE's own disk-move progress).
   `_try_direct_network_transfer` also now logs when it bails because
   `RESTORE_DATA_NICS` is empty.
+- Iterating on `local_ip` left a stale `certs/data-plane.*` behind, and
+  at one point a cert/key that didn't match each other — uvicorn's
+  `create_ssl_context` then raised `KEY_VALUES_MISMATCH` at `config.load()`,
+  fatal again. `backend/tls.py` now: (a) tags auto-generated certs with
+  a recognisable Organization name; (b) `ensure_self_signed_cert` /
+  `ensure_data_plane_cert` **regenerate a broken pair** (mismatched,
+  unreadable, expired) rather than hand uvicorn a cert that can't load;
+  (c) the data-plane cert regenerates its *own* (auto-generated) cert
+  when the configured SANs change, but only *warns* about a valid
+  admin-supplied cert with wrong SANs; (d) `run.py` wraps
+  `data_config.load()` so a bad data-plane cert skips that one listener
+  instead of taking the portal down.
 
 **Explicitly out of scope of #47** (separate follow-ups): route-scoping
 the data listener so it serves *only* the token route rather than the

@@ -3,7 +3,22 @@ import ipaddress
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
-from backend.tls import ensure_data_plane_cert, ensure_self_signed_cert
+from backend.tls import _write_self_signed, ensure_data_plane_cert, ensure_self_signed_cert
+
+
+def _san(cert_path):
+    cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    return cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+
+
+def _real_pair(tmp_path, name="x", **kw):
+    """A genuine self-signed cert/key pair as PEM bytes."""
+    c, k = tmp_path / f"{name}.crt", tmp_path / f"{name}.key"
+    _write_self_signed(c, k, name, **kw)
+    cb, kb = c.read_bytes(), k.read_bytes()
+    c.unlink()
+    k.unlink()
+    return cb, kb
 
 
 def test_generates_cert_and_key(tmp_path):
@@ -13,21 +28,40 @@ def test_generates_cert_and_key(tmp_path):
     assert cert.exists() and key.exists()
 
     parsed = x509.load_pem_x509_certificate(cert.read_bytes())
-    cn = parsed.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-    assert cn == "pve.example"
-    san = parsed.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-    assert "pve.example" in san.value.get_values_for_type(x509.DNSName)
-    assert "localhost" in san.value.get_values_for_type(x509.DNSName)
+    assert parsed.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "pve.example"
+    dns = _san(cert).get_values_for_type(x509.DNSName)
+    assert "pve.example" in dns and "localhost" in dns
 
 
-def test_does_not_overwrite_existing(tmp_path):
-    cert = tmp_path / "portal.crt"
-    key = tmp_path / "portal.key"
-    cert.write_bytes(b"existing-cert")
-    key.write_bytes(b"existing-key")
+def test_does_not_regenerate_a_valid_pair(tmp_path):
+    cert, key = tmp_path / "portal.crt", tmp_path / "portal.key"
+    cb, kb = _real_pair(tmp_path, "admin", dns_sans=("portal.example",))
+    cert.write_bytes(cb)
+    key.write_bytes(kb)
     ensure_self_signed_cert(cert, key, common_name="whatever")
-    assert cert.read_bytes() == b"existing-cert"
-    assert key.read_bytes() == b"existing-key"
+    assert (cert.read_bytes(), key.read_bytes()) == (cb, kb)
+
+
+def test_regenerates_a_broken_pair(tmp_path, caplog):
+    cert, key = tmp_path / "portal.crt", tmp_path / "portal.key"
+    # cert from one keypair, key from another -> KEY_VALUES_MISMATCH at
+    # uvicorn startup unless we catch it here.
+    cert.write_bytes(_real_pair(tmp_path, "a")[0])
+    key.write_bytes(_real_pair(tmp_path, "b")[1])
+    with caplog.at_level("WARNING"):
+        ensure_self_signed_cert(cert, key, common_name="pve.example")
+    assert any("do not match" in r.message for r in caplog.records)
+    # now a matching, loadable pair
+    parsed = x509.load_pem_x509_certificate(cert.read_bytes())
+    assert parsed.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "pve.example"
+
+
+def test_regenerates_an_unreadable_cert(tmp_path):
+    cert, key = tmp_path / "portal.crt", tmp_path / "portal.key"
+    cert.write_bytes(b"-----BEGIN CERTIFICATE-----\ngarbage\n-----END CERTIFICATE-----\n")
+    key.write_bytes(b"also not a key")
+    ensure_self_signed_cert(cert, key, common_name="pve.example")
+    x509.load_pem_x509_certificate(cert.read_bytes())  # loads cleanly now
 
 
 # --- data-plane cert (issue #47) ---------------------------------------
@@ -36,37 +70,63 @@ def test_data_plane_cert_carries_ip_and_dns_sans(tmp_path):
     cert = tmp_path / "certs" / "data-plane.crt"
     key = tmp_path / "certs" / "data-plane.key"
     ensure_data_plane_cert(cert, key, ip_sans=("10.0.5.5", "10.0.6.5"), dns_sans=("restore.dc1.lan",))
-    assert cert.exists() and key.exists()
-
-    san = x509.load_pem_x509_certificate(cert.read_bytes()).extensions.get_extension_for_class(
-        x509.SubjectAlternativeName
-    ).value
-    ips = set(san.get_values_for_type(x509.IPAddress))
+    ips = set(_san(cert).get_values_for_type(x509.IPAddress))
     assert ips == {ipaddress.ip_address("10.0.5.5"), ipaddress.ip_address("10.0.6.5")}
-    assert "restore.dc1.lan" in san.get_values_for_type(x509.DNSName)
+    assert "restore.dc1.lan" in _san(cert).get_values_for_type(x509.DNSName)
 
 
-def test_data_plane_cert_not_overwritten_but_warns_on_insufficient_sans(tmp_path, caplog):
-    cert = tmp_path / "data-plane.crt"
-    key = tmp_path / "data-plane.key"
+def test_data_plane_cert_autogen_regenerates_when_a_nic_ip_changes(tmp_path):
+    cert, key = tmp_path / "data-plane.crt", tmp_path / "data-plane.key"
     ensure_data_plane_cert(cert, key, ip_sans=("10.0.5.5",))
-    original = cert.read_bytes()
+    ensure_data_plane_cert(cert, key, ip_sans=("10.0.5.5", "10.0.9.9"))  # NIC added
+    ips = {str(v) for v in _san(cert).get_values_for_type(x509.IPAddress)}
+    assert ips == {"10.0.5.5", "10.0.9.9"}
 
-    # A newly-added NIC isn't covered -> warn, never rewrite.
+
+def test_data_plane_cert_keeps_an_admin_cert_with_wrong_sans_and_warns(tmp_path, caplog):
+    cert, key = tmp_path / "data-plane.crt", tmp_path / "data-plane.key"
+    # An admin-supplied pair (no "auto-generated" Organization marker).
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    import datetime
+
+    now = datetime.datetime.now(datetime.UTC)
+    subj = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "admin-cert")])
+    c = (
+        x509.CertificateBuilder()
+        .subject_name(subj)
+        .issuer_name(subj)
+        .public_key(k.public_key())
+        .serial_number(1)
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=100))
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("10.0.5.5"))]), False)
+        .sign(k, hashes.SHA256())
+    )
+    cert.write_bytes(c.public_bytes(serialization.Encoding.PEM))
+    key.write_bytes(
+        k.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    original = cert.read_bytes()
     with caplog.at_level("WARNING"):
         ensure_data_plane_cert(cert, key, ip_sans=("10.0.5.5", "10.0.9.9"))
-    assert cert.read_bytes() == original
+    assert cert.read_bytes() == original  # admin's cert untouched
     assert any("does not cover" in r.message for r in caplog.records)
 
 
-def test_data_plane_cert_regenerates_when_absent_after_config_change(tmp_path):
-    cert = tmp_path / "data-plane.crt"
-    key = tmp_path / "data-plane.key"
-    ensure_data_plane_cert(cert, key, ip_sans=("10.0.5.5",))
-    cert.unlink()
-    key.unlink()
-    ensure_data_plane_cert(cert, key, ip_sans=("10.0.5.5", "10.0.9.9"))
-    san = x509.load_pem_x509_certificate(cert.read_bytes()).extensions.get_extension_for_class(
-        x509.SubjectAlternativeName
-    ).value
-    assert ipaddress.ip_address("10.0.9.9") in set(san.get_values_for_type(x509.IPAddress))
+def test_data_plane_cert_regenerates_a_mismatched_pair(tmp_path, caplog):
+    cert, key = tmp_path / "data-plane.crt", tmp_path / "data-plane.key"
+    cert.write_bytes(_real_pair(tmp_path, "a", ip_sans=("10.0.5.5",), is_ca=True)[0])
+    key.write_bytes(_real_pair(tmp_path, "b", ip_sans=("10.0.5.5",), is_ca=True)[1])
+    with caplog.at_level("WARNING"):
+        ensure_data_plane_cert(cert, key, ip_sans=("10.0.5.5",))
+    assert any("do not match" in r.message for r in caplog.records)
+    from backend.tls import _pair_broken_reason
+
+    assert _pair_broken_reason(cert, key) is None  # fixed
