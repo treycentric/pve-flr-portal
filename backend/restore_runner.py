@@ -103,6 +103,18 @@ async def _iter_download_pieces(first_piece: bytes, second_piece: bytes | None, 
             yield piece
 
 
+def _parse_content_length(raw: str | None) -> int | None:
+    """The download's Content-Length as a positive int, or None when it's
+    absent/unparseable (a directory download streams chunked with no
+    length; a single file normally has one). Lets the chunked write path
+    report real progress instead of the growing placeholder."""
+    try:
+        n = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
 async def _drain_and_hash(pieces, hasher) -> int:
     """Consumes the rest of a download without writing it anywhere -
     used when Direct Network Transfer is handling the actual guest-side
@@ -152,8 +164,12 @@ async def _write_chunks_to_scratch(
     (61440-byte chunks against a 1.5GB+ bundle) rounded up to a
     displayed 100% after only ~200 chunks - a few percent of the real
     work - misreading as stuck rather than still genuinely writing."""
-    if total_bytes_hint is not None:
-        job.progress_total = max(job.progress_total, chunk_count(total_bytes_hint, DEFAULT_CHUNK_SIZE_BYTES) + 1)
+    expected_chunks = chunk_count(total_bytes_hint, DEFAULT_CHUNK_SIZE_BYTES) if total_bytes_hint else 0
+    if expected_chunks:
+        job.progress_total = max(job.progress_total, expected_chunks + 1)
+    # Heartbeat cadence: ~every 10% of a known total, clamped so a small
+    # file stays quiet and a huge one doesn't flood the log.
+    log_every = max(200, min(1000, expected_chunks // 10)) if expected_chunks else 500
     sep = scratch_path_sep(guest_os_family)
     paths: list[str] = []
     total = 0
@@ -179,10 +195,16 @@ async def _write_chunks_to_scratch(
             job.progress_total = max(job.progress_total, job.progress_current + 1)
         index += 1
         # A big chunked write logs nothing between "creating scratch dir"
-        # and "downloaded N bytes" otherwise - a heartbeat every ~30 MiB
-        # keeps it from looking hung (issue #47 live testing).
-        if index % 512 == 0:
-            job.log(f"Written {index} chunks ({total:,} bytes) to the guest so far.")
+        # and "downloaded N bytes" otherwise - a heartbeat keeps it from
+        # looking hung (issue #47 live testing).
+        if index % log_every == 0:
+            if expected_chunks:
+                job.log(
+                    f"Sent {index:,} / {expected_chunks:,} chunks to the guest "
+                    f"({index * 100 // expected_chunks}%, {total:,} bytes)."
+                )
+            else:
+                job.log(f"Sent {index:,} chunks ({total:,} bytes) to the guest so far.")
     return paths, total
 
 
@@ -843,6 +865,7 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
             job.session, job.source_volume, job.source_filepath, tar=False
         )
         try:
+            content_length = _parse_content_length(response.headers.get("content-length"))
             # Read just enough (at most two pieces) to know whether this
             # is the small, single-call case, without buffering the rest
             # of a possibly-large file just to find out. See
@@ -942,11 +965,16 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     jobs.mark_cancelled(job.id)
                     return
 
-                # A growing/placeholder total - the real chunk count
-                # isn't known until the source is exhausted (streamed,
-                # not pre-downloaded - see above). Refined as chunks are
-                # actually written, finalized once the count is known.
-                job.progress_total = 2 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                # If the download reported a Content-Length we know the
+                # real chunk count up front; otherwise fall back to a
+                # growing placeholder (streamed, not pre-downloaded - see
+                # above) that RestoreJob.progress_percent clamps to <100
+                # until the count is actually known.
+                extra_units = (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                if content_length is not None:
+                    job.progress_total = chunk_count(content_length, DEFAULT_CHUNK_SIZE_BYTES) + 1 + extra_units
+                else:
+                    job.progress_total = 2 + extra_units
 
                 pieces = _iter_download_pieces(first_piece, second_piece, byte_iter)
                 if await _try_direct_network_transfer(job, guest_os_family):
@@ -965,7 +993,7 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
                     await _create_scratch_dir(job, guest_os_family, scratch_dir)
                     chunk_paths, total_bytes = await _write_chunks_to_scratch(
-                        job, guest_os_family, scratch_dir, pieces, hasher
+                        job, guest_os_family, scratch_dir, pieces, hasher, total_bytes_hint=content_length
                     )
                     job.log(f"Downloaded {total_bytes} byte(s) from the backup.")
                     if job.cancel_requested:

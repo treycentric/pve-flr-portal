@@ -36,8 +36,9 @@ def _make_job(manager, session_data, **overrides):
 
 
 class FakeDownloadResponse:
-    def __init__(self, content: bytes):
+    def __init__(self, content: bytes, headers: dict | None = None):
         self._content = content
+        self.headers = headers or {}
         self.aclose_called = False
 
     async def aread(self) -> bytes:
@@ -86,9 +87,11 @@ def _available_caps(**overrides):
     return guest_agent.RestoreCapabilities(**defaults)
 
 
-def _patch_download(monkeypatch, content: bytes):
+def _patch_download(monkeypatch, content: bytes, *, content_length: bool = False):
+    headers = {"content-length": str(len(content))} if content_length else {}
+
     async def fake_open_download(session, volume, filepath, tar=False):
-        return FakeDownloadClient(), FakeDownloadResponse(content)
+        return FakeDownloadClient(), FakeDownloadResponse(content, headers)
 
     monkeypatch.setattr(pve_client, "open_download", fake_open_download)
 
@@ -279,6 +282,36 @@ async def test_progress_updates_incrementally_during_multi_chunk_write(manager, 
     # incrementally rather than jumping straight to the final value.
     assert seen_progress == [0, 1, 2]
     assert job.progress_current == 4
+
+
+async def test_multi_chunk_progress_total_is_exact_with_content_length(manager, session_data, monkeypatch):
+    """With a Content-Length on the download, the chunked single-file
+    path knows the real chunk count up front instead of the growing
+    placeholder - so the bar tracks true progress (issue #47 testing)."""
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 * 4 + 10), content_length=True)  # 5 chunks
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    totals_during_write = []
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        totals_during_write.append(job.progress_total)
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    # 5 chunks + 1 concat, known before the first write - never the "+1
+    # ahead of current" placeholder (which would have been 2, 3, 4, ...).
+    assert totals_during_write == [6, 6, 6, 6, 6]
+    assert (job.progress_current, job.progress_total) == (6, 6)
 
 
 async def test_progress_total_includes_metadata_and_verify_units(manager, session_data, monkeypatch):

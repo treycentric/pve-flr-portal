@@ -1708,6 +1708,28 @@ Classifying "handshake never completed, 0 bytes" from a tool's exit code
 so *that* specific case could downgrade instead is a possible later
 refinement (issue #47 open question).
 
+**Real-world finding (2026-09-08), first deploy on a real host.** Two
+things surfaced immediately, both fixed:
+- A `RESTORE_DATA_NICS` entry whose `local_ip` isn't actually a local
+  address (easy to do — you want the *portal's* IP on that segment, not
+  the guest's) made uvicorn's `create_server` raise `EADDRNOTAVAIL`,
+  which `sys.exit()`s the process — the **whole portal** went down, not
+  just that one listener. `run.py` now preflight-checks each data IP with
+  a throwaway `bind((ip, 0))` and skips it with a clear log line, and
+  wraps each data listener so a later bind failure is logged, not fatal.
+  The main UI/PVE listener's lifetime alone governs the process.
+- A large single-file restore that fell through to the chunked path
+  (DNT unconfigured) sat at a displayed ~99% for a long time with no log
+  output — the "+1 ahead of current" placeholder pinning near 100%, and
+  `_write_chunks_to_scratch` logging nothing between "creating scratch
+  dir" and "downloaded N bytes". Now: `_run_single_file_restore` reads
+  the download's `Content-Length` (present for a single file, absent for
+  a directory stream) and passes it as `total_bytes_hint`, so the bar
+  tracks the real chunk count from the first write; and the write loop
+  emits a `Sent X / Y chunks (NN%)` heartbeat roughly every 10%.
+  `_try_direct_network_transfer` also now logs when it bails because
+  `RESTORE_DATA_NICS` is empty.
+
 **Explicitly out of scope of #47** (separate follow-ups): route-scoping
 the data listener so it serves *only* the token route rather than the
 whole app on that IP; `cscript` staging.

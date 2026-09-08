@@ -53,3 +53,9 @@ def test_data_plane_tls_enabled_follows_preferred(monkeypatch):
 def test_min_tls_map_covers_both_configured_values():
     importlib.reload(config)
     assert set(run._MIN_TLS) == {"1.2", "1.3"}
+
+
+def test_bindable_true_for_loopback_false_for_a_non_local_address():
+    assert run._bindable("127.0.0.1") is True
+    # TEST-NET-1 (RFC 5737) - never a local address on a real host.
+    assert run._bindable("192.0.2.123") is False

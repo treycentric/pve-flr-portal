@@ -15,6 +15,12 @@ only wraps the single-server `uvicorn.run()` entrypoint, so the default
 (no data NICs configured) keeps using `uvicorn.run(..., reload=True)`;
 only the opt-in multi-listener path below gives that up.
 
+A data listener is an optional enhancement: if its IP isn't a local
+address (a wrong `local_ip`, or the interface isn't attached yet) it is
+skipped with a clear log line and the main portal runs normally - DNT
+just isn't offered for that subnet (guests there fall back to the
+chunked write path).
+
 Data-plane TLS (issue #47, docs/plan.md §7.6.1): those data listeners
 are plain HTTP when RESTORE_DATA_NIC_TLS_PREFERRED is `plaintext`
 (unchanged from before #47) and HTTPS otherwise, using a dedicated
@@ -22,6 +28,8 @@ self-signed data-plane cert (IP SANs for the configured NICs) unless the
 admin drops their own at RESTORE_DATA_NIC_TLS_CERT_FILE/_KEY_FILE.
 """
 import asyncio
+import logging
+import socket
 import ssl
 from pathlib import Path
 
@@ -31,11 +39,31 @@ from backend.config import ensure_data_dir, settings
 from backend.restore_network_pull import parse_data_nics
 from backend.tls import ensure_data_plane_cert, ensure_self_signed_cert
 
+_log = logging.getLogger("pve_flr_portal.run")
+
 _MIN_TLS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 
 
 def _data_plane_tls_enabled() -> bool:
     return settings.restore_data_nic_tls_preferred != "plaintext"
+
+
+def _bindable(ip: str) -> bool:
+    """True if this host can bind a socket to `ip` (i.e. it's a local
+    address). Used to skip a misconfigured data NIC before it takes the
+    whole process down with a startup bind error."""
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    try:
+        probe = socket.socket(family, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        probe.bind((ip, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
 
 
 def _prepare_data_plane_cert(data_nics) -> tuple[Path, Path]:
@@ -47,6 +75,20 @@ def _prepare_data_plane_cert(data_nics) -> tuple[Path, Path]:
     return cert_path, key_path
 
 
+async def _run_data_listener(server: uvicorn.Server, ip: str, port: int) -> None:
+    try:
+        await server.serve()
+    except SystemExit:  # uvicorn's bind-failure path raises this
+        _log.error(
+            "Direct Network Transfer data listener on %s:%s failed to start. The portal is "
+            "running normally; DNT is unavailable for that subnet until this is fixed.",
+            ip,
+            port,
+        )
+    except OSError as exc:
+        _log.error("Direct Network Transfer data listener on %s:%s: %s", ip, port, exc)
+
+
 async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> None:
     main_config = uvicorn.Config(
         "backend.main:app",
@@ -55,7 +97,6 @@ async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> N
         ssl_certfile=str(cert_path),
         ssl_keyfile=str(key_path),
     )
-    servers = [uvicorn.Server(main_config)]
 
     data_port = settings.restore_data_nic_port or settings.port
     tls = _data_plane_tls_enabled()
@@ -64,11 +105,23 @@ async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> N
         dp_cert, dp_key = _prepare_data_plane_cert(data_nics)
         dp_ca = settings.restore_data_nic_tls_ca_file or None
 
+    # The main listener's lifetime governs the process; a data listener
+    # that can't start is logged and dropped, never fatal.
+    coros = [uvicorn.Server(main_config).serve()]
+
     # One data-plane listener per distinct configured IP, bound to that
     # specific interface only - never 0.0.0.0, which would defeat the
     # whole point of keeping the data plane separate from the
     # UI/PVE-management listener above.
     for ip in sorted({nic.local_ip for nic in data_nics}):
+        if not _bindable(ip):
+            _log.error(
+                "RESTORE_DATA_NICS lists local_ip %s, which is not a local address on this host - "
+                "skipping its data listener. Fix local_ip or attach that interface. DNT stays "
+                "unavailable for that subnet.",
+                ip,
+            )
+            continue
         if tls:
             data_config = uvicorn.Config(
                 "backend.main:app",
@@ -84,10 +137,10 @@ async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> N
         else:
             data_config = uvicorn.Config("backend.main:app", host=ip, port=data_port)
             scheme = "http"
-        servers.append(uvicorn.Server(data_config))
         print(f"Direct Network Transfer: also serving the download route on {scheme}://{ip}:{data_port}")
+        coros.append(_run_data_listener(uvicorn.Server(data_config), ip, data_port))
 
-    await asyncio.gather(*(server.serve() for server in servers))
+    await asyncio.gather(*coros)
 
 
 if __name__ == "__main__":
