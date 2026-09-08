@@ -1635,15 +1635,20 @@ bytes. Issue #47 adds HTTPS with a configurable security policy. Full
 per-tool capability matrix, config reference, and open questions live in
 #47.
 
-**Implementation status.** Built over two PRs, both merged:
-config knobs + the `ensure_data_plane_cert` self-signed cert with IP
-SANs (`backend/tls.py`) + the HTTPS data listener (`run.py`) + the
-ladder + `insecure` skip-verify; then automatic guest CA install
-(`backend/guest_ca.py`, `restore_runner._ensure_guest_trusts_ca`,
+**Implementation status.** Built over two PRs: config knobs + the
+`ensure_data_plane_cert` self-signed cert with IP SANs (`backend/tls.py`)
++ the HTTPS data listener (`run.py`) + the ladder + `insecure`
+skip-verify; then automatic guest CA install (`backend/guest_ca.py`,
+`restore_runner._ensure_guest_trusts_ca`,
 `RESTORE_DATA_NIC_TLS_INSTALL_CA` = `never`/`if-missing`/`always`) with
-the `PREFERRED` default at `verify`. Still **unverified against a real
-guest** — the same caveat DNT itself carries; the operator will do a
-live pass before the release that includes this.
+the `PREFERRED` default at `verify`. **Live-verified 2026-09-08**
+against real Windows and Linux VMs, with both a self-signed data-plane
+cert and one issued by an internal CA (step-ca). The 2026-09-08
+first-deploy shakeout — bind failures, torn cert/key pairs, the
+`PVE_VERIFY_SSL`-vs-system-store gap, the ladder not stepping down on a
+runtime cert-trust failure, Windows `Invoke-WebRequest` schannel quirks
+(→ prefer real `curl.exe`), and chunked-write progress — is captured in
+the "Real-world finding" notes below.
 
 **Three modes, a downgrade ladder, and a floor.** The download can run
 `verify` (HTTPS, full chain + IP/hostname validation in the guest),
@@ -1726,8 +1731,9 @@ mid-transfer error, disk full in the guest — is a hard failure and
 still raises, matching the pre-#47 "once DNT is offered, a fetch failure
 is a real failure" rule.
 
-**Real-world finding (2026-09-08), first deploy on a real host.** Two
-things surfaced immediately, both fixed:
+**Real-world findings (2026-09-08), first deploy + live-verification on a
+real cluster (Windows + Linux VMs, self-signed and step-ca certs).** All
+fixed on the branch:
 - A `RESTORE_DATA_NICS` entry whose `local_ip` isn't actually a local
   address (easy to do — you want the *portal's* IP on that segment, not
   the guest's) made uvicorn's `create_server` raise `EADDRNOTAVAIL`,
@@ -1740,18 +1746,17 @@ things surfaced immediately, both fixed:
   RESTORE_DATA_NIC_PORT`); (c) wraps each data listener so a later bind
   failure is logged, not fatal. The main UI/PVE listener's lifetime
   alone governs the process.
-- A large single-file restore that fell through to the chunked path
-  (DNT unconfigured) sat at a displayed ~99% for a long time with no log
-  output — the "+1 ahead of current" placeholder pinning near 100%, and
-  `_write_chunks_to_scratch` logging nothing between "creating scratch
-  dir" and "downloaded N bytes". Now: `_run_single_file_restore` reads
-  the download's `Content-Length` (present for a single file, absent for
-  a directory stream) and passes it as `total_bytes_hint`, so the bar
-  tracks the real chunk count from the first write; and the write loop
-  emits a `Sent X / Y chunks (NN%)` heartbeat once per whole percent
-  (like PVE's own disk-move progress).
-  `_try_direct_network_transfer` also now logs when it bails because
-  `RESTORE_DATA_NICS` is empty.
+- A large single-file restore on the chunked path sat at a displayed
+  ~99% with no log output — the "+1 ahead of current" placeholder
+  pinning near 100%, and `_write_chunks_to_scratch` logging nothing
+  between "creating scratch dir" and "downloaded N bytes". PVE's
+  file-restore download stream has **no `Content-Length`** in practice,
+  so the frontend now sends the file's size from `file-restore/list`
+  (`source_size` → `RestoreJob.source_size` → `total_bytes_hint`); the
+  bar tracks a real chunk count and the write loop emits a
+  `Sent X / Y chunks (NN%)` heartbeat once per whole percent (like PVE's
+  own disk-move progress). `_try_direct_network_transfer` also logs when
+  it bails because `RESTORE_DATA_NICS` is empty.
 - Iterating on `local_ip` left a stale `certs/data-plane.*` behind, and
   a restart landing between `_write_self_signed`'s two writes left a
   fresh key next to a stale cert — uvicorn's `create_ssl_context` then
@@ -1767,10 +1772,34 @@ things surfaced immediately, both fixed:
   valid admin cert with wrong SANs; (d) `run.py` wraps
   `data_config.load()` so a bad data-plane cert skips that one listener
   instead of taking the portal down.
+- **`PVE_VERIFY_SSL=true` trusted only certifi**, not the container's
+  system CA store — so once Proxmox served an internal-CA cert, login
+  500'd with "self-signed certificate in certificate chain". Now
+  `true` → `ssl.create_default_context()` (system store, `SSL_CERT_FILE`
+  honoured); `false` unchanged; a **path** is accepted and validated at
+  startup (a typo was raising `FileNotFoundError` inside every request).
+- **The ladder didn't step down on a runtime cert-trust failure.** With
+  `verify` and `INSTALL_CA=never`, a guest that doesn't trust the
+  data-plane cert failed the whole restore. Now
+  `restore_network_pull.is_tls_negotiation_failure` classifies a failed
+  fetch: a TLS handshake/trust failure (0 bytes moved) retries one rung
+  down (`verify` → `insecure`) then applies `ON_UNMET`; any other fetch
+  failure still hard-fails.
+- **Windows `Invoke-WebRequest` + skip-verify is fragile** on PS 5.1 (a
+  bare `{ $true }` validation callback throws inside schannel →
+  "underlying connection was closed: an unexpected error occurred on a
+  send"). Fixed the callback (declared params) and `SecurityProtocol`
+  (OR in TLS 1.2, don't replace) + `-UseBasicParsing`, but real
+  **`curl.exe`** (Win10 1803+/Server 2019+) is now the first-choice
+  Windows fetch tool — its schannel `-k` is far more predictable.
+- **Restore-to-guest fails for a guest on another cluster node** — every
+  guest-scoped call hard-codes `nodes/localhost`. Not fixed here;
+  tracked as **issue #51**.
 
 **Explicitly out of scope of #47** (separate follow-ups): route-scoping
 the data listener so it serves *only* the token route rather than the
-whole app on that IP; `cscript` staging.
+whole app on that IP; `cscript` staging; multi-node cluster support
+(#51); baking certbot into the build (#52).
 
 ### 7.7 Multi-file / directory restore-to-guest
 
