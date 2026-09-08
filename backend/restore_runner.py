@@ -31,7 +31,7 @@ from pathlib import Path
 
 import httpx
 
-from . import guest_agent, pve_client, restore_bundle, restore_download, restore_network_pull
+from . import guest_agent, guest_ca, pve_client, restore_bundle, restore_download, restore_network_pull
 from .auth import ensure_fresh_ticket
 from .config import TLS_MODES, settings
 from .restore_chunking import (
@@ -257,6 +257,64 @@ async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | Non
         )
 
 
+async def _ensure_guest_trusts_ca(job: RestoreJob, guest_os_family: str | None) -> bool:
+    """Install the Direct Network Transfer data-plane CA into the guest's
+    trust store so `verify` mode works (issue #47 §7.6.1). Returns
+    True if the guest trusts it afterwards (already did, or the install
+    succeeded), False otherwise - the caller steps the TLS mode down on
+    False. Never raises. `RESTORE_DATA_NIC_TLS_INSTALL_CA` is `if-missing`
+    or `always` here (`never` is filtered by the caller); `if-missing`
+    checks first and skips the write when it's already there."""
+    only_if_missing = settings.restore_data_nic_tls_install_ca == "if-missing"
+    try:
+        pem = guest_ca.load_ca_pem()
+    except OSError as exc:
+        job.log(f"Can't read the data-plane CA file to install it in the guest: {exc}")
+        return False
+    if not guest_ca.is_ca_cert(pem):
+        job.log(
+            "The configured data-plane CA file isn't a CA certificate "
+            "(no BasicConstraints cA=True) - not installing it in the guest."
+        )
+        return False
+
+    if guest_os_family == "windows":
+        thumb = guest_ca.fingerprint_sha1_hex(pem)
+        if only_if_missing and (await _exec(job, guest_ca.windows_check_argv(thumb)))[0] == 0:
+            job.log("Guest already trusts the data-plane CA.")
+            return True
+        scratch = guest_ca.windows_scratch_path(thumb[:12])
+        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, scratch, pem)
+        code, out, err = await _exec(job, guest_ca.windows_install_argv(scratch))
+        await _exec(job, guest_ca.windows_cleanup_argv(scratch))  # best effort
+        if code != 0:
+            job.log(f"Could not add the data-plane CA to the guest's Root store: {(err or out).strip()}")
+            return False
+        job.log("Added the data-plane CA to the guest's Root store.")
+        return True
+
+    if guest_os_family in ("linux", "bsd", "macos"):
+        has_deb = (await _exec(job, ["sh", "-c", "command -v update-ca-certificates"]))[0] == 0
+        has_rht = (await _exec(job, ["sh", "-c", "command -v update-ca-trust"]))[0] == 0
+        if not (has_deb or has_rht):
+            job.log("Guest has neither update-ca-certificates nor update-ca-trust - can't install the data-plane CA.")
+            return False
+        anchor = guest_ca.linux_anchor_path(has_update_ca_certificates=has_deb)
+        if only_if_missing and (await _exec(job, ["test", "-f", anchor]))[0] == 0:
+            job.log("Guest already has the data-plane CA anchor file.")
+            return True
+        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, anchor, pem)
+        code, out, err = await _exec(job, guest_ca.linux_update_argv(has_update_ca_certificates=has_deb))
+        if code != 0:
+            job.log(f"Could not refresh the guest CA trust store: {(err or out).strip()}")
+            return False
+        job.log(f"Installed the data-plane CA at {anchor} and refreshed the guest trust store.")
+        return True
+
+    job.log(f"Don't know how to install a CA on guest OS family {guest_os_family!r}.")
+    return False
+
+
 async def _try_direct_network_transfer(
     job: RestoreJob,
     guest_os_family: str | None,
@@ -298,13 +356,15 @@ async def _try_direct_network_transfer(
     NIC segmentation + firewalling the perimeter). Otherwise this
     resolves the strongest TLS mode in
     [`RESTORE_DATA_NIC_TLS_MINIMUM`, `..._PREFERRED`] the detected fetch
-    tool supports - `verify` (guest validates the data-plane cert; PR1
-    needs it pre-trusted, PR2 adds CA install) or `insecure` (encryption
-    only) - builds an `https://` URL, and threads the mode into
-    `build_fetch_command()`. If no mode qualifies (a certutil/bitsadmin
-    /bash-only guest under an HTTPS floor), `RESTORE_DATA_NIC_TLS_ON_UNMET`
-    picks `fallback` (return False -> chunked write over QMP, off the
-    data network entirely) or `fail`.
+    tool supports - `verify` (guest validates the data-plane cert;
+    `_ensure_guest_trusts_ca` installs it first per
+    `RESTORE_DATA_NIC_TLS_INSTALL_CA`, and a failed install steps this
+    job down to `insecure` when the ladder allows) or `insecure`
+    (encryption only) - builds an `https://` URL, and threads the mode
+    into `build_fetch_command()`. If no mode qualifies (a certutil/
+    bitsadmin/bash-only guest under an HTTPS floor),
+    `RESTORE_DATA_NIC_TLS_ON_UNMET` picks `fallback` (return False ->
+    chunked write over QMP, off the data network entirely) or `fail`.
 
     **Not yet wired: `cscript` staging.** Detected as a candidate by
     `detect_fetch_tool()`, but building its command needs a scratch file
@@ -338,7 +398,7 @@ async def _try_direct_network_transfer(
 
     # Resolve the data-plane TLS mode for this guest (issue #47): the
     # strongest mode in [minimum, preferred] the detected fetch tool can
-    # actually do. PR1's data listener is HTTPS-only whenever preferred
+    # actually do. The data listener is HTTPS-only whenever preferred
     # isn't `plaintext`, so a `plaintext` rung below it can't be served
     # over the network - clamp the floor up to `insecure` in that case.
     pref = settings.restore_data_nic_tls_preferred
@@ -355,6 +415,21 @@ async def _try_direct_network_transfer(
             raise RuntimeError(f"Direct Network Transfer required but unavailable for this guest: {msg}")
         job.log(f"Direct Network Transfer not available: {msg}.")
         return False
+
+    # `verify`: the guest has to trust the data-plane cert. Install it if
+    # asked to (issue #47 §7.6.1); on failure, step down to the strongest
+    # non-verify mode the ladder still allows.
+    if mode == "verify" and settings.restore_data_nic_tls_install_ca != "never":
+        if not await _ensure_guest_trusts_ca(job, guest_os_family):
+            stepped = restore_network_pull.resolve_tls_mode(tool, "insecure", minimum)
+            if stepped is None:
+                msg = "the data-plane CA could not be installed in the guest and no weaker TLS mode is permitted"
+                if settings.restore_data_nic_tls_on_unmet == "fail":
+                    raise RuntimeError(f"Direct Network Transfer required but unavailable for this guest: {msg}")
+                job.log(f"Direct Network Transfer not available: {msg}.")
+                return False
+            job.log(f"Continuing this transfer with TLS: {stepped}.")
+            mode = stepped
 
     scheme = "http" if mode == "plaintext" else "https"
     host = nic.url_host

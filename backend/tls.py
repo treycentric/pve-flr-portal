@@ -32,6 +32,7 @@ def _write_self_signed(
     dns_sans: tuple[str, ...] = (),
     ip_sans: tuple[str, ...] = (),
     days: int = 825,
+    is_ca: bool = False,
 ) -> None:
     cert_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,7 +45,7 @@ def _write_self_signed(
     for ip in ip_sans:
         san.append(x509.IPAddress(ipaddress.ip_address(ip)))
 
-    cert = (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
@@ -53,8 +54,13 @@ def _write_self_signed(
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=days))
         .add_extension(x509.SubjectAlternativeName(san), critical=False)
-        .sign(key, hashes.SHA256())
     )
+    if is_ca:
+        # Self-signed cert used as its own trust anchor (the data-plane
+        # cert, issue #47): a strict validator - and this app's own
+        # guest_ca.is_ca_cert() guard - wants BasicConstraints cA=True.
+        builder = builder.add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+    cert = builder.sign(key, hashes.SHA256())
 
     key_path.write_bytes(
         key.private_bytes(
@@ -109,4 +115,4 @@ def ensure_data_plane_cert(
                 list(dns_sans),
             )
         return
-    _write_self_signed(cert_path, key_path, cn, dns_sans=dns_sans, ip_sans=ip_sans, days=825)
+    _write_self_signed(cert_path, key_path, cn, dns_sans=dns_sans, ip_sans=ip_sans, days=825, is_ca=True)

@@ -4,7 +4,7 @@ from dataclasses import replace as _replace
 import httpx
 import pytest
 
-from backend import guest_agent, pve_client, restore_bundle, restore_download, restore_runner
+from backend import guest_agent, guest_ca, pve_client, restore_bundle, restore_download, restore_runner
 from backend.restore_bundle import BundleFormat, BundleItem, ManifestBuilder
 from backend.restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 from backend.restore_jobs import RestoreJobManager, RestoreStatus
@@ -797,13 +797,22 @@ async def _run_dnt_with_curl(manager, session_data, monkeypatch, curl_argv_sink)
     return job
 
 
-async def test_design_c_default_mode_serves_https_and_skips_verify(manager, session_data, monkeypatch):
-    _dnt_settings(monkeypatch)  # defaults: preferred=insecure, minimum=insecure
+async def test_design_c_default_mode_is_verify_over_https(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch)  # defaults: preferred=verify, minimum=insecure, install_ca=never
+    argv: list[str] = []
+    job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
+    assert job.status == RestoreStatus.DONE
+    assert "-k" not in argv  # verify, not skip-verify
+    assert argv[-1].startswith("https://10.0.5.5:8008/api/restore-downloads/")
+    assert any("TLS: verify" in line for line in job.log_lines)
+
+
+async def test_design_c_preferred_insecure_adds_skip_verify(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_preferred="insecure", restore_data_nic_tls_minimum="insecure")
     argv: list[str] = []
     job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
     assert job.status == RestoreStatus.DONE
     assert "-k" in argv
-    assert argv[-1].startswith("https://10.0.5.5:8008/api/restore-downloads/")
     assert any("TLS: insecure" in line for line in job.log_lines)
 
 
@@ -857,6 +866,82 @@ async def test_design_c_on_unmet_fail_fails_the_job_when_no_tls_mode_qualifies(m
     _dnt_settings(monkeypatch, restore_data_nic_tls_on_unmet="fail")
     exec_calls: list[list[str]] = []
     job = await _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls)
+    assert job.status == RestoreStatus.FAILED
+    assert "Direct Network Transfer required but unavailable" in job.error
+
+
+async def _run_dnt_verify_ca(manager, session_data, monkeypatch, *, update_exit=0):
+    """DNT on a Debian-style Linux guest with curl available; the CA
+    install's `update-ca-certificates` returns `update_exit`. Returns
+    (job, curl_argv, written)."""
+    monkeypatch.setattr(guest_ca, "load_ca_pem", lambda: "PEM-DATA")
+    monkeypatch.setattr(guest_ca, "is_ca_cert", lambda _pem: True)
+
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 + 100))
+    curl_argv: list[str] = []
+    written: list[tuple[str, str]] = []
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        written.append((path, content))
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""
+        if argv[:2] == ["sh", "-c"] and "command -v update-ca-certificates" in argv[2]:
+            return 0, "/usr/sbin/update-ca-certificates", ""
+        if argv[:2] == ["sh", "-c"] and "command -v update-ca-trust" in argv[2]:
+            return 1, "", ""
+        if argv == ["update-ca-certificates"]:
+            return update_exit, "", "" if update_exit == 0 else "update failed"
+        if argv[0] == "curl":
+            curl_argv[:] = argv
+            return 0, "", ""
+        if argv[:2] == ["test", "-f"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+    return job, curl_argv, written
+
+
+async def test_design_c_verify_installs_the_ca_then_fetches_with_verification(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")
+    job, curl_argv, written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=0)
+    assert job.status == RestoreStatus.DONE
+    assert written == [("/usr/local/share/ca-certificates/pve-flr-portal-data-plane.crt", "PEM-DATA")]
+    assert "-k" not in curl_argv  # still verifying
+    assert any("Installed the data-plane CA" in line for line in job.log_lines)
+
+
+async def test_design_c_verify_ca_install_failure_steps_down_to_insecure(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")  # minimum stays `insecure`
+    job, curl_argv, _written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=1)
+    assert job.status == RestoreStatus.DONE
+    assert "-k" in curl_argv
+    assert any("Continuing this transfer with TLS: insecure" in line for line in job.log_lines)
+
+
+async def test_design_c_verify_ca_install_failure_fails_when_minimum_is_verify(manager, session_data, monkeypatch):
+    _dnt_settings(
+        monkeypatch,
+        restore_data_nic_tls_install_ca="always",
+        restore_data_nic_tls_minimum="verify",
+        restore_data_nic_tls_on_unmet="fail",
+    )
+    job, _curl_argv, _written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=1)
     assert job.status == RestoreStatus.FAILED
     assert "Direct Network Transfer required but unavailable" in job.error
 

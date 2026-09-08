@@ -130,33 +130,39 @@ class Settings:
     restore_data_nic_port: int
 
     # Direct Network Transfer data-plane TLS (issue #47, docs/plan.md
-    # §7.6.1). PR1 scope: `plaintext` (legacy - HTTP listener, unchanged
-    # from before this) and `insecure`/`verify` (HTTPS listener). The
-    # ladder: per guest, resolve the strongest mode in
+    # §7.6.1). `plaintext` = HTTP listener (pre-#47 behaviour);
+    # `insecure`/`verify` = HTTPS listener. The ladder: per guest,
+    # resolve the strongest mode in
     # [minimum, preferred] that the detected fetch tool can actually do
     # (curl/wget/python/Invoke-WebRequest/WinHttpRequest can skip-verify;
     # certutil/bitsadmin can't; bash /dev/tcp has no TLS at all). If none
     # qualifies, `on_unmet` decides: `fallback` (use Design B - the
     # chunked write over QMP, which never touches the data network) or
-    # `fail`. `verify` in PR1 works only if the guest already trusts the
-    # data-plane cert; automatic CA install lands in PR2, which is also
-    # when the `preferred` default flips to `verify`.
+    # `fail`.
+    #
+    # `verify` (the default): the guest validates the data-plane cert.
+    # `install_ca` controls whether this app puts the cert into the
+    # guest's trust store first (guest_ca.py + restore_runner) - `never`
+    # (the guest must already trust it), `if-missing` (check, install
+    # only if absent), or `always`. If install is needed but fails, the
+    # job steps down to `insecure` when the ladder allows, else on_unmet.
     #
     # When `preferred` is not `plaintext` the data listener is HTTPS, so
-    # a `plaintext` rung below it can't be served over the network in
-    # PR1 (no second HTTP port) - `minimum` is effectively clamped up to
+    # a `plaintext` rung below it can't be served over the network (no
+    # second HTTP port) - `minimum` is effectively clamped up to
     # `insecure` for the network path. `preferred=plaintext` keeps the
     # exact pre-#47 behaviour.
     restore_data_nic_tls_preferred: str  # plaintext | insecure | verify
     restore_data_nic_tls_minimum: str  # plaintext | insecure | verify
     restore_data_nic_tls_on_unmet: str  # fallback | fail
     restore_data_nic_tls_min_version: str  # 1.2 | 1.3
+    restore_data_nic_tls_install_ca: str  # never | if-missing | always
     # Data-plane cert/key/CA. Auto-generated self-signed (with IP SANs
     # for every RESTORE_DATA_NICS entry, plus any per-NIC `hostname`) if
     # cert+key are both absent; an admin-supplied pair at these paths is
     # used as-is and never overwritten. ca_file (blank -> the cert file
-    # itself) is the chain the listener presents and, from PR2, the cert
-    # installed into guest trust stores for `verify`.
+    # itself) is the chain the listener presents and the cert
+    # `install_ca` puts into guest trust stores for `verify`.
     restore_data_nic_tls_cert_file: str
     restore_data_nic_tls_key_file: str
     restore_data_nic_tls_ca_file: str
@@ -205,7 +211,7 @@ def _tls_preferred_and_minimum() -> tuple[str, str]:
     """PREFERRED and MINIMUM data-plane TLS modes (issue #47). MINIMUM
     must not be stricter than PREFERRED - caught here rather than as a
     confusing "no mode qualifies" at restore time."""
-    preferred = _choice("RESTORE_DATA_NIC_TLS_PREFERRED", "insecure", TLS_MODES)
+    preferred = _choice("RESTORE_DATA_NIC_TLS_PREFERRED", "verify", TLS_MODES)
     minimum = _choice("RESTORE_DATA_NIC_TLS_MINIMUM", "insecure", TLS_MODES)
     if TLS_MODES.index(minimum) > TLS_MODES.index(preferred):
         raise RuntimeError(
@@ -234,6 +240,9 @@ settings = Settings(
     restore_data_nic_tls_minimum=_tls_minimum,
     restore_data_nic_tls_on_unmet=_choice("RESTORE_DATA_NIC_TLS_ON_UNMET", "fallback", ("fallback", "fail")),
     restore_data_nic_tls_min_version=_choice("RESTORE_DATA_NIC_TLS_MIN_VERSION", "1.2", ("1.2", "1.3")),
+    restore_data_nic_tls_install_ca=_choice(
+        "RESTORE_DATA_NIC_TLS_INSTALL_CA", "never", ("never", "if-missing", "always")
+    ),
     restore_data_nic_tls_cert_file=_get("RESTORE_DATA_NIC_TLS_CERT_FILE", "certs/data-plane.crt"),
     restore_data_nic_tls_key_file=_get("RESTORE_DATA_NIC_TLS_KEY_FILE", "certs/data-plane.key"),
     restore_data_nic_tls_ca_file=_get("RESTORE_DATA_NIC_TLS_CA_FILE", ""),

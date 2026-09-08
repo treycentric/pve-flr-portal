@@ -1625,16 +1625,15 @@ bytes. Issue #47 adds HTTPS with a configurable security policy. Full
 per-tool capability matrix, config reference, and open questions live in
 #47.
 
-**Implementation status.** *PR1 (landed):* config knobs, the
-`ensure_data_plane_cert` self-signed cert with IP SANs
-(`backend/tls.py`), the HTTPS data listener in `run.py`, the ladder, and
-`insecure` mode's per-tool skip-verify in `build_fetch_command()`.
-`verify` mode is a valid value and works when the guest already trusts
-the data-plane cert; PR1's `PREFERRED` default is `insecure`.
-*PR2:* automatic guest CA install (`RESTORE_DATA_NIC_TLS_INSTALL_CA` =
-`never`/`if-missing`/`always`), and the `PREFERRED` default flips to
-`verify`. Still **unverified against a real guest** — the same caveat
-DNT itself carries.
+**Implementation status.** Built over two PRs, both merged:
+config knobs + the `ensure_data_plane_cert` self-signed cert with IP
+SANs (`backend/tls.py`) + the HTTPS data listener (`run.py`) + the
+ladder + `insecure` skip-verify; then automatic guest CA install
+(`backend/guest_ca.py`, `restore_runner._ensure_guest_trusts_ca`,
+`RESTORE_DATA_NIC_TLS_INSTALL_CA` = `never`/`if-missing`/`always`) with
+the `PREFERRED` default at `verify`. Still **unverified against a real
+guest** — the same caveat DNT itself carries; the operator will do a
+live pass before the release that includes this.
 
 **Three modes, a downgrade ladder, and a floor.** The download can run
 `verify` (HTTPS, full chain + IP/hostname validation in the guest),
@@ -1646,9 +1645,8 @@ config load). Per guest the app resolves the strongest achievable mode
 from the detected fetch tool's TLS capability, stepping
 `verify → insecure → plaintext` down to MINIMUM. When `PREFERRED` isn't
 `plaintext` the data listener is HTTPS, so a `plaintext` rung below it
-can't be served over the network in PR1 (no second HTTP port) — the
-floor is clamped up to `insecure` for the network path. If nothing
-qualifies,
+can't be served over the network (no second HTTP port) — the floor is
+clamped up to `insecure` for the network path. If nothing qualifies,
 `RESTORE_DATA_NIC_TLS_ON_UNMET` decides: `fallback` (Design B — the
 chunked write over QMP/virtio-serial, which never puts bytes on the
 data network at all) or `fail` (stop with a clear message so the
@@ -1680,28 +1678,35 @@ stable CA rather than a rotating leaf. If cert+key are absent, `tls.py`
 auto-generates a short-lived self-signed cert (same bootstrap pattern
 as §7.3's main cert), **with `IP:<addr>` Subject Alternative Names**
 for every configured data-NIC IP — an IP-literal URL needs IP SANs, not
-a CN (modern clients ignore CN for IPs). `RESTORE_DATA_NIC_HOSTNAME`
-(optional) uses a DNS name in the URL and SAN instead, sidestepping
-old-Windows IP-SAN quirks for admins with data-segment name resolution.
+a CN (modern clients ignore CN for IPs). A per-NIC `"hostname"` field in
+the `RESTORE_DATA_NICS` entry (optional) puts a DNS name in the URL and
+SAN instead, sidestepping old-Windows IP-SAN quirks for admins with
+data-segment name resolution.
 
 **Guest trust-store management.** `RESTORE_DATA_NIC_TLS_INSTALL_CA` =
-`never` (default — `verify` then needs a pre-provisioned CA) /
-`if-missing` (fingerprint-check the guest Root store, install only if
-absent) / `always`. Install = `agent/file-write` the CA PEM to a
-scratch path, then `guest-exec` `certutil -addstore -f Root` (Windows,
-run as SYSTEM) or `/usr/local/share/ca-certificates` +
-`update-ca-certificates` / `/etc/pki/ca-trust/source/anchors` +
-`update-ca-trust` (Linux, whichever exists). The trusted CA persists
-after the job — mitigated with short-lived certs and a clear job-log
-line; a `UNINSTALL_CA_AFTER` knob is possible later, not the first cut.
+`never` (default is `never`, but the shipped `PREFERRED` default is
+`verify`, so a homelab that wants zero pre-provisioning sets this to
+`if-missing`) / `if-missing` (skip when it's already there — a
+`certutil -store Root <thumbprint>` check on Windows, an anchor-file
+`test -f` on Linux) / `always`. Install = `agent/file-write` the CA PEM
+to a scratch path (Windows) or straight to the anchor path (Linux),
+then `guest-exec` `certutil -addstore -f Root` (Windows, run as SYSTEM)
+or `update-ca-certificates` / `update-ca-trust extract` (Linux,
+whichever the guest has). `guest_ca.is_ca_cert()` refuses to install a
+file whose first cert isn't a CA (`BasicConstraints cA=True`) — the
+auto-generated data-plane cert now carries that. The trusted CA persists
+after the job — mitigated with a bounded cert lifetime and a clear
+job-log line; a `UNINSTALL_CA_AFTER` knob is possible later.
 
-**Fallback semantics.** Mode resolution happens *before* the fetch
-wherever possible (tool capability and whether verification is even
-attempted are known up front), so a chosen mode that then fails
-mid-transfer still raises — unchanged from today. The one runtime-only
-case is a TLS-version/handshake mismatch (fails at connect, 0 bytes):
-detect the known "never started" exit codes per tool and treat it as
-"mode not achievable" → ladder step-down / `ON_UNMET`.
+**Fallback semantics.** A *CA-install* failure steps this job's mode
+down to `insecure` when the ladder still allows it, else `ON_UNMET`. A
+failure during the *fetch* itself (bad cert with `verify`, TLS-version
+mismatch, connection refused, mid-transfer error) fails the job with a
+clear message — it is **not** auto-downgraded, matching the pre-#47
+"once DNT is offered, a fetch failure is a real failure" rule.
+Classifying "handshake never completed, 0 bytes" from a tool's exit code
+so *that* specific case could downgrade instead is a possible later
+refinement (issue #47 open question).
 
 **Explicitly out of scope of #47** (separate follow-ups): route-scoping
 the data listener so it serves *only* the token route rather than the

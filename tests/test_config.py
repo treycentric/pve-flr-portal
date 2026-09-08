@@ -119,15 +119,17 @@ def test_data_nic_tls_defaults_and_parsing(monkeypatch):
         "RESTORE_DATA_NIC_TLS_MINIMUM",
         "RESTORE_DATA_NIC_TLS_ON_UNMET",
         "RESTORE_DATA_NIC_TLS_MIN_VERSION",
+        "RESTORE_DATA_NIC_TLS_INSTALL_CA",
     ):
         monkeypatch.delenv(var, raising=False)
     reloaded = importlib.reload(config)
     try:
         s = reloaded.settings
-        assert s.restore_data_nic_tls_preferred == "insecure"
+        assert s.restore_data_nic_tls_preferred == "verify"
         assert s.restore_data_nic_tls_minimum == "insecure"
         assert s.restore_data_nic_tls_on_unmet == "fallback"
         assert s.restore_data_nic_tls_min_version == "1.2"
+        assert s.restore_data_nic_tls_install_ca == "never"
         assert s.restore_data_nic_tls_cert_file == "certs/data-plane.crt"
     finally:
         monkeypatch.setenv("PVE_HOST", "pve.test.local")

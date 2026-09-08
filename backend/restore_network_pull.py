@@ -213,8 +213,9 @@ def build_fetch_command(
       expressible for `certutil`/`bitsadmin`/`bash` - raises (the caller
       resolves that via the ladder / ON_UNMET).
     - `verify` - `url` must be `https://`; the guest verifies the cert
-      normally (works only if it already trusts it - PR2 adds CA
-      install). `bash` still raises (no TLS at all).
+      normally (the caller installs the data-plane CA first when
+      `RESTORE_DATA_NIC_TLS_INSTALL_CA` allows). `bash` still raises (no
+      TLS at all).
 
     `stage_path` is required for `cscript` (see FetchPlan's docstring)
     and ignored for every other tool - the caller picks the actual path
