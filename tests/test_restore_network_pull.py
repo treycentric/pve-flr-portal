@@ -176,6 +176,9 @@ def test_is_tls_negotiation_failure():
     assert is_tls_negotiation_failure(
         "Invoke-WebRequest", 1, "Could not establish trust relationship for the SSL/TLS secure channel"
     )
+    assert is_tls_negotiation_failure(
+        "Invoke-WebRequest", 1, "The underlying connection was closed: An unexpected error occurred on a send."
+    )
     assert not is_tls_negotiation_failure("curl", 0, "")  # success
     assert not is_tls_negotiation_failure("curl", 7, "curl: (7) Failed to connect")  # plain connect failure
     assert not is_tls_negotiation_failure("curl", 23, "curl: (23) Failure writing output")  # mid-transfer
@@ -209,11 +212,13 @@ def test_build_fetch_command_invoke_webrequest_verify_and_insecure():
     verify = build_fetch_command("Invoke-WebRequest", HTTPS_URL, DEST_WIN, "windows", tls="verify")
     vscript = verify.exec_argv[-1]
     assert "Invoke-WebRequest" in vscript and HTTPS_URL in vscript and DEST_WIN in vscript
-    assert "Tls12" in vscript
+    assert "-bor 3072" in vscript  # add TLS 1.2 to the enabled protocols
     assert "ServerCertificateValidationCallback" not in vscript
 
     insec = build_fetch_command("Invoke-WebRequest", HTTPS_URL, DEST_WIN, "windows", tls="insecure")
-    assert "ServerCertificateValidationCallback = { $true }" in insec.exec_argv[-1]
+    iscript = insec.exec_argv[-1]
+    assert "ServerCertificateValidationCallback = {param(" in iscript  # declared params, not bare { $true }
+    assert "$true}" in iscript
 
 
 def test_build_fetch_command_certutil_bitsadmin_verify_ok_insecure_raises():

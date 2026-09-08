@@ -171,6 +171,13 @@ _TLS_ERR_HINTS = (
     "wrong version number",
     "no cipher",
     "sslv3 alert",
+    # .NET / Windows PowerShell schannel wording - Invoke-WebRequest and
+    # WinHttpRequest report a handshake/transport failure this way,
+    # without the word "certificate" or "SSL".
+    "underlying connection was closed",
+    "unexpected error occurred on a send",
+    "could not create ssl/tls secure channel",
+    "authentication failed",
 )
 
 
@@ -279,10 +286,20 @@ def build_fetch_command(
         # process-wide validation callback (5.1 has no -SkipCertificateCheck).
         pre = ""
         if tls != "plaintext":
-            pre += "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+            # Add TLS 1.2 (3072) + 1.1 (768) to whatever's already
+            # enabled rather than replacing the set - old .NET defaults
+            # to SSL3/TLS1.0.
+            pre += (
+                "[Net.ServicePointManager]::SecurityProtocol = "
+                "[Net.ServicePointManager]::SecurityProtocol -bor 3072 -bor 768; "
+            )
         if insecure:
-            pre += "[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; "
-        script = f"{pre}Invoke-WebRequest -Uri '{url}' -OutFile '{destination}'"
+            # The callback MUST declare its 4 params - a bare `{ $true }`
+            # scriptblock throws when schannel invokes it with arguments,
+            # which surfaces as "The underlying connection was closed: An
+            # unexpected error occurred on a send."
+            pre += "[Net.ServicePointManager]::ServerCertificateValidationCallback = {param($s,$c,$ch,$e) $true}; "
+        script = f"{pre}Invoke-WebRequest -UseBasicParsing -Uri '{url}' -OutFile '{destination}'"
         return FetchPlan(exec_argv=["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
     if tool == "certutil":
         return FetchPlan(exec_argv=["certutil", "-urlcache", "-split", "-f", url, destination])
