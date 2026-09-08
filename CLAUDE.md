@@ -10,8 +10,8 @@ Full rationale, architecture, and current-system reference (auth, TLS,
 data model, stack, risks/scaling, deployment) live in `docs/plan.md` —
 read it before writing code. It's the **living** doc; don't let it
 drift from reality. Three companion docs, kept separate on purpose:
-- **`TODO.md`** — open work (PH.5 push-to-guest, optional PH.6 cache,
-  known limitations/tech debt).
+- **`TODO.md`** — open work (optional PH.6 cache, push-to-guest
+  follow-ons, known limitations/tech debt).
 - **`CHANGELOG.md`** — what shipped, per release (Keep a Changelog +
   SemVer; see `docs/dev/versioning.md`).
 - **`docs/archive/plan-phases-0-4.md`** — frozen historical record of
@@ -21,12 +21,16 @@ drift from reality. Three companion docs, kept separate on purpose:
   don't edit it; append new lessons to `docs/plan.md` instead.
 
 ## Current status
-**v1.0.0.** Browsing/downloading files out of PBS backups via PVE's
+**v1.2.0.** Browsing/downloading files out of PBS backups via PVE's
 file-restore API, a scrubbable multi-guest timeline, per-user PVE
 ticket login (no shared service token, no direct PBS access), HTTPS by
-default, LXC/Docker deployment. See `CHANGELOG.md` for release-by-release
-detail and `TODO.md` for what's next (PH.5 push-to-guest is the only
-open phase; PH.6, a directory-listing cache, is optional/perf-only).
+default, LXC/Docker deployment, colour themes (#29), multiple PBS
+storages/namespaces (#43), and **push-to-guest restore** — shipped in
+v1.1.0: single-file, Direct Network Transfer, and multi-file/directory
+bundles via `qemu-guest-agent` (PH.5, issues #5/#22/#24). See
+`CHANGELOG.md` for release-by-release detail and `TODO.md` for what's
+left — PH.6 (a directory-listing cache) is optional/perf-only and the
+only remaining phase; everything else open is follow-on refinements.
 
 **No database.** The app is stateless — snapshot list and every
 directory listing are read live from the PVE API per request. See
@@ -52,9 +56,11 @@ scope (`docs/plan.md` §2).
   the same capture-from-real-traffic approach and append the findings to
   `docs/plan.md` §3 rather than guessing.
 - Scope split is intentional: browse + download is the core app.
-  "Restore directly into the live guest" (push-to-guest, PH.5 — see
-  `TODO.md`) is a separate, later, open-ended effort requiring
-  `qemu-guest-agent`. Do not fold the two together.
+  "Restore directly into the live guest" (push-to-guest, PH.5 — shipped
+  in v1.1.0, see `docs/plan.md` §7.5–§7.7) is a separate feature on its
+  own `qemu-guest-agent` path with its own privilege model. Keep the two
+  separate — don't fold restore logic into the browse/download path or
+  gate one on the other.
 - Auth is per-user PVE ticket login (`docs/plan.md` §7.1) — there is no
   shared service token, and the app never talks to PBS directly (all
   backup listing goes through PVE's own API). A logged-in user's PVE

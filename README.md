@@ -16,11 +16,14 @@ See [`docs/plan.md`](docs/plan.md) for the full architecture/reference
 doc, [`TODO.md`](TODO.md) for open work, and
 [`CHANGELOG.md`](CHANGELOG.md) for what's shipped in each release.
 
-**Status: v1.0.0.** Browse and download files out of PBS backups
+**Status: v1.2.0.** Browse and download files out of PBS backups
 (single file, or a `.zip`/`.tar.gz`/`.tar.zst` bundle), scrub across
-snapshots on a timeline, per-user PVE login. See `TODO.md` for what's
-still open — push-to-guest (restoring straight into a running VM) is
-the main one.
+snapshots on a timeline, per-user PVE login, colour themes, and
+**restore straight back into a running guest** via `qemu-guest-agent`
+(single file, whole directories, and a faster Direct Network Transfer
+path for large content). Reads from one or more PBS storages. See
+`CHANGELOG.md` for the per-release detail and `TODO.md` for what's left
+(mostly optional performance work and restore-path refinements).
 
 Auth is per-user PVE ticket login — there's no shared service token.
 See "Provisioning access" below for how to grant a user access.
@@ -44,11 +47,16 @@ See "Provisioning access" below for how to grant a user access.
 5. **Download** — select one file for a direct download, or select
    multiple files/folders (or a single folder) to get a "Download as"
    dropdown offering `.zip`, `.tar.gz`, or `.tar.zst`.
-6. **About** (user menu, top right) shows the running version and a
+6. **Restore** writes the selection straight back into the *running*
+   guest via `qemu-guest-agent`, instead of downloading it. The button
+   is only enabled for guests where the agent is reachable and your PVE
+   account holds the separate restore grant (see "Restore-to-guest"
+   below); the confirmation dialog picks the destination directory and,
+   where available, offers "restore metadata" / "verify". Large
+   transfers use a Direct Network Transfer path automatically when a
+   data NIC is configured.
+7. **About** (user menu, top right) shows the running version and a
    link back to this repo.
-
-"Restore" (writing a file straight back into the *running* guest,
-rather than downloading it) isn't built yet — see `TODO.md`.
 
 ## Running it
 
@@ -76,7 +84,8 @@ expected for a homelab self-signed setup. Drop a CA-issued cert/key at
 the same paths to replace it.
 
 See "Provisioning access" below for how to grant a user the
-`FileRestoreReader` role needed to browse/restore.
+`FileRestoreReader` role needed to browse and download (restore-to-guest
+needs a separate grant, also covered there).
 
 ## Provisioning access
 
@@ -126,15 +135,14 @@ a storage a user has no access to is simply skipped, not an error.
 4. **Add → User Permission** (again) — Path: `/vms` (or a specific
    `/vms/<vmid>`), same User/Role, Propagate: checked.
 
-### Restore-to-guest (PH.5, in progress)
+### Restore-to-guest
 
 Browsing and downloading only needs `FileRestoreReader` above.
 Restoring a file directly back into a *running* guest via
-`qemu-guest-agent` (still being built — see `docs/plan.md` §7.5 and
-[issue #5](https://github.com/treycentric/pve-flr-portal/issues/5)) is
-a **separate, deliberate** grant — a user who can browse a backup
-should not automatically be able to write into the live guest. It's
-never folded into `FileRestoreReader`.
+`qemu-guest-agent` (see `docs/plan.md` §7.5–§7.7) is a **separate,
+deliberate** grant — a user who can browse a backup should not
+automatically be able to write into the live guest. It's never folded
+into `FileRestoreReader`.
 
 **Requires PVE 9+.** These are granular `VM.GuestAgent.*` privileges;
 PVE 8 only has the coarse, all-or-nothing `VM.Monitor` and can't scope
@@ -200,8 +208,8 @@ rebuild. This is how the download-format (.zip/.tar.gz/.tar.zst) and
 login flows got exercised on both Python 3.14 (dev machine) and a
 clean Python 3.11 (the deploy target) during development.
 
-Testing Design C (network-pull restore, docs/plan.md §7.6 — still in
-development, not part of any release yet)? `RESTORE_DATA_NICS`' address
+Testing Direct Network Transfer (the network-pull restore path,
+docs/plan.md §7.6; internally "Design C")? `RESTORE_DATA_NICS`' address
 needs to be one the container can actually bind to, which Docker's
 default bridge networking won't give you (a container never has the
 host's real LAN IP under it). Use the `hostnet` profile instead, which

@@ -58,9 +58,10 @@ helper VM to mount the block image (the ~3s cold cost measured in §3
 was against a VM). Not separately timed against a CT here yet; worth a
 line in §3 once it is.
 
-On feature parity with ABB: **build browse-and-download first, matched
-closely to the ABB layout. Treat "restore directly into the original,
-running VM" as a distinct later phase (PH.5) with its own design.**
+On feature parity with ABB: **browse-and-download was built first,
+matched closely to the ABB layout; "restore directly into the original,
+running VM" was kept as a distinct later phase (PH.5) with its own
+design — shipped in v1.1.0, see §7.5.**
 ABB can write a restored file straight back onto the source machine by
 connecting to it through **VMware Guest Tools** (already installed for
 normal VM management) and authenticating **as a guest OS user** with
@@ -72,10 +73,9 @@ already ships the equivalent of VMware Guest Tools: **`qemu-guest-agent`
 (QGA)**, the same agent the backup path uses for fs-freeze. QGA can
 write files and run commands in the guest, as root/SYSTEM, with **no
 guest credentials required** — the authorization is a per-user PVE
-privilege (`VM.GuestAgent.*`), not a guest password. So PH.5 does *not*
-need a bespoke listener daemon; it needs a careful design on top of QGA.
-See `TODO.md` for the mechanism, limits, and scope. It still belongs in
-PH.5, not the MVP.
+privilege (`VM.GuestAgent.*`), not a guest password. So PH.5 did *not*
+need a bespoke listener daemon — it's a careful design on top of QGA.
+See §7.5–§7.7 for the mechanism, limits, and the live-testing log.
 
 ## 3. Phase 0 recon findings — CONFIRMED
 
@@ -217,7 +217,7 @@ flowchart LR
     Backend -->|dir listing, live per request| PVE[PVE API<br/>file-restore/list]
     Backend -.->|not built: dir-listing cache| Cache[(Cache DB<br/>SQLite)]
     PVE -->|boots to read guest FS| Helper[Ephemeral helper VM<br/>existing, unmodified]
-    Backend -.->|PH.5, not built: push file via QGA| QGA[qemu-guest-agent<br/>in guest, existing]
+    Backend -->|PH.5: push file via QGA| QGA[qemu-guest-agent<br/>in guest, existing]
 ```
 
 **Status (2026-08-30): the app has no persistent storage at all.** Both
@@ -324,7 +324,7 @@ service.
 |---|---|---|---|
 | Left tree — Disk 1 – Volume 1/3/4 | Pick which virtual disk/partition to browse | `file-restore/list` at root returns the disks; rendered as a left nav tree | Full — this is literally what the confirmed API returns |
 | File grid — Name / Size / Type / Modified time | Standard sortable file listing | Same four columns, sortable client-side once a directory's listing is cached | Full |
-| Restore / Download buttons | Restore writes back to source; Download saves locally | Download works today. Restore stays visibly disabled ("Restore to guest — planned") until PH.5 (see `TODO.md`) | Partial by design |
+| Restore / Download buttons | Restore writes back to source; Download saves locally | Both work. Download saves locally; Restore writes back into the running guest via `qemu-guest-agent` (PH.5, §7.5–§7.7), enabled per-guest by capability + privilege detection | Full |
 | Filter box | Narrows the current folder's listing | Client-side filter over the cached listing | Full |
 | Bottom timeline — dots, count badges, draggable date marker, zoom | Scrub across backup dates, jump to one | Hand-rolled: one dot per snapshot with a small pale-blue numbered pill, snapshots on the same tick collapse into one pill, 5 fixed zoom levels, click a lone marker to select / a multi-snapshot callout to open its list, re-renders the grid | The reason the project exists — most build effort here |
 | Calendar-jump / locate icons | Jump to a date, or re-center on "now" | Same two icons wired to the timeline component | Full, once the timeline exists |
@@ -495,8 +495,8 @@ comes back in the same shape PBS's admin API gives, since the UI's
   app's own session cookie (HttpOnly), never the raw PVE ticket.
 - Every PVE API call the backend makes on that user's behalf sends
   `Cookie: PVEAuthCookie=<ticket>` instead of
-  `Authorization: PVEAPIToken=...`; state-changing calls (none exist
-  yet, but push-to-guest in PH.5 will have some) additionally need the
+  `Authorization: PVEAPIToken=...`; state-changing calls (push-to-guest's
+  `agent/*` calls — PH.5, §7.5) additionally send the
   `CSRFPreventionToken` header.
 - PVE tickets expire (2 hours by default). Handle this by re-POSTing
   the existing ticket to `/access/ticket` to refresh it before
@@ -633,23 +633,24 @@ admin hasn't supplied their own.
   HTTPS via `run.py` rather than launching uvicorn directly from the
   CLI — see 7.3.
 
-### 7.5 PH.5 design — dual-path push-to-guest, capability-detected
+### 7.5 Push-to-guest — dual-path, capability-detected (PH.5)
 
-Active design as of PH.5 start (issue #5, branch
-`feat/ph5-push-to-guest`). Builds on the mechanism/limits captured in
-`docs/archive/plan-phases-0-4.md` §7.4 (still the reference for the raw
-QGA facts — live-filesystem hazard, etc.); this section is the living
-design on top of it and supersedes §7.4's Design A/B split with a
-revised one below (2026-08-31 research + user design review).
+**Shipped in v1.1.0** (issues #5/#22/#24). This section and §7.6–§7.7
+are the living design + the "Real-world finding" log from building and
+live-testing it; they describe what the code does today. Builds on the
+mechanism/limits captured in `docs/archive/plan-phases-0-4.md` §7.4
+(still the reference for the raw QGA facts — live-filesystem hazard,
+etc.); this section supersedes §7.4's Design A/B split with the revised
+one below (2026-08-31 research + user design review).
 
 **Naming note:** §7.4's original "Design B" (`file-write` bootstrap +
 `guest-exec` `curl`/`Invoke-WebRequest` pull over the guest's own NIC)
 was never built and is *not* the same thing as "Design B" below, despite
 sharing the label — the revised split below reused the name for a
 different mechanism (chunked writes + local concat, no guest-initiated
-network call). The original pull-based idea lives on as a separate,
-not-yet-built follow-on — see issue #22, which renames it "Design C" to
-stop the collision.
+network call). The original pull-based idea became a separate track —
+issue #22, renamed "Design C" to stop the collision, and shipped
+alongside the rest of PH.5 in v1.1.0 (§7.6).
 
 **Confirmed from official sources (2026-08-31), resolving the open
 question from the first draft of this section:**
@@ -1125,7 +1126,8 @@ entry points at. Two reasons this matters, both raised in review:
    file grid's Restore button/confirmation modal are wired to it (no
    metadata/verify checkboxes or running-jobs icon yet — that's steps
    5-6). A file needing more than one chunk fails the job with a clear
-   message rather than a silent fallback, since multi-chunk isn't built.
+   message rather than a silent fallback (multi-chunk came in a later
+   step — see below; it works today).
 5. ~~Running-jobs UI~~ — **done**: `GET /api/restore-jobs` (list) and
    `POST /api/restore-jobs/{id}/cancel` wired into `main.py`;
    `restoreJobsWidget()` (new top-bar Alpine component, between the
@@ -1223,7 +1225,7 @@ calls aren't mockable end-to-end without a live guest, so tests target
 the pure logic the same way `pve_client`/`auth` are unit-tested today.
 Commits cite #5.
 
-### 7.6 Design C — network-pull restore (issue #22, not yet built)
+### 7.6 Design C — network-pull restore ("Direct Network Transfer", issue #22, shipped v1.1.0)
 
 A third restore mechanism, on top of Design A/B above: instead of moving
 every byte over the QMP/virtio-serial control channel, have the guest
@@ -1390,12 +1392,11 @@ segmentation if unsure"), not assume it always applies.
 **Scope.** Opt-in, separate from Design A/B — same authorization posture
 as today's `VM.GuestAgent.Unrestricted` gate (§7.4's authorization
 model: never folded into `FileRestoreReader`, restore stays a
-deliberate, separate grant). Open-ended effort; worth pursuing once
-Design A/B prove too slow for real large-file restores in practice.
-Tracked as issue #22, filed as a follow-on to #5, not part of PH.5
-itself.
+deliberate, separate grant). Tracked as issue #22, a follow-on to #5;
+built and shipped together with the rest of PH.5 in v1.1.0.
 
-**Sequencing (started 2026-09-01):**
+**Sequencing (built 2026-09-01, all steps done — kept as the build
+record):**
 1. ~~Data-NIC config + per-job subnet selection~~ — **done**:
    `backend/restore_network_pull.py`'s `parse_data_nics()` (reads
    `RESTORE_DATA_NICS`, a JSON array of `{cidr, local_ip}`, empty by
@@ -1407,8 +1408,8 @@ itself.
 2. ~~Fetch-tool detection~~ — **done**: `detect_fetch_tool()` in the same
    module, walking the priority list from the fallback-chain section
    above via injected `exec_fn` (same pattern as `restore_runner.py`'s
-   own `_exec` wrapper) — not yet called from anywhere live, since
-   nothing wires Design C into a real restore yet (step 4 below).
+   own `_exec` wrapper), called from `_try_direct_network_transfer()`
+   (step 4).
 3. ~~Single-use download token + endpoint~~ — **done**:
    `backend/restore_download.py` (mint/consume, single-use,
    `RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS` TTL, in-memory — same
@@ -1416,7 +1417,8 @@ itself.
    and `GET /api/restore-downloads/{token}` in `main.py` — deliberately
    unauthenticated (the guest has no PVE session and must never get
    one), re-streams from PVE using the *job's own* session snapshot.
-   Not reachable yet: nothing mints a token outside of tests.
+   `_try_direct_network_transfer()` mints a token per eligible restore
+   (step 4).
 4. ~~Bootstrap command generation + wiring into `run_restore()`~~ —
    **done**: `restore_network_pull.build_fetch_command()` builds the
    actual guest-exec command per detected tool (`Invoke-WebRequest`/
@@ -1434,19 +1436,13 @@ itself.
    eligible and the fetch itself then failed, rather than masking that
    by quietly retrying via a different mechanism.
 
-   **Two things not yet done, both logged clearly rather than silently
-   wrong:**
-   - `cscript` is detected as a candidate but never actually used yet —
-     it needs a `.vbs` script staged via `agent/file-write` first (no
-     stdin piping through `agent/exec`), and that staging/cleanup isn't
-     threaded through `_try_design_c()` yet. A guest whose *only* usable
-     tool is `cscript` currently falls back to Design B.
-   - The actual per-interface HTTPS/HTTP bind changes in `run.py` (so a
-     data NIC really serves the download route) are **not started** —
-     `_try_design_c()` builds a real URL (`http://<nic-ip>:<port>/...`)
-     today, but nothing is listening there yet outside of a normal
-     `TestClient` in tests. Live end-to-end use needs this plus real
-     multi-NIC deployment to actually test against.
+   **One known gap, logged clearly rather than silently wrong:**
+   `cscript` is detected as a candidate but never actually used — it
+   needs a `.vbs` script staged via `agent/file-write` first (no stdin
+   piping through `agent/exec`), and that staging/cleanup isn't threaded
+   through `_try_direct_network_transfer()`. A guest whose *only* usable
+   tool is `cscript` falls back to Design B. (The per-interface bind
+   that was also outstanding here is done — step 5 below.)
 
    **Deliberate design decision made while wiring this in: the download
    URL is `http://`, never `https://`.** Teaching every one of six
@@ -1625,13 +1621,14 @@ user-facing provisioning documentation (README.md section or
 
 ### 7.7 Multi-file / directory restore-to-guest
 
-Restore-to-guest is single-file only today, end to end: `POST
-/api/restore`'s `filepath`/`name` fields are singular, `RestoreJob`'s
-`source_volume`/`source_filepath`/`source`/`destination` are all
-singular, and the frontend gates the Restore button on
-`sel.length !== 1`. A real restore need is often "this whole directory"
-or "these several files/folders together", not one file at a time -
-this section designs that, covering both individual multi-selected
+**Shipped in v1.1.0** (issue #24), extending §7.5/§7.6's single-file
+restore. Before it, restore-to-guest was single-file only end to end:
+`POST /api/restore`'s `filepath`/`name` were singular, `RestoreJob`'s
+`source_*`/`destination` were singular, and the frontend gated the
+Restore button on `sel.length !== 1`. A real restore need is often
+"this whole directory" or "these several files/folders together", not
+one file at a time - this section is the design + build/live-testing
+log for that, covering both individual multi-selected
 files and whole directories (mixed together in one selection, matching
 how multi-select download already works). "A directory" here means the
 **full recursive tree** under it, not one flat level - already how
@@ -1725,16 +1722,15 @@ become a list of selected items (the same `item` JSON shape as
 both download and restore); `destination` becomes a target *directory*
 the bundle extracts into, rather than one specific file path.
 
-**Not yet decided:** exact wire format for the embedded manifest inside
-each bundle format (trivial for tar - just another entry; zip needs the
-same, just via `zipfile.writestr()`); how `RestoreJobManager`/the UI
-represent progress across a multi-file bundle (one coarse "building the
-bundle / transferring / extracting / verifying" sequence, most likely,
-rather than per-file granularity - not yet designed). Filed as a
-follow-on to #5, scoped as an extension of PH.5 rather than a new phase
-since it completes restore-to-guest rather than standing apart from it.
+**Settled during implementation** (were open at design time): the
+embedded manifest is just another bundle entry (`zipfile.writestr()` /
+a `tarfile` member); progress is the coarse "building / transferring /
+extracting / verifying" sequence, not per-file. Filed as a follow-on to
+#5, scoped as an extension of PH.5 rather than a new phase since it
+completes restore-to-guest rather than standing apart from it.
 
-**Sequencing (started 2026-09-01):**
+**Sequencing (built 2026-09-01/02, all steps done — kept as the build
+record):**
 1. ~~Pure, guest-independent pieces~~ — **done**: `backend/restore_bundle.py`
    - `BundleItem` (the reused `download_bundle()`-style multi-select
      shape) and `ManifestBuilder` (accumulates one SHA256 per entry,
@@ -1820,9 +1816,8 @@ since it completes restore-to-guest rather than standing apart from it.
    manifest - one command, no app-side comparison. `POST /api/restore`
    accepts `item: list[str]` (the same JSON shape `download_bundle()`
    already uses) as an alternative to `filepath`/`name` - exactly one of
-   the two must be given. Frontend multi-select UI (extending past
-   `sel.length !== 1`) is the remaining piece of this step, tracked
-   separately below since it didn't fit in the same pass.
+   the two must be given. (Frontend multi-select UI landed as step 3b
+   below, in a separate pass.)
 
    **Real-world finding (2026-09-02):** a live restore of ~1.54GB across
    3 items projected tens of thousands of chunks at

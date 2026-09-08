@@ -1,7 +1,7 @@
-"""Design C (docs/plan.md §7.6, issue #22): the network-pull restore
-mechanism - not yet wired into a live restore (that's a later step; see
-the issue's sequencing). This module holds the two pieces of pure,
-fully-testable-without-a-live-guest logic the design depends on:
+"""Design C / "Direct Network Transfer" (docs/plan.md §7.6, issue #22,
+shipped v1.1.0): the network-pull restore mechanism. This module holds
+the pure, fully-testable-without-a-live-guest logic the design depends
+on (`restore_runner._try_direct_network_transfer()` drives it):
 
 - **Data-NIC selection.** With several mutually non-routable subnets, a
   bootstrap script's download URL only works if it points at the one

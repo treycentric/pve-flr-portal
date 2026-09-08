@@ -1,6 +1,6 @@
-"""Multi-file/directory restore-to-guest (docs/plan.md §7.7, issue #24)
-- not yet wired into a live restore. See docs/plan.md §7.7 for the full
-design and open questions.
+"""Multi-file/directory restore-to-guest (docs/plan.md §7.7, issue #24,
+shipped v1.1.0). See docs/plan.md §7.7 for the full design and the
+live-testing log.
 
 - **`BundleItem`** - one selected file or directory, the same shape as
   `main.py`'s existing `download_bundle()` `item` query param (JSON
