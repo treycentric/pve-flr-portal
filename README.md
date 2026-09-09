@@ -218,14 +218,29 @@ this needs Docker Desktop's "Enable host networking" setting on first):
 `docker compose --profile hostnet up --build pve-flr-portal-hostnet`.
 
 **Data-plane TLS (issue #47, docs/plan.md §7.6.1).** Once
-`RESTORE_DATA_NICS` is set, the download route is served over **HTTPS**
-by default — `RESTORE_DATA_NIC_TLS_PREFERRED` (`verify` / `insecure` /
-`plaintext`) and `..._MINIMUM` bound a per-guest ladder; a self-signed
-data-plane cert with the right IP SANs is generated at
-`certs/data-plane.{crt,key}` unless you supply your own. Set
-`RESTORE_DATA_NIC_TLS_PREFERRED=plaintext` for the pre-#47 HTTP
-behaviour. Guests whose only fetch tool can't do the resolved TLS mode
-(`certutil`/`bitsadmin`/`bash`) fall back to the chunked write path.
+`RESTORE_DATA_NICS` is set, the download route is served over **HTTPS**,
+and `RESTORE_DATA_NIC_TLS_PREFERRED` defaults to **`verify`** (the guest
+validates the cert). A self-signed data-plane cert with the right IP
+SANs is generated at `certs/data-plane.{crt,key}` unless you supply your
+own; for `verify` to work the guest must trust it, so either
+pre-install the CA or set `RESTORE_DATA_NIC_TLS_INSTALL_CA=if-missing`
+to have the portal install it (via the guest agent, needing the same
+`VM.GuestAgent.Unrestricted` grant restore already uses).
+`RESTORE_DATA_NIC_TLS_PREFERRED` also takes `insecure` (encrypt, don't
+validate) or `plaintext` (the pre-#47 HTTP behaviour); `..._MINIMUM`
+sets the floor. A guest whose only fetch tool can't do the resolved
+mode (`certutil`/`bitsadmin`/`bash` under `insecure`, `bash` under
+`verify`) falls back to the chunked write path.
+
+**If the portal container's IP changes** (or you point a data NIC at a
+different address): update `local_ip` in `RESTORE_DATA_NICS` to match and
+restart. The auto-generated `certs/data-plane.{crt,key}` regenerates
+itself with the new IP SAN on restart — no manual step. If you supplied
+your **own** data-plane cert, reissue it with the new IP/hostname in the
+SAN; the portal won't touch an admin-supplied cert, it only logs a
+"does not cover" warning and `verify` clients then reject it. (The main
+UI cert is unaffected — it's keyed to `PVE_HOST`/`localhost`, not the
+container IP.)
 
 ## Tests
 

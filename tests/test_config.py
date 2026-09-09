@@ -1,4 +1,5 @@
 import importlib
+import ssl
 from pathlib import Path
 
 import pytest
@@ -119,15 +120,17 @@ def test_data_nic_tls_defaults_and_parsing(monkeypatch):
         "RESTORE_DATA_NIC_TLS_MINIMUM",
         "RESTORE_DATA_NIC_TLS_ON_UNMET",
         "RESTORE_DATA_NIC_TLS_MIN_VERSION",
+        "RESTORE_DATA_NIC_TLS_INSTALL_CA",
     ):
         monkeypatch.delenv(var, raising=False)
     reloaded = importlib.reload(config)
     try:
         s = reloaded.settings
-        assert s.restore_data_nic_tls_preferred == "insecure"
+        assert s.restore_data_nic_tls_preferred == "verify"
         assert s.restore_data_nic_tls_minimum == "insecure"
         assert s.restore_data_nic_tls_on_unmet == "fallback"
         assert s.restore_data_nic_tls_min_version == "1.2"
+        assert s.restore_data_nic_tls_install_ca == "never"
         assert s.restore_data_nic_tls_cert_file == "certs/data-plane.crt"
     finally:
         monkeypatch.setenv("PVE_HOST", "pve.test.local")
@@ -164,6 +167,29 @@ def test_get_required_missing_raises(monkeypatch):
         config._get("NEEDED", required=True)
 
 
+def test_pve_verify_ssl_modes(monkeypatch, tmp_path):
+    monkeypatch.setenv("PVE_VERIFY_SSL", "false")
+    assert config._pve_verify() is False
+    monkeypatch.setenv("PVE_VERIFY_SSL", "true")
+    assert isinstance(config._pve_verify(), ssl.SSLContext)
+    monkeypatch.delenv("PVE_VERIFY_SSL", raising=False)
+    assert isinstance(config._pve_verify(), ssl.SSLContext)  # default
+
+    # A real CA file -> an SSLContext loaded from it.
+    from backend.tls import _write_self_signed
+
+    ca = tmp_path / "ca.crt"
+    _write_self_signed(ca, tmp_path / "ca.key", "test-ca", is_ca=True)
+    monkeypatch.setenv("PVE_VERIFY_SSL", str(ca))
+    assert isinstance(config._pve_verify(), ssl.SSLContext)
+
+    # A path that doesn't exist -> a clear startup error, not a 500 later.
+    monkeypatch.setenv("PVE_VERIFY_SSL", "/no/such/ca.pem")
+    with pytest.raises(RuntimeError, match="PVE_VERIFY_SSL"):
+        config._pve_verify()
+    monkeypatch.setenv("PVE_VERIFY_SSL", "false")
+
+
 def test_settings_reads_environment(monkeypatch):
     monkeypatch.setenv("PVE_HOST", "example.org")
     monkeypatch.setenv("PVE_STORAGE", "store1")
@@ -175,7 +201,7 @@ def test_settings_reads_environment(monkeypatch):
     try:
         assert reloaded.settings.pve_host == "example.org"
         assert reloaded.settings.pve_storage == "store1"
-        assert reloaded.settings.pve_verify_ssl is True
+        assert isinstance(reloaded.settings.pve_verify_ssl, ssl.SSLContext)  # "true" -> system trust store
         assert reloaded.settings.session_idle_timeout_minutes == 15
         assert reloaded.settings.port == 9000
         assert reloaded.settings.guest_agent_min_command_gap_seconds == 0.25

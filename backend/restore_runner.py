@@ -31,7 +31,7 @@ from pathlib import Path
 
 import httpx
 
-from . import guest_agent, pve_client, restore_bundle, restore_download, restore_network_pull
+from . import guest_agent, guest_ca, pve_client, restore_bundle, restore_download, restore_network_pull
 from .auth import ensure_fresh_ticket
 from .config import TLS_MODES, settings
 from .restore_chunking import (
@@ -43,6 +43,13 @@ from .restore_chunking import (
     scratch_path_sep,
 )
 from .restore_jobs import RestoreJob, RestoreJobManager, RestoreStatus
+
+
+def _one_rung_down(mode: str) -> str:
+    """The next weaker data-plane TLS mode (verify -> insecure ->
+    plaintext), or `mode` itself if already the weakest."""
+    i = TLS_MODES.index(mode)
+    return TLS_MODES[i - 1] if i > 0 else mode
 
 
 def _pve_error_message(exc: httpx.HTTPStatusError) -> str:
@@ -103,6 +110,18 @@ async def _iter_download_pieces(first_piece: bytes, second_piece: bytes | None, 
             yield piece
 
 
+def _parse_content_length(raw: str | None) -> int | None:
+    """The download's Content-Length as a positive int, or None when it's
+    absent/unparseable (a directory download streams chunked with no
+    length; a single file normally has one). Lets the chunked write path
+    report real progress instead of the growing placeholder."""
+    try:
+        n = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
 async def _drain_and_hash(pieces, hasher) -> int:
     """Consumes the rest of a download without writing it anywhere -
     used when Direct Network Transfer is handling the actual guest-side
@@ -152,12 +171,14 @@ async def _write_chunks_to_scratch(
     (61440-byte chunks against a 1.5GB+ bundle) rounded up to a
     displayed 100% after only ~200 chunks - a few percent of the real
     work - misreading as stuck rather than still genuinely writing."""
-    if total_bytes_hint is not None:
-        job.progress_total = max(job.progress_total, chunk_count(total_bytes_hint, DEFAULT_CHUNK_SIZE_BYTES) + 1)
+    expected_chunks = chunk_count(total_bytes_hint, DEFAULT_CHUNK_SIZE_BYTES) if total_bytes_hint else 0
+    if expected_chunks:
+        job.progress_total = max(job.progress_total, expected_chunks + 1)
     sep = scratch_path_sep(guest_os_family)
     paths: list[str] = []
     total = 0
     index = 0
+    last_logged_pct = 0  # heartbeat: one log line per whole percent, like PVE's disk move
     async for piece in pieces:
         if job.cancel_requested:
             break
@@ -178,6 +199,18 @@ async def _write_chunks_to_scratch(
             # avoids it reading a premature 100% mid-write.
             job.progress_total = max(job.progress_total, job.progress_current + 1)
         index += 1
+        # A big chunked write logs nothing between "creating scratch dir"
+        # and "downloaded N bytes" otherwise - a heartbeat keeps it from
+        # looking hung (issue #47 live testing).
+        if expected_chunks:
+            pct = index * 100 // expected_chunks
+            if pct > last_logged_pct:
+                last_logged_pct = pct
+                job.log(
+                    f"Sent {index:,} / {expected_chunks:,} chunks to the guest ({pct}%, {total:,} bytes)."
+                )
+        elif index % 500 == 0:  # unknown total - fall back to a fixed cadence
+            job.log(f"Sent {index:,} chunks ({total:,} bytes) to the guest so far.")
     return paths, total
 
 
@@ -257,6 +290,64 @@ async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | Non
         )
 
 
+async def _ensure_guest_trusts_ca(job: RestoreJob, guest_os_family: str | None) -> bool:
+    """Install the Direct Network Transfer data-plane CA into the guest's
+    trust store so `verify` mode works (issue #47 §7.6.1). Returns
+    True if the guest trusts it afterwards (already did, or the install
+    succeeded), False otherwise - the caller steps the TLS mode down on
+    False. Never raises. `RESTORE_DATA_NIC_TLS_INSTALL_CA` is `if-missing`
+    or `always` here (`never` is filtered by the caller); `if-missing`
+    checks first and skips the write when it's already there."""
+    only_if_missing = settings.restore_data_nic_tls_install_ca == "if-missing"
+    try:
+        pem = guest_ca.load_ca_pem()
+    except OSError as exc:
+        job.log(f"Can't read the data-plane CA file to install it in the guest: {exc}")
+        return False
+    if not guest_ca.is_ca_cert(pem):
+        job.log(
+            "The configured data-plane CA file isn't a CA certificate "
+            "(no BasicConstraints cA=True) - not installing it in the guest."
+        )
+        return False
+
+    if guest_os_family == "windows":
+        thumb = guest_ca.fingerprint_sha1_hex(pem)
+        if only_if_missing and (await _exec(job, guest_ca.windows_check_argv(thumb)))[0] == 0:
+            job.log("Guest already trusts the data-plane CA.")
+            return True
+        scratch = guest_ca.windows_scratch_path(thumb[:12])
+        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, scratch, pem)
+        code, out, err = await _exec(job, guest_ca.windows_install_argv(scratch))
+        await _exec(job, guest_ca.windows_cleanup_argv(scratch))  # best effort
+        if code != 0:
+            job.log(f"Could not add the data-plane CA to the guest's Root store: {(err or out).strip()}")
+            return False
+        job.log("Added the data-plane CA to the guest's Root store.")
+        return True
+
+    if guest_os_family in ("linux", "bsd", "macos"):
+        has_deb = (await _exec(job, ["sh", "-c", "command -v update-ca-certificates"]))[0] == 0
+        has_rht = (await _exec(job, ["sh", "-c", "command -v update-ca-trust"]))[0] == 0
+        if not (has_deb or has_rht):
+            job.log("Guest has neither update-ca-certificates nor update-ca-trust - can't install the data-plane CA.")
+            return False
+        anchor = guest_ca.linux_anchor_path(has_update_ca_certificates=has_deb)
+        if only_if_missing and (await _exec(job, ["test", "-f", anchor]))[0] == 0:
+            job.log("Guest already has the data-plane CA anchor file.")
+            return True
+        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, anchor, pem)
+        code, out, err = await _exec(job, guest_ca.linux_update_argv(has_update_ca_certificates=has_deb))
+        if code != 0:
+            job.log(f"Could not refresh the guest CA trust store: {(err or out).strip()}")
+            return False
+        job.log(f"Installed the data-plane CA at {anchor} and refreshed the guest trust store.")
+        return True
+
+    job.log(f"Don't know how to install a CA on guest OS family {guest_os_family!r}.")
+    return False
+
+
 async def _try_direct_network_transfer(
     job: RestoreJob,
     guest_os_family: str | None,
@@ -298,13 +389,15 @@ async def _try_direct_network_transfer(
     NIC segmentation + firewalling the perimeter). Otherwise this
     resolves the strongest TLS mode in
     [`RESTORE_DATA_NIC_TLS_MINIMUM`, `..._PREFERRED`] the detected fetch
-    tool supports - `verify` (guest validates the data-plane cert; PR1
-    needs it pre-trusted, PR2 adds CA install) or `insecure` (encryption
-    only) - builds an `https://` URL, and threads the mode into
-    `build_fetch_command()`. If no mode qualifies (a certutil/bitsadmin
-    /bash-only guest under an HTTPS floor), `RESTORE_DATA_NIC_TLS_ON_UNMET`
-    picks `fallback` (return False -> chunked write over QMP, off the
-    data network entirely) or `fail`.
+    tool supports - `verify` (guest validates the data-plane cert;
+    `_ensure_guest_trusts_ca` installs it first per
+    `RESTORE_DATA_NIC_TLS_INSTALL_CA`, and a failed install steps this
+    job down to `insecure` when the ladder allows) or `insecure`
+    (encryption only) - builds an `https://` URL, and threads the mode
+    into `build_fetch_command()`. If no mode qualifies (a certutil/
+    bitsadmin/bash-only guest under an HTTPS floor),
+    `RESTORE_DATA_NIC_TLS_ON_UNMET` picks `fallback` (return False ->
+    chunked write over QMP, off the data network entirely) or `fail`.
 
     **Not yet wired: `cscript` staging.** Detected as a candidate by
     `detect_fetch_tool()`, but building its command needs a scratch file
@@ -317,7 +410,15 @@ async def _try_direct_network_transfer(
     """
     data_nics = restore_network_pull.parse_data_nics(settings.restore_data_nics_json)
     if not data_nics:
-        return False  # Design C unconfigured - the common case, cheapest check first
+        # Only reached on a multi-chunk restore (the caller gates on
+        # that), where the slow chunked path is about to be a lot of
+        # sequential agent/file-write calls - worth saying why out loud
+        # rather than silently grinding.
+        job.log(
+            "Direct Network Transfer is not configured (RESTORE_DATA_NICS is empty) - using the chunked "
+            "write path over the guest agent, which is slow for a large file."
+        )
+        return False
 
     guest_ips = await guest_agent.get_guest_ip_addresses(job.session, job.guest_type, job.vmid)
     nic = restore_network_pull.select_data_nic(guest_ips, data_nics)
@@ -338,7 +439,7 @@ async def _try_direct_network_transfer(
 
     # Resolve the data-plane TLS mode for this guest (issue #47): the
     # strongest mode in [minimum, preferred] the detected fetch tool can
-    # actually do. PR1's data listener is HTTPS-only whenever preferred
+    # actually do. The data listener is HTTPS-only whenever preferred
     # isn't `plaintext`, so a `plaintext` rung below it can't be served
     # over the network - clamp the floor up to `insecure` in that case.
     pref = settings.restore_data_nic_tls_preferred
@@ -356,33 +457,84 @@ async def _try_direct_network_transfer(
         job.log(f"Direct Network Transfer not available: {msg}.")
         return False
 
-    scheme = "http" if mode == "plaintext" else "https"
+    # `verify`: the guest has to trust the data-plane cert. Install it if
+    # asked to (issue #47 §7.6.1); on failure, step down to the strongest
+    # non-verify mode the ladder still allows.
+    if mode == "verify" and settings.restore_data_nic_tls_install_ca != "never":
+        if not await _ensure_guest_trusts_ca(job, guest_os_family):
+            stepped = restore_network_pull.resolve_tls_mode(tool, "insecure", minimum)
+            if stepped is None:
+                msg = "the data-plane CA could not be installed in the guest and no weaker TLS mode is permitted"
+                if settings.restore_data_nic_tls_on_unmet == "fail":
+                    raise RuntimeError(f"Direct Network Transfer required but unavailable for this guest: {msg}")
+                job.log(f"Direct Network Transfer not available: {msg}.")
+                return False
+            job.log(f"Continuing this transfer with TLS: {stepped}.")
+            mode = stepped
+
     host = nic.url_host
-    token = restore_download.mint_token(job.id, local_path=None if local_path is None else str(local_path))
-    url = f"{scheme}://{host}:{port}/api/restore-downloads/{token}"
+    local_path_str = None if local_path is None else str(local_path)
+
+    async def _run_fetch(m: str) -> tuple[int, str, str]:
+        scheme = "http" if m == "plaintext" else "https"
+        tok = restore_download.mint_token(job.id, local_path=local_path_str)
+        url = f"{scheme}://{host}:{port}/api/restore-downloads/{tok}"
+        plan = restore_network_pull.build_fetch_command(tool, url, fetch_dest, guest_os_family, tls=m)
+        job.log(
+            f"Direct Network Transfer: fetching via {tool} over {host} (TLS: {m}) - "
+            "matches the guest's own subnet."
+        )
+        # The fetch scales with file size / network throughput, not the
+        # ~15s "fast command" default (confirmed live 2026-09-01: it
+        # timed out mid-fetch on a real file).
+        return await _exec(job, plan.exec_argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds)
 
     try:
-        plan = restore_network_pull.build_fetch_command(tool, url, fetch_dest, guest_os_family, tls=mode)
-    except ValueError as exc:
+        exitcode, out, err = await _run_fetch(mode)
+    except ValueError as exc:  # build_fetch_command rejected this tool+mode
         job.log(f"Direct Network Transfer not available: {tool} can't be used for this download ({exc}).")
         return False
 
-    job.log(
-        f"Direct Network Transfer: fetching via {tool} over {host} (TLS: {mode}) - "
-        "matches the guest's own subnet."
-    )
-    # The fetch itself scales with file size (and network throughput),
-    # not the ~15s "fast command" default that every other guest-exec
-    # call in this module uses - confirmed live 2026-09-01: the default
-    # timed out mid-fetch on a real file. See
-    # settings.restore_long_running_exec_timeout_seconds's docstring.
-    exitcode, out, err = await _exec(
-        job, plan.exec_argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds
-    )
+    # A TLS handshake/trust failure (0 bytes moved) is safe to retry a
+    # rung down the ladder - the admin set MINIMUM/ON_UNMET for exactly
+    # this. A failure *after* bytes started flowing is a real failure and
+    # still raises.
+    while exitcode != 0 and restore_network_pull.is_tls_negotiation_failure(tool, exitcode, err, out):
+        stepped = restore_network_pull.resolve_tls_mode(tool, _one_rung_down(mode), minimum)
+        if stepped is None or stepped == mode:
+            break
+        job.log(
+            f"Direct Network Transfer: the guest wouldn't complete a '{mode}' TLS connection - "
+            f"retrying as '{stepped}'."
+        )
+        mode = stepped
+        try:
+            exitcode, out, err = await _run_fetch(mode)
+        except ValueError:
+            break
+
     if exitcode != 0:
+        detail = (err.strip() or out.strip()).splitlines()[0] if (err.strip() or out.strip()) else ""
+        if (
+            restore_network_pull.is_tls_negotiation_failure(tool, exitcode, err, out)
+            and settings.restore_data_nic_tls_on_unmet == "fallback"
+        ):
+            job.log(
+                f"Direct Network Transfer: couldn't establish TLS within the configured policy ({detail}) - "
+                "falling back to the chunked write path."
+            )
+            return False
         raise RuntimeError(f"Direct Network Transfer failed via {tool}: {err.strip() or out.strip()}")
     await _verify_destination_exists(job, guest_os_family, path=fetch_dest)
-    job.log("Direct Network Transfer: fetch complete.")
+    if mode == "verify":
+        # `curl -fsSL` / `wget -q` / `Invoke-WebRequest` do full chain +
+        # hostname validation by default and fail the fetch on any cert
+        # problem, so a clean exit here means the guest trusted the
+        # data-plane cert. (`insecure` skipped that check; `plaintext`
+        # had no TLS.)
+        job.log(f"Direct Network Transfer: fetch complete - the guest validated the TLS certificate ({tool}).")
+    else:
+        job.log(f"Direct Network Transfer: fetch complete (TLS: {mode}).")
     return True
 
 
@@ -755,6 +907,11 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
             job.session, job.source_volume, job.source_filepath, tar=False
         )
         try:
+            # PVE's file-restore download stream has no Content-Length in
+            # practice, so the size the frontend sent from
+            # file-restore/list (job.source_size) is what actually drives
+            # a real progress %; the header is a fallback.
+            size_hint = job.source_size or _parse_content_length(response.headers.get("content-length"))
             # Read just enough (at most two pieces) to know whether this
             # is the small, single-call case, without buffering the rest
             # of a possibly-large file just to find out. See
@@ -854,11 +1011,16 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     jobs.mark_cancelled(job.id)
                     return
 
-                # A growing/placeholder total - the real chunk count
-                # isn't known until the source is exhausted (streamed,
-                # not pre-downloaded - see above). Refined as chunks are
-                # actually written, finalized once the count is known.
-                job.progress_total = 2 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                # If the download reported a Content-Length we know the
+                # real chunk count up front; otherwise fall back to a
+                # growing placeholder (streamed, not pre-downloaded - see
+                # above) that RestoreJob.progress_percent clamps to <100
+                # until the count is actually known.
+                extra_units = (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                if size_hint is not None:
+                    job.progress_total = chunk_count(size_hint, DEFAULT_CHUNK_SIZE_BYTES) + 1 + extra_units
+                else:
+                    job.progress_total = 2 + extra_units
 
                 pieces = _iter_download_pieces(first_piece, second_piece, byte_iter)
                 if await _try_direct_network_transfer(job, guest_os_family):
@@ -877,7 +1039,7 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     job.log(f"Creating scratch directory {scratch_dir!r} in the guest.")
                     await _create_scratch_dir(job, guest_os_family, scratch_dir)
                     chunk_paths, total_bytes = await _write_chunks_to_scratch(
-                        job, guest_os_family, scratch_dir, pieces, hasher
+                        job, guest_os_family, scratch_dir, pieces, hasher, total_bytes_hint=size_hint
                     )
                     job.log(f"Downloaded {total_bytes} byte(s) from the backup.")
                     if job.cancel_requested:

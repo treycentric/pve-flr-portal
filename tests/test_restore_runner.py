@@ -4,7 +4,7 @@ from dataclasses import replace as _replace
 import httpx
 import pytest
 
-from backend import guest_agent, pve_client, restore_bundle, restore_download, restore_runner
+from backend import guest_agent, guest_ca, pve_client, restore_bundle, restore_download, restore_runner
 from backend.restore_bundle import BundleFormat, BundleItem, ManifestBuilder
 from backend.restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 from backend.restore_jobs import RestoreJobManager, RestoreStatus
@@ -36,8 +36,9 @@ def _make_job(manager, session_data, **overrides):
 
 
 class FakeDownloadResponse:
-    def __init__(self, content: bytes):
+    def __init__(self, content: bytes, headers: dict | None = None):
         self._content = content
+        self.headers = headers or {}
         self.aclose_called = False
 
     async def aread(self) -> bytes:
@@ -86,9 +87,11 @@ def _available_caps(**overrides):
     return guest_agent.RestoreCapabilities(**defaults)
 
 
-def _patch_download(monkeypatch, content: bytes):
+def _patch_download(monkeypatch, content: bytes, *, content_length: bool = False):
+    headers = {"content-length": str(len(content))} if content_length else {}
+
     async def fake_open_download(session, volume, filepath, tar=False):
-        return FakeDownloadClient(), FakeDownloadResponse(content)
+        return FakeDownloadClient(), FakeDownloadResponse(content, headers)
 
     monkeypatch.setattr(pve_client, "open_download", fake_open_download)
 
@@ -279,6 +282,89 @@ async def test_progress_updates_incrementally_during_multi_chunk_write(manager, 
     # incrementally rather than jumping straight to the final value.
     assert seen_progress == [0, 1, 2]
     assert job.progress_current == 4
+
+
+async def test_multi_chunk_progress_total_is_exact_with_content_length(manager, session_data, monkeypatch):
+    """With a Content-Length on the download, the chunked single-file
+    path knows the real chunk count up front instead of the growing
+    placeholder - so the bar tracks true progress (issue #47 testing)."""
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 * 4 + 10), content_length=True)  # 5 chunks
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    totals_during_write = []
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        totals_during_write.append(job.progress_total)
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    # 5 chunks + 1 concat, known before the first write - never the "+1
+    # ahead of current" placeholder (which would have been 2, 3, 4, ...).
+    assert totals_during_write == [6, 6, 6, 6, 6]
+    assert (job.progress_current, job.progress_total) == (6, 6)
+
+
+async def test_multi_chunk_progress_uses_job_source_size_when_no_content_length(manager, session_data, monkeypatch):
+    """PVE's download has no Content-Length in practice, so the size the
+    frontend sent (job.source_size, from file-restore/list) is what
+    drives a real % - not the ~99% placeholder."""
+    job = _make_job(manager, session_data, destination="/etc/hosts", source_size=61440 * 4 + 10)  # 5 chunks
+    _patch_download(monkeypatch, b"a" * (61440 * 4 + 10))  # no content-length header
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    totals = []
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        totals.append(job.progress_total)
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+
+    assert totals == [6, 6, 6, 6, 6]
+    assert (job.progress_current, job.progress_total) == (6, 6)
+
+
+async def test_multi_chunk_write_logs_a_percent_heartbeat(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 * 20), content_length=True)  # 20 chunks, one = 5%
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    hb = [ln for ln in job.log_lines if "chunks to the guest (" in ln]
+    assert any("(5%," in ln for ln in hb)
+    assert any("(100%," in ln for ln in hb)
+    assert not any("(0%," in ln for ln in hb)  # no premature 0% line
+    assert len(hb) == 20  # one per 5% step, no repeats
 
 
 async def test_progress_total_includes_metadata_and_verify_units(manager, session_data, monkeypatch):
@@ -551,6 +637,8 @@ async def test_design_c_unconfigured_falls_back_to_design_b_without_any_extra_ca
     assert job.status == RestoreStatus.DONE
     # Went through the ordinary Design B path (mkdir, sh -c cat ..., test -f).
     assert any(c[:2] == ["sh", "-c"] for c in exec_calls)
+    # ...and said why, rather than silently grinding (issue #47 live testing).
+    assert any("Direct Network Transfer is not configured" in line for line in job.log_lines)
 
 
 async def test_design_c_no_subnet_match_falls_back_to_design_b(manager, session_data, monkeypatch):
@@ -797,13 +885,85 @@ async def _run_dnt_with_curl(manager, session_data, monkeypatch, curl_argv_sink)
     return job
 
 
-async def test_design_c_default_mode_serves_https_and_skips_verify(manager, session_data, monkeypatch):
-    _dnt_settings(monkeypatch)  # defaults: preferred=insecure, minimum=insecure
+async def test_design_c_default_mode_is_verify_over_https(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch)  # defaults: preferred=verify, minimum=insecure, install_ca=never
+    argv: list[str] = []
+    job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
+    assert job.status == RestoreStatus.DONE
+    assert "-k" not in argv  # verify, not skip-verify
+    assert argv[-1].startswith("https://10.0.5.5:8008/api/restore-downloads/")
+    assert any("TLS: verify" in line for line in job.log_lines)
+    assert any("guest validated the TLS certificate" in line for line in job.log_lines)
+
+
+async def _run_dnt_curl_seq(manager, session_data, monkeypatch, curl_results):
+    """DNT via curl where each curl call returns the next (exit, out, err)
+    from curl_results (the last entry repeats). Returns (job, curl argvs)."""
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 + 100))
+    calls: list[list[str]] = []
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        pass
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""
+        if argv[0] == "curl":
+            calls.append(argv)
+            return curl_results[min(len(calls) - 1, len(curl_results) - 1)]
+        return 0, "", ""  # mkdir, test -f, Design B concat, etc.
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+    return job, calls
+
+
+_CERT_ERR = (60, "", "curl: (60) SSL certificate problem: self-signed certificate")
+
+
+async def test_design_c_verify_untrusted_cert_steps_down_to_insecure(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch)  # verify / insecure / fallback
+    job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR, (0, "", "")])
+    assert job.status == RestoreStatus.DONE
+    assert len(calls) == 2
+    assert "-k" not in calls[0] and "-k" in calls[1]  # verify, then skip-verify
+    assert any("retrying as 'insecure'" in line for line in job.log_lines)
+
+
+async def test_design_c_verify_untrusted_and_insecure_also_fails_falls_back_to_design_b(
+    manager, session_data, monkeypatch
+):
+    _dnt_settings(monkeypatch)  # on_unmet=fallback
+    job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR, _CERT_ERR])
+    assert job.status == RestoreStatus.DONE  # completed via Design B
+    assert len(calls) == 2
+    assert any("falling back to the chunked write path" in line for line in job.log_lines)
+
+
+async def test_design_c_verify_untrusted_no_step_down_and_on_unmet_fail(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_minimum="verify", restore_data_nic_tls_on_unmet="fail")
+    job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR])
+    assert job.status == RestoreStatus.FAILED
+    assert len(calls) == 1  # no step-down possible below the `verify` floor
+    assert "Direct Network Transfer failed" in job.error
+
+
+async def test_design_c_preferred_insecure_adds_skip_verify(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_preferred="insecure", restore_data_nic_tls_minimum="insecure")
     argv: list[str] = []
     job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
     assert job.status == RestoreStatus.DONE
     assert "-k" in argv
-    assert argv[-1].startswith("https://10.0.5.5:8008/api/restore-downloads/")
     assert any("TLS: insecure" in line for line in job.log_lines)
 
 
@@ -857,6 +1017,82 @@ async def test_design_c_on_unmet_fail_fails_the_job_when_no_tls_mode_qualifies(m
     _dnt_settings(monkeypatch, restore_data_nic_tls_on_unmet="fail")
     exec_calls: list[list[str]] = []
     job = await _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls)
+    assert job.status == RestoreStatus.FAILED
+    assert "Direct Network Transfer required but unavailable" in job.error
+
+
+async def _run_dnt_verify_ca(manager, session_data, monkeypatch, *, update_exit=0):
+    """DNT on a Debian-style Linux guest with curl available; the CA
+    install's `update-ca-certificates` returns `update_exit`. Returns
+    (job, curl_argv, written)."""
+    monkeypatch.setattr(guest_ca, "load_ca_pem", lambda: "PEM-DATA")
+    monkeypatch.setattr(guest_ca, "is_ca_cert", lambda _pem: True)
+
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"a" * (61440 + 100))
+    curl_argv: list[str] = []
+    written: list[tuple[str, str]] = []
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_ips(session, guest_type, vmid):
+        return ["10.0.5.42"]
+
+    async def fake_write(session, guest_type, vmid, path, content):
+        written.append((path, content))
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
+            return 0, "/usr/bin/curl", ""
+        if argv[:2] == ["sh", "-c"] and "command -v update-ca-certificates" in argv[2]:
+            return 0, "/usr/sbin/update-ca-certificates", ""
+        if argv[:2] == ["sh", "-c"] and "command -v update-ca-trust" in argv[2]:
+            return 1, "", ""
+        if argv == ["update-ca-certificates"]:
+            return update_exit, "", "" if update_exit == 0 else "update failed"
+        if argv[0] == "curl":
+            curl_argv[:] = argv
+            return 0, "", ""
+        if argv[:2] == ["test", "-f"]:
+            return 0, "", ""
+        raise AssertionError(f"unexpected exec call: {argv}")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+    return job, curl_argv, written
+
+
+async def test_design_c_verify_installs_the_ca_then_fetches_with_verification(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")
+    job, curl_argv, written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=0)
+    assert job.status == RestoreStatus.DONE
+    assert written == [("/usr/local/share/ca-certificates/pve-flr-portal-data-plane.crt", "PEM-DATA")]
+    assert "-k" not in curl_argv  # still verifying
+    assert any("Installed the data-plane CA" in line for line in job.log_lines)
+
+
+async def test_design_c_verify_ca_install_failure_steps_down_to_insecure(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")  # minimum stays `insecure`
+    job, curl_argv, _written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=1)
+    assert job.status == RestoreStatus.DONE
+    assert "-k" in curl_argv
+    assert any("Continuing this transfer with TLS: insecure" in line for line in job.log_lines)
+
+
+async def test_design_c_verify_ca_install_failure_fails_when_minimum_is_verify(manager, session_data, monkeypatch):
+    _dnt_settings(
+        monkeypatch,
+        restore_data_nic_tls_install_ca="always",
+        restore_data_nic_tls_minimum="verify",
+        restore_data_nic_tls_on_unmet="fail",
+    )
+    job, _curl_argv, _written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=1)
     assert job.status == RestoreStatus.FAILED
     assert "Direct Network Transfer required but unavailable" in job.error
 

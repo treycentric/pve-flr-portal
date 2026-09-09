@@ -28,18 +28,18 @@ def _dp_paths(tmp_path, monkeypatch):
     return cert, key
 
 
-def test_prepare_data_plane_cert_collects_ip_and_hostname_sans(_dp_paths):
-    cert, key = _dp_paths
+def test_prepare_data_plane_cert_covers_what_the_url_presents(_dp_paths):
+    cert, _key = _dp_paths
     nics = [
-        DataNic("10.0.5.0/24", "10.0.5.5", hostname="restore.dc1.lan"),
-        DataNic("10.0.6.0/24", "10.0.6.5"),
+        DataNic("10.0.5.0/24", "10.0.5.5", hostname="restore.dc1.lan"),  # URL uses the name
+        DataNic("10.0.6.0/24", "10.0.6.5"),                              # URL uses the IP
     ]
-    got_cert, got_key = run._prepare_data_plane_cert(nics)
-    assert (got_cert, got_key) == (cert, key)
+    run._prepare_data_plane_cert(nics)
     san = x509.load_pem_x509_certificate(cert.read_bytes()).extensions.get_extension_for_class(
         x509.SubjectAlternativeName
     ).value
-    assert {str(v) for v in san.get_values_for_type(x509.IPAddress)} == {"10.0.5.5", "10.0.6.5"}
+    # the hostname'd NIC contributes only its DNS name, not its IP
+    assert {str(v) for v in san.get_values_for_type(x509.IPAddress)} == {"10.0.6.5"}
     assert "restore.dc1.lan" in san.get_values_for_type(x509.DNSName)
 
 
@@ -53,3 +53,23 @@ def test_data_plane_tls_enabled_follows_preferred(monkeypatch):
 def test_min_tls_map_covers_both_configured_values():
     importlib.reload(config)
     assert set(run._MIN_TLS) == {"1.2", "1.3"}
+
+
+def test_bind_error_none_for_loopback_reason_for_a_non_local_address():
+    assert run._bind_error("127.0.0.1", 0) is None
+    # TEST-NET-1 (RFC 5737) - never a local address on a real host.
+    reason = run._bind_error("192.0.2.123", 0)
+    assert reason is not None and "not a local address" in reason
+
+
+def test_bind_error_reports_a_port_collision(tmp_path):
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    try:
+        reason = run._bind_error("127.0.0.1", port)
+        assert reason is not None and "already in use" in reason
+    finally:
+        s.close()

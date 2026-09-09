@@ -98,25 +98,29 @@ def test_select_data_nic_first_match_wins_when_multiple_nics_could_match():
 # --- detect_fetch_tool ---------------------------------------------------
 
 def _exec_returning(results: dict[str, tuple[int, str, str]]):
-    """Fake exec_fn: looks up a canned result by the probe's first argv
-    element (good enough to distinguish candidates in these tests)."""
+    """Fake exec_fn: matches a canned result by a substring of the probe
+    argv (e.g. 'curl.exe', 'Invoke-WebRequest', 'command -v curl')."""
 
     async def fake(argv):
-        key = argv[0]
-        if key not in results:
-            raise AssertionError(f"unexpected probe: {argv}")
-        return results[key]
+        joined = " ".join(argv)
+        for key, res in results.items():
+            if key in joined:
+                return res
+        raise AssertionError(f"unexpected probe: {argv}")
 
     return fake
 
 
-async def test_detect_fetch_tool_windows_prefers_invoke_webrequest_when_present():
-    fake = _exec_returning({"powershell": (0, "", "")})
+async def test_detect_fetch_tool_windows_prefers_curl_then_invoke_webrequest():
+    assert await detect_fetch_tool(_exec_returning({"curl.exe": (0, "", "")}), "windows") == "curl"
+    fake = _exec_returning({"curl.exe": (1, "", ""), "Invoke-WebRequest": (0, "", "")})
     assert await detect_fetch_tool(fake, "windows") == "Invoke-WebRequest"
 
 
 async def test_detect_fetch_tool_windows_falls_back_down_the_list():
-    fake = _exec_returning({"powershell": (1, "", "not found"), "where": (0, "", "")})
+    fake = _exec_returning(
+        {"curl.exe": (1, "", ""), "Invoke-WebRequest": (1, "", "not found"), "certutil.exe": (0, "", "")}
+    )
     assert await detect_fetch_tool(fake, "windows") == "certutil"
 
 
@@ -144,13 +148,14 @@ async def test_detect_fetch_tool_tolerates_a_probe_raising_and_tries_the_next_on
     calls = []
 
     async def flaky(argv):
-        calls.append(argv[0])
-        if argv[0] == "powershell":
+        joined = " ".join(argv)
+        calls.append(joined)
+        if "curl.exe" in joined:
             raise TimeoutError("guest-exec timed out")
-        return 0, "", ""
+        return 0, "", ""  # Invoke-WebRequest probe succeeds
 
-    assert await detect_fetch_tool(flaky, "windows") == "certutil"
-    assert calls == ["powershell", "where"]
+    assert await detect_fetch_tool(flaky, "windows") == "Invoke-WebRequest"
+    assert calls == ["where curl.exe", "powershell -NoProfile -NonInteractive -Command Get-Command Invoke-WebRequest"]
 
 
 # --- data-plane TLS ladder (issue #47) ----------------------------------
@@ -165,6 +170,23 @@ def test_tool_supports_tls_capability_matrix():
     for tool in ("curl", "certutil", "bitsadmin", "Invoke-WebRequest"):
         assert tool_supports_tls(tool, "verify")
     assert not tool_supports_tls("bash", "verify")
+
+
+def test_is_tls_negotiation_failure():
+    from backend.restore_network_pull import is_tls_negotiation_failure
+
+    assert is_tls_negotiation_failure("curl", 60, "curl: (60) SSL certificate problem: self-signed certificate")
+    assert is_tls_negotiation_failure("curl", 35, "")  # SSL connect error by exit code
+    assert is_tls_negotiation_failure("wget", 5, "")
+    assert is_tls_negotiation_failure(
+        "Invoke-WebRequest", 1, "Could not establish trust relationship for the SSL/TLS secure channel"
+    )
+    assert is_tls_negotiation_failure(
+        "Invoke-WebRequest", 1, "The underlying connection was closed: An unexpected error occurred on a send."
+    )
+    assert not is_tls_negotiation_failure("curl", 0, "")  # success
+    assert not is_tls_negotiation_failure("curl", 7, "curl: (7) Failed to connect")  # plain connect failure
+    assert not is_tls_negotiation_failure("curl", 23, "curl: (23) Failure writing output")  # mid-transfer
 
 
 def test_resolve_tls_mode_walks_the_ladder_down_from_preferred():
@@ -195,11 +217,13 @@ def test_build_fetch_command_invoke_webrequest_verify_and_insecure():
     verify = build_fetch_command("Invoke-WebRequest", HTTPS_URL, DEST_WIN, "windows", tls="verify")
     vscript = verify.exec_argv[-1]
     assert "Invoke-WebRequest" in vscript and HTTPS_URL in vscript and DEST_WIN in vscript
-    assert "Tls12" in vscript
+    assert "-bor 3072" in vscript  # add TLS 1.2 to the enabled protocols
     assert "ServerCertificateValidationCallback" not in vscript
 
     insec = build_fetch_command("Invoke-WebRequest", HTTPS_URL, DEST_WIN, "windows", tls="insecure")
-    assert "ServerCertificateValidationCallback = { $true }" in insec.exec_argv[-1]
+    iscript = insec.exec_argv[-1]
+    assert "ServerCertificateValidationCallback = {param(" in iscript  # declared params, not bare { $true }
+    assert "$true}" in iscript
 
 
 def test_build_fetch_command_certutil_bitsadmin_verify_ok_insecure_raises():
@@ -237,6 +261,8 @@ def test_build_fetch_command_curl_plaintext_and_insecure():
         "curl", "-fsSL", "-k", "-o", DEST_POSIX, HTTPS_URL,
     ]
     assert "-k" not in build_fetch_command("curl", HTTPS_URL, DEST_POSIX, "linux", tls="verify").exec_argv
+    # Windows guest -> the real curl.exe binary (not the PowerShell alias).
+    assert build_fetch_command("curl", HTTPS_URL, DEST_WIN, "windows", tls="insecure").exec_argv[0] == "curl.exe"
 
 
 def test_build_fetch_command_wget_insecure_adds_no_check_certificate():

@@ -600,6 +600,16 @@ admin hasn't supplied their own.
   admin-supplied cert/key dropped at those same paths is used as-is
   and is never overwritten — that's the whole "admin-replaceable"
   story, no separate config flag needed.
+  - **Refined 2026-09-08** after a real deployment tore its own cert in
+    a restart loop: auto-generated certs are now tagged with an
+    `O = pve-flr-portal (auto-generated)` name, and `tls.py` writes the
+    pair atomically (`.tmp` + `os.replace`). A broken pair
+    (cert/key mismatch, unreadable, expired) is *re-issued in place only
+    if it's one of ours*; a broken **admin-supplied** cert is logged as
+    an error and left exactly as the operator left it — the app never
+    deletes or overwrites a cert it didn't generate. `run.py` also wraps
+    each data-plane listener's SSL-context load so a bad data-plane cert
+    skips that one listener instead of failing the whole process.
 - This generation has to happen *before* uvicorn binds its SSL
   context, which is too late to do from a FastAPI startup event —
   needs a small entrypoint script (e.g. `python -m backend` or
@@ -1625,16 +1635,20 @@ bytes. Issue #47 adds HTTPS with a configurable security policy. Full
 per-tool capability matrix, config reference, and open questions live in
 #47.
 
-**Implementation status.** *PR1 (landed):* config knobs, the
-`ensure_data_plane_cert` self-signed cert with IP SANs
-(`backend/tls.py`), the HTTPS data listener in `run.py`, the ladder, and
-`insecure` mode's per-tool skip-verify in `build_fetch_command()`.
-`verify` mode is a valid value and works when the guest already trusts
-the data-plane cert; PR1's `PREFERRED` default is `insecure`.
-*PR2:* automatic guest CA install (`RESTORE_DATA_NIC_TLS_INSTALL_CA` =
-`never`/`if-missing`/`always`), and the `PREFERRED` default flips to
-`verify`. Still **unverified against a real guest** — the same caveat
-DNT itself carries.
+**Implementation status.** Built over two PRs: config knobs + the
+`ensure_data_plane_cert` self-signed cert with IP SANs (`backend/tls.py`)
++ the HTTPS data listener (`run.py`) + the ladder + `insecure`
+skip-verify; then automatic guest CA install (`backend/guest_ca.py`,
+`restore_runner._ensure_guest_trusts_ca`,
+`RESTORE_DATA_NIC_TLS_INSTALL_CA` = `never`/`if-missing`/`always`) with
+the `PREFERRED` default at `verify`. **Live-verified 2026-09-08**
+against real Windows and Linux VMs, with both a self-signed data-plane
+cert and one issued by an internal CA (step-ca). The 2026-09-08
+first-deploy shakeout — bind failures, torn cert/key pairs, the
+`PVE_VERIFY_SSL`-vs-system-store gap, the ladder not stepping down on a
+runtime cert-trust failure, Windows `Invoke-WebRequest` schannel quirks
+(→ prefer real `curl.exe`), and chunked-write progress — is captured in
+the "Real-world finding" notes below.
 
 **Three modes, a downgrade ladder, and a floor.** The download can run
 `verify` (HTTPS, full chain + IP/hostname validation in the guest),
@@ -1646,9 +1660,8 @@ config load). Per guest the app resolves the strongest achievable mode
 from the detected fetch tool's TLS capability, stepping
 `verify → insecure → plaintext` down to MINIMUM. When `PREFERRED` isn't
 `plaintext` the data listener is HTTPS, so a `plaintext` rung below it
-can't be served over the network in PR1 (no second HTTP port) — the
-floor is clamped up to `insecure` for the network path. If nothing
-qualifies,
+can't be served over the network (no second HTTP port) — the floor is
+clamped up to `insecure` for the network path. If nothing qualifies,
 `RESTORE_DATA_NIC_TLS_ON_UNMET` decides: `fallback` (Design B — the
 chunked write over QMP/virtio-serial, which never puts bytes on the
 data network at all) or `fail` (stop with a clear message so the
@@ -1680,32 +1693,113 @@ stable CA rather than a rotating leaf. If cert+key are absent, `tls.py`
 auto-generates a short-lived self-signed cert (same bootstrap pattern
 as §7.3's main cert), **with `IP:<addr>` Subject Alternative Names**
 for every configured data-NIC IP — an IP-literal URL needs IP SANs, not
-a CN (modern clients ignore CN for IPs). `RESTORE_DATA_NIC_HOSTNAME`
-(optional) uses a DNS name in the URL and SAN instead, sidestepping
-old-Windows IP-SAN quirks for admins with data-segment name resolution.
+a CN (modern clients ignore CN for IPs). A per-NIC `"hostname"` field in
+the `RESTORE_DATA_NICS` entry (optional) puts a DNS name in the URL and
+SAN instead, sidestepping old-Windows IP-SAN quirks for admins with
+data-segment name resolution. The auto-generated cert is regenerated on
+startup whenever the configured SAN set no longer matches it — so
+**changing a data NIC's IP is just: update `local_ip`, restart.** An
+admin-supplied cert is never regenerated; after an IP change, reissue it
+with the new SAN yourself (the portal logs a "does not cover" warning
+and `verify` clients reject it until you do).
 
 **Guest trust-store management.** `RESTORE_DATA_NIC_TLS_INSTALL_CA` =
-`never` (default — `verify` then needs a pre-provisioned CA) /
-`if-missing` (fingerprint-check the guest Root store, install only if
-absent) / `always`. Install = `agent/file-write` the CA PEM to a
-scratch path, then `guest-exec` `certutil -addstore -f Root` (Windows,
-run as SYSTEM) or `/usr/local/share/ca-certificates` +
-`update-ca-certificates` / `/etc/pki/ca-trust/source/anchors` +
-`update-ca-trust` (Linux, whichever exists). The trusted CA persists
-after the job — mitigated with short-lived certs and a clear job-log
-line; a `UNINSTALL_CA_AFTER` knob is possible later, not the first cut.
+`never` (default is `never`, but the shipped `PREFERRED` default is
+`verify`, so a homelab that wants zero pre-provisioning sets this to
+`if-missing`) / `if-missing` (skip when it's already there — a
+`certutil -store Root <thumbprint>` check on Windows, an anchor-file
+`test -f` on Linux) / `always`. Install = `agent/file-write` the CA PEM
+to a scratch path (Windows) or straight to the anchor path (Linux),
+then `guest-exec` `certutil -addstore -f Root` (Windows, run as SYSTEM)
+or `update-ca-certificates` / `update-ca-trust extract` (Linux,
+whichever the guest has). `guest_ca.is_ca_cert()` refuses to install a
+file whose first cert isn't a CA (`BasicConstraints cA=True`) — the
+auto-generated data-plane cert now carries that. The trusted CA persists
+after the job — mitigated with a bounded cert lifetime and a clear
+job-log line; a `UNINSTALL_CA_AFTER` knob is possible later.
 
-**Fallback semantics.** Mode resolution happens *before* the fetch
-wherever possible (tool capability and whether verification is even
-attempted are known up front), so a chosen mode that then fails
-mid-transfer still raises — unchanged from today. The one runtime-only
-case is a TLS-version/handshake mismatch (fails at connect, 0 bytes):
-detect the known "never started" exit codes per tool and treat it as
-"mode not achievable" → ladder step-down / `ON_UNMET`.
+**Fallback semantics.** A *CA-install* failure steps this job's mode
+down to `insecure` when the ladder still allows it, else `ON_UNMET`.
+When the *fetch* itself fails, `restore_network_pull.is_tls_negotiation_failure`
+classifies it (per-tool exit codes + error text): a **TLS
+handshake/trust failure** — untrusted/self-signed cert under `verify`, a
+protocol/version mismatch — moved zero bytes, so it retries one rung
+down the ladder (`verify` → `insecure`) and, if still failing (or the
+floor is already `verify`), applies `ON_UNMET` (`fallback` → Design B,
+`fail` → error). Any *other* fetch failure — connection refused, a
+mid-transfer error, disk full in the guest — is a hard failure and
+still raises, matching the pre-#47 "once DNT is offered, a fetch failure
+is a real failure" rule.
+
+**Real-world findings (2026-09-08), first deploy + live-verification on a
+real cluster (Windows + Linux VMs, self-signed and step-ca certs).** All
+fixed on the branch:
+- A `RESTORE_DATA_NICS` entry whose `local_ip` isn't actually a local
+  address (easy to do — you want the *portal's* IP on that segment, not
+  the guest's) made uvicorn's `create_server` raise `EADDRNOTAVAIL`,
+  which `sys.exit()`s the process — the **whole portal** went down, not
+  just that one listener. And even with a correct IP, a specific-IP
+  listener on the same port as the main `0.0.0.0` bind is `EADDRINUSE`
+  on Linux. `run.py` now (a) defaults the data port to `PORT+1`, not
+  `PORT`; (b) preflight-`bind()`s each `(local_ip, data_port)` and skips
+  it with a reason (`not a local address` vs `already in use — set
+  RESTORE_DATA_NIC_PORT`); (c) wraps each data listener so a later bind
+  failure is logged, not fatal. The main UI/PVE listener's lifetime
+  alone governs the process.
+- A large single-file restore on the chunked path sat at a displayed
+  ~99% with no log output — the "+1 ahead of current" placeholder
+  pinning near 100%, and `_write_chunks_to_scratch` logging nothing
+  between "creating scratch dir" and "downloaded N bytes". PVE's
+  file-restore download stream has **no `Content-Length`** in practice,
+  so the frontend now sends the file's size from `file-restore/list`
+  (`source_size` → `RestoreJob.source_size` → `total_bytes_hint`); the
+  bar tracks a real chunk count and the write loop emits a
+  `Sent X / Y chunks (NN%)` heartbeat once per whole percent (like PVE's
+  own disk-move progress). `_try_direct_network_transfer` also logs when
+  it bails because `RESTORE_DATA_NICS` is empty.
+- Iterating on `local_ip` left a stale `certs/data-plane.*` behind, and
+  a restart landing between `_write_self_signed`'s two writes left a
+  fresh key next to a stale cert — uvicorn's `create_ssl_context` then
+  raised `KEY_VALUES_MISMATCH` at `config.load()`, fatal. `backend/tls.py`
+  now: (a) tags its own certs `O = pve-flr-portal (auto-generated)` and
+  writes the pair atomically (`.tmp` + `os.replace`); (b) re-issues a
+  broken pair (mismatch, expired) **only when the cert is self-signed**
+  (ours, marked or not; a broken self-signed cert is useless anyway) —
+  a broken **CA-issued** cert, or one that won't parse, is logged as an
+  error and left exactly in place, never overwritten or deleted;
+  (c) re-issues its own
+  data-plane cert when the configured SANs change, only *warns* about a
+  valid admin cert with wrong SANs; (d) `run.py` wraps
+  `data_config.load()` so a bad data-plane cert skips that one listener
+  instead of taking the portal down.
+- **`PVE_VERIFY_SSL=true` trusted only certifi**, not the container's
+  system CA store — so once Proxmox served an internal-CA cert, login
+  500'd with "self-signed certificate in certificate chain". Now
+  `true` → `ssl.create_default_context()` (system store, `SSL_CERT_FILE`
+  honoured); `false` unchanged; a **path** is accepted and validated at
+  startup (a typo was raising `FileNotFoundError` inside every request).
+- **The ladder didn't step down on a runtime cert-trust failure.** With
+  `verify` and `INSTALL_CA=never`, a guest that doesn't trust the
+  data-plane cert failed the whole restore. Now
+  `restore_network_pull.is_tls_negotiation_failure` classifies a failed
+  fetch: a TLS handshake/trust failure (0 bytes moved) retries one rung
+  down (`verify` → `insecure`) then applies `ON_UNMET`; any other fetch
+  failure still hard-fails.
+- **Windows `Invoke-WebRequest` + skip-verify is fragile** on PS 5.1 (a
+  bare `{ $true }` validation callback throws inside schannel →
+  "underlying connection was closed: an unexpected error occurred on a
+  send"). Fixed the callback (declared params) and `SecurityProtocol`
+  (OR in TLS 1.2, don't replace) + `-UseBasicParsing`, but real
+  **`curl.exe`** (Win10 1803+/Server 2019+) is now the first-choice
+  Windows fetch tool — its schannel `-k` is far more predictable.
+- **Restore-to-guest fails for a guest on another cluster node** — every
+  guest-scoped call hard-codes `nodes/localhost`. Not fixed here;
+  tracked as **issue #51**.
 
 **Explicitly out of scope of #47** (separate follow-ups): route-scoping
 the data listener so it serves *only* the token route rather than the
-whole app on that IP; `cscript` staging.
+whole app on that IP; `cscript` staging; multi-node cluster support
+(#51); baking certbot into the build (#52).
 
 ### 7.7 Multi-file / directory restore-to-guest
 

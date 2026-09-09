@@ -83,6 +83,10 @@ class RestoreJob:
     # meaningful when restore_metadata is set; None if the frontend
     # didn't have an mtime to send (e.g. a directory entry).
     source_mtime: int | None = None
+    # The source file's size from file-restore/list. PVE's download
+    # stream carries no Content-Length, so this is what lets the chunked
+    # single-file write report a real % instead of a placeholder.
+    source_size: int | None = None
     # Coarse step-count progress, not byte-level - one unit per chunk
     # written, plus one each for concatenation/metadata restore/verify
     # when those run (restore_runner.py sets progress_total once the
@@ -179,6 +183,7 @@ class RestoreJobManager:
         restore_metadata: bool = False,
         verify: bool = False,
         source_mtime: int | None = None,
+        source_size: int | None = None,
     ) -> RestoreJob:
         # A distinct copy, not the same object the interactive session
         # store points at - see module docstring. Done here, not left to
@@ -201,6 +206,7 @@ class RestoreJobManager:
             restore_metadata=restore_metadata,
             verify=verify,
             source_mtime=source_mtime,
+            source_size=source_size,
         )
         self._jobs[job.id] = job
         return job

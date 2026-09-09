@@ -110,6 +110,11 @@ def select_data_nic(guest_ips: list[str], data_nics: list[DataNic]) -> DataNic |
 # the tool is actually usable). Order matters: the first one that's
 # present wins, most-capable/most-common first.
 _WINDOWS_CANDIDATES: list[tuple[str, list[str]]] = [
+    # Real curl.exe (Win10 1803+ / Server 2019+) - uses schannel, `-k`
+    # disables validation cleanly. Far more predictable than
+    # Invoke-WebRequest's process-wide validation-callback hack, so it's
+    # first when present.
+    ("curl", ["where", "curl.exe"]),
     ("Invoke-WebRequest", ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Command Invoke-WebRequest"]),
     ("certutil", ["where", "certutil.exe"]),
     ("bitsadmin", ["where", "bitsadmin.exe"]),
@@ -154,6 +159,49 @@ def tool_supports_tls(tool: str, mode: str) -> bool:
     if mode == "insecure":
         return tool not in _NO_SKIP_VERIFY
     return True  # verify
+
+
+_TLS_ERR_HINTS = (
+    "certificate",
+    "self-signed",
+    "self signed",
+    "unable to get local issuer",
+    "certificate verify failed",
+    "sslcertverificationerror",
+    "trust relationship",
+    "secure channel",
+    "ssl/tls",
+    "handshake failure",
+    "tlsv1",
+    "wrong version number",
+    "no cipher",
+    "sslv3 alert",
+    # .NET / Windows PowerShell schannel wording - Invoke-WebRequest and
+    # WinHttpRequest report a handshake/transport failure this way,
+    # without the word "certificate" or "SSL".
+    "underlying connection was closed",
+    "unexpected error occurred on a send",
+    "could not create ssl/tls secure channel",
+    "authentication failed",
+)
+
+
+def is_tls_negotiation_failure(tool: str, exitcode: int, stderr: str = "", stdout: str = "") -> bool:
+    """Whether a failed fetch looks like a TLS *handshake / trust*
+    failure (bad or untrusted cert, protocol/version mismatch) - i.e.
+    nothing was transferred and it's safe to retry a rung down the ladder
+    (issue #47). A failure after bytes started flowing is deliberately
+    not matched here - that stays a hard error."""
+    if exitcode == 0:
+        return False
+    blob = f"{stderr} {stdout}".lower()
+    if any(h in blob for h in _TLS_ERR_HINTS):
+        return True
+    if tool == "curl" and exitcode in (35, 51, 58, 59, 60, 66, 77, 80, 83, 90, 91):
+        return True
+    if tool == "wget" and exitcode == 5:  # SSL verification failure
+        return True
+    return False
 
 
 def resolve_tls_mode(tool: str, preferred: str, minimum: str) -> str | None:
@@ -213,8 +261,9 @@ def build_fetch_command(
       expressible for `certutil`/`bitsadmin`/`bash` - raises (the caller
       resolves that via the ladder / ON_UNMET).
     - `verify` - `url` must be `https://`; the guest verifies the cert
-      normally (works only if it already trusts it - PR2 adds CA
-      install). `bash` still raises (no TLS at all).
+      normally (the caller installs the data-plane CA first when
+      `RESTORE_DATA_NIC_TLS_INSTALL_CA` allows). `bash` still raises (no
+      TLS at all).
 
     `stage_path` is required for `cscript` (see FetchPlan's docstring)
     and ignored for every other tool - the caller picks the actual path
@@ -242,10 +291,20 @@ def build_fetch_command(
         # process-wide validation callback (5.1 has no -SkipCertificateCheck).
         pre = ""
         if tls != "plaintext":
-            pre += "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+            # Add TLS 1.2 (3072) + 1.1 (768) to whatever's already
+            # enabled rather than replacing the set - old .NET defaults
+            # to SSL3/TLS1.0.
+            pre += (
+                "[Net.ServicePointManager]::SecurityProtocol = "
+                "[Net.ServicePointManager]::SecurityProtocol -bor 3072 -bor 768; "
+            )
         if insecure:
-            pre += "[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; "
-        script = f"{pre}Invoke-WebRequest -Uri '{url}' -OutFile '{destination}'"
+            # The callback MUST declare its 4 params - a bare `{ $true }`
+            # scriptblock throws when schannel invokes it with arguments,
+            # which surfaces as "The underlying connection was closed: An
+            # unexpected error occurred on a send."
+            pre += "[Net.ServicePointManager]::ServerCertificateValidationCallback = {param($s,$c,$ch,$e) $true}; "
+        script = f"{pre}Invoke-WebRequest -UseBasicParsing -Uri '{url}' -OutFile '{destination}'"
         return FetchPlan(exec_argv=["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
     if tool == "certutil":
         return FetchPlan(exec_argv=["certutil", "-urlcache", "-split", "-f", url, destination])
@@ -287,7 +346,8 @@ def build_fetch_command(
             stage_path=stage_path,
         )
     if tool == "curl":
-        argv = ["curl", "-fsSL", *(["-k"] if insecure else []), "-o", destination, url]
+        binary = "curl.exe" if guest_os_family == "windows" else "curl"
+        argv = [binary, "-fsSL", *(["-k"] if insecure else []), "-o", destination, url]
         return FetchPlan(exec_argv=argv)
     if tool == "wget":
         argv = ["wget", "-q", *(["--no-check-certificate"] if insecure else []), "-O", destination, url]
