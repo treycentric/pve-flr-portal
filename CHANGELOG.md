@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See [`docs/dev/versioning.md`](docs/dev/versioning.md) for how entries
 here are generated from commit messages.
 
+## [1.4.0] - 2026-09-09
+
+### Added
+- **restore:** HTTPS on the Direct Network Transfer data plane - PR1 (#47) (ed9e1a8)
+- **restore:** guest CA install + verify default for the Direct Network Transfer data plane (#47) (86c327d)
+
 ## [1.3.0] - 2026-09-08
 
 ### Added
