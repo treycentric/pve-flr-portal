@@ -174,6 +174,43 @@ The portal detects per-guest which of these the calling user actually
 holds (plus what the guest agent itself allows) and only offers the
 restore options that check out — see `docs/plan.md` §7.5.
 
+### SSO / OpenID Connect login
+
+If your PVE cluster has an `openid`-type realm configured (Datacenter →
+Realms → Add → OpenID Connect Server) for SSO against an external
+identity provider (Keycloak, Authentik, Entra ID, Okta, etc.), it shows
+up in the portal's own realm dropdown automatically — selecting it
+switches the login form to a "Continue with SSO" button instead of
+asking for a password.
+
+**One extra step beyond the PVE-side realm setup**, and the one that's
+easy to miss: the portal redirects through your identity provider using
+its *own* callback URL —
+
+```
+https://<portal-host>:<port>/login/oidc/callback
+```
+
+(the same host/port you use to reach the portal, e.g.
+`https://pfr.example.com:8008/login/oidc/callback`) — **not** PVE's own
+web UI address. PVE's `/access/openid/auth-url` call happily builds the
+identity-provider redirect for whatever URL the portal asks for, but
+the identity provider itself only accepts a redirect back to a URL
+that's on that OIDC client's own allow-list — and if the realm was set
+up by pointing a browser at PVE's login page first, that allow-list
+usually only has PVE's own URL (`https://<pve-host>:8006/`) on it.
+
+So: on your identity provider, open the OIDC client PVE's realm uses,
+and add the portal's callback URL above as an **additional** valid
+redirect URI (most providers support more than one per client — this
+is normally a couple of clicks, not a new client registration). Without
+this, SSO login fails at the identity provider with something like
+"invalid redirect URI" before it ever gets back to the portal.
+
+See `docs/plan.md` §7.1.1 for the full flow this drives (PVE's
+`auth-url`/`login` OpenID endpoints, and why no public-URL setting is
+needed on the portal's own side).
+
 ## Deployment
 
 **LXC on your PVE host (recommended).** Run on the PVE host itself:
