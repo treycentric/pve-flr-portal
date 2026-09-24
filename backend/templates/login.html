@@ -40,6 +40,27 @@
         save: false,
         selectedType: 'pam',
         updateType() { this.selectedType = $refs.realm.selectedOptions[0]?.dataset.type || ''; },
+        handleSubmit(event) {
+          // Issue #56: an OpenID Connect realm has no password to POST -
+          // send the browser into the SSO redirect flow instead of
+          // submitting this form. A plain function-call expression here
+          // (rather than an inline if/else statement block in @submit
+          // itself) - Alpine's expression compiler for x-on rejects a
+          // leading `if` as a syntax error (confirmed live: it throws
+          // and never attaches the listener at all, so the form silently
+          // falls through to its default POST - PVE then 422s on the
+          // missing password field).
+          if (this.selectedType === 'openid') {
+            event.preventDefault();
+            window.location.href = '/login/oidc/' + encodeURIComponent(this.$refs.realm.value);
+            return;
+          }
+          if (this.save) {
+            localStorage.setItem('pfr_login', JSON.stringify({ username: this.$refs.username.value, realm: this.$refs.realm.value }));
+          } else {
+            localStorage.removeItem('pfr_login');
+          }
+        },
       }"
       x-init="$nextTick(() => {
         const saved = JSON.parse(localStorage.getItem('pfr_login') || 'null');
@@ -54,18 +75,7 @@
         }
         updateType();
       })"
-      @submit="
-        // Issue #56: an OpenID Connect realm has no password to POST -
-        // send the browser into the SSO redirect flow instead of
-        // submitting this form.
-        if (selectedType === 'openid') {
-          $event.preventDefault();
-          window.location.href = '/login/oidc/' + encodeURIComponent($refs.realm.value);
-          return;
-        }
-        if (save) { localStorage.setItem('pfr_login', JSON.stringify({ username: $refs.username.value, realm: $refs.realm.value })); }
-        else { localStorage.removeItem('pfr_login'); }
-      ">
+      @submit="handleSubmit($event)">
       <img class="about-logo login-logo" src="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}" alt="">
       <h2 class="login-title">Log in</h2>
       {% if notice %}
@@ -74,7 +84,7 @@
       {% if error %}
       <p class="login-error">{{ error }}</p>
       {% endif %}
-      <div x-show="selectedType !== 'openid'">
+      <div class="login-password-fields" x-show="selectedType !== 'openid'">
         <label class="login-label" for="username">Username</label>
         <input class="login-input" type="text" id="username" name="username" x-ref="username" placeholder="username" autocomplete="username" x-bind:required="selectedType !== 'openid'" autofocus>
         <label class="login-label" for="password">Password</label>
