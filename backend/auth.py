@@ -92,16 +92,11 @@ async def list_realms() -> list[dict]:
     return [dict(r) for r in _FALLBACK_REALMS]
 
 
-async def login(username: str, password: str) -> str:
-    """Authenticate against PVE's ticket endpoint; returns our opaque session id."""
-    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
-        resp = await client.post(
-            f"{_API_ROOT}/access/ticket",
-            data={"username": username, "password": password},
-        )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    data = resp.json()["data"]
+def _store_ticket(data: dict) -> str:
+    """Common tail of every login path (password or OIDC, issue #56):
+    both `/access/ticket` and `/access/openid/login` hand back the same
+    {username, ticket, CSRFPreventionToken} shape, so this is the one
+    place a SessionData gets built and stashed in the session store."""
     now = time.time()
     session_id = secrets.token_urlsafe(32)
     _sessions[session_id] = SessionData(
@@ -112,6 +107,58 @@ async def login(username: str, password: str) -> str:
         last_activity_at=now,
     )
     return session_id
+
+
+async def login(username: str, password: str) -> str:
+    """Authenticate against PVE's ticket endpoint; returns our opaque session id."""
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        resp = await client.post(
+            f"{_API_ROOT}/access/ticket",
+            data={"username": username, "password": password},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return _store_ticket(resp.json()["data"])
+
+
+async def oidc_auth_url(realm: str, redirect_url: str) -> str:
+    """Issue #56: the first leg of an OIDC/SSO login. Wraps PVE's
+    `POST /access/openid/auth-url` (confirmed against pve-access-
+    control's PVE/API2/OpenId.pm - same call PVE's own web UI makes),
+    which returns the identity provider's authorization URL to send the
+    browser to. `redirect-url` is caller-supplied - PVE just forwards it
+    to the identity provider as the OAuth2 `redirect_uri` - so it must be
+    *this app's own* callback URL (main.py's `/login/oidc/callback`),
+    not PVE's. The identity provider's OIDC client for this realm has to
+    separately allow-list that URL - that's config on the identity
+    provider itself, outside anything this app or PVE controls."""
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        resp = await client.post(
+            f"{_API_ROOT}/access/openid/auth-url",
+            data={"realm": realm, "redirect-url": redirect_url},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Could not start SSO login for this realm")
+    return resp.json()["data"]
+
+
+async def oidc_login(state: str, code: str, redirect_url: str) -> str:
+    """Issue #56: the second leg - the identity provider redirected the
+    browser back to our callback with `state`/`code`; exchange them via
+    PVE's `POST /access/openid/login` (same `redirect-url` as the
+    auth-url call, required for PVE to complete the token exchange with
+    the identity provider). No `realm` param here - PVE encodes what it
+    needs into `state` itself, so this app tracks no flow state of its
+    own between the two legs. Returns our opaque session id, same as
+    login()."""
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        resp = await client.post(
+            f"{_API_ROOT}/access/openid/login",
+            data={"state": state, "code": code, "redirect-url": redirect_url},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="SSO login failed - the identity provider rejected it")
+    return _store_ticket(resp.json()["data"])
 
 
 async def _refresh_ticket(session: SessionData) -> None:

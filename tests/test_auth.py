@@ -88,6 +88,57 @@ async def test_login_bad_credentials_raises_401():
     assert auth._sessions == {}
 
 
+@respx.mock
+async def test_oidc_auth_url_returns_the_identity_provider_url():
+    route = respx.post(f"{API}/access/openid/auth-url").mock(
+        return_value=httpx.Response(200, json={"data": "https://idp.example.com/authorize?state=abc"})
+    )
+    url = await auth.oidc_auth_url("keycloak", "https://portal.example.com/login/oidc/callback")
+    assert url == "https://idp.example.com/authorize?state=abc"
+    sent = route.calls.last.request.read().decode()
+    assert "realm=keycloak" in sent
+    assert "redirect-url=https" in sent
+
+
+@respx.mock
+async def test_oidc_auth_url_raises_401_on_pve_error():
+    respx.post(f"{API}/access/openid/auth-url").mock(return_value=httpx.Response(400, json={"data": None}))
+    with pytest.raises(HTTPException) as exc:
+        await auth.oidc_auth_url("bogus", "https://portal.example.com/login/oidc/callback")
+    assert exc.value.status_code == 401
+
+
+@respx.mock
+async def test_oidc_login_success_stores_session():
+    respx.post(f"{API}/access/openid/login").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@keycloak",
+                    "ticket": "PVE:alice@keycloak:TICKET",
+                    "CSRFPreventionToken": "csrf-oidc",
+                }
+            },
+        )
+    )
+    session_id = await auth.oidc_login("state1", "code1", "https://portal.example.com/login/oidc/callback")
+    assert session_id in auth._sessions
+    stored = auth._sessions[session_id]
+    assert stored.username == "alice@keycloak"
+    assert stored.ticket == "PVE:alice@keycloak:TICKET"
+    assert stored.csrf_token == "csrf-oidc"
+
+
+@respx.mock
+async def test_oidc_login_raises_401_when_pve_rejects_the_exchange():
+    respx.post(f"{API}/access/openid/login").mock(return_value=httpx.Response(401, json={"data": None}))
+    with pytest.raises(HTTPException) as exc:
+        await auth.oidc_login("bad-state", "bad-code", "https://portal.example.com/login/oidc/callback")
+    assert exc.value.status_code == 401
+    assert auth._sessions == {}
+
+
 def test_pve_headers_shape(session_data):
     headers = auth.pve_headers(session_data)
     assert headers["Cookie"] == f"PVEAuthCookie={session_data.ticket}"

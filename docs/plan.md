@@ -535,6 +535,49 @@ session, transparent to the browser, which only ever holds our app's
 own session cookie. This is a different, longer-running mechanism than
 the idle timeout below — the two interact (see 7.2).
 
+### 7.1.1 OIDC/SSO realm login (issue #56)
+
+A PVE realm can be `type: openid` instead of a password realm - no
+username/password to POST, so the flow above doesn't apply. Confirmed
+against `pve-access-control`'s `PVE/API2/OpenId.pm` (same calls PVE's
+own web UI makes):
+
+- `POST /access/openid/auth-url` — `{realm, redirect-url}` → the
+  identity provider's authorization URL to send the browser to.
+  `redirect-url` is caller-supplied - PVE just forwards it to the
+  identity provider as the OAuth2 `redirect_uri` - so it's *this app's*
+  own callback URL (`/login/oidc/callback`), not PVE's web UI. The
+  identity provider's OIDC client for that realm has to separately
+  allow-list this URL; that's config on the identity provider itself,
+  outside anything PVE or this app controls.
+- `POST /access/openid/login` — `{state, code, redirect-url}` (same
+  `redirect-url` as the auth-url call) → the same `{username, ticket,
+  CSRFPreventionToken}` shape `/access/ticket` returns. No `realm`
+  param — PVE encodes what it needs into `state` itself, so this app
+  tracks no flow state between the two legs (stays stateless, per
+  CLAUDE.md's "no extra services").
+
+`auth.py`'s `oidc_auth_url()`/`oidc_login()` wrap these; `main.py`'s
+`GET /login/oidc/{realm}` (leg 1) and `GET /login/oidc/callback` (leg
+2) drive the redirect. `redirect_url` is computed via `request.url_for
+("login_oidc_callback")` on *both* legs rather than a hardcoded
+public-URL setting — since it's derived from whatever host/scheme the
+browser actually used to reach leg 1, it naturally matches on the way
+back. **Route registration order matters**: `/login/oidc/callback`
+must be registered before `/login/oidc/{realm}`, or the dynamic route
+swallows the literal callback path (`realm="callback"`) — Starlette
+matches path routes in registration order, confirmed by this route's
+own tests failing without the fix.
+
+The login page's realm `<select>` already carries each realm's `type`
+(from `/access/domains`, unauthenticated, same call `list_realms()`
+already made). Login.html's Alpine component watches the selected
+option's `data-type`: picking an `openid` realm hides the username/
+password fields and swaps the submit button to "Continue with SSO",
+whose click/submit navigates to `/login/oidc/{realm}` instead of
+POSTing the password form. One unified dropdown, not a separate
+per-realm SSO button, to match the existing dropdown-driven UI.
+
 ### 7.2 Idle timeout
 
 Independent of PVE's own ticket lifetime, the app enforces its own

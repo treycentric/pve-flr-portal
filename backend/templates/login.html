@@ -36,7 +36,11 @@
       class="login-box"
       method="post"
       action="/login"
-      x-data="{ save: false }"
+      x-data="{
+        save: false,
+        selectedType: 'pam',
+        updateType() { this.selectedType = $refs.realm.selectedOptions[0]?.dataset.type || ''; },
+      }"
       x-init="$nextTick(() => {
         const saved = JSON.parse(localStorage.getItem('pfr_login') || 'null');
         if (saved) {
@@ -48,8 +52,17 @@
           if (hasRealm) $refs.realm.value = saved.realm;
           save = true;
         }
+        updateType();
       })"
       @submit="
+        // Issue #56: an OpenID Connect realm has no password to POST -
+        // send the browser into the SSO redirect flow instead of
+        // submitting this form.
+        if (selectedType === 'openid') {
+          $event.preventDefault();
+          window.location.href = '/login/oidc/' + encodeURIComponent($refs.realm.value);
+          return;
+        }
         if (save) { localStorage.setItem('pfr_login', JSON.stringify({ username: $refs.username.value, realm: $refs.realm.value })); }
         else { localStorage.removeItem('pfr_login'); }
       ">
@@ -61,21 +74,23 @@
       {% if error %}
       <p class="login-error">{{ error }}</p>
       {% endif %}
-      <label class="login-label" for="username">Username</label>
-      <input class="login-input" type="text" id="username" name="username" x-ref="username" placeholder="username" autocomplete="username" autofocus required>
-      <label class="login-label" for="password">Password</label>
-      <input class="login-input" type="password" id="password" name="password" autocomplete="current-password" required>
+      <div x-show="selectedType !== 'openid'">
+        <label class="login-label" for="username">Username</label>
+        <input class="login-input" type="text" id="username" name="username" x-ref="username" placeholder="username" autocomplete="username" x-bind:required="selectedType !== 'openid'" autofocus>
+        <label class="login-label" for="password">Password</label>
+        <input class="login-input" type="password" id="password" name="password" autocomplete="current-password" x-bind:required="selectedType !== 'openid'">
+      </div>
       <label class="login-label" for="realm">Realm</label>
-      <select class="login-input" id="realm" name="realm" x-ref="realm">
+      <select class="login-input" id="realm" name="realm" x-ref="realm" @change="updateType()">
         {% for r in realms %}
-        <option value="{{ r.realm }}" {% if r.realm == 'pam' %}selected{% endif %}>{{ r.comment or r.realm }}</option>
+        <option value="{{ r.realm }}" data-type="{{ r.type }}" {% if r.realm == 'pam' %}selected{% endif %}>{{ r.comment or r.realm }}</option>
         {% endfor %}
       </select>
-      <label class="login-checkbox-row">
+      <label class="login-checkbox-row" x-show="selectedType !== 'openid'">
         <input type="checkbox" x-model="save">
         Save username
       </label>
-      <button type="submit" class="btn-primary login-submit">Log in</button>
+      <button type="submit" class="btn-primary login-submit" x-text="selectedType === 'openid' ? 'Continue with SSO' : 'Log in'">Log in</button>
     </form>
   </div>
   <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
