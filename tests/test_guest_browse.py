@@ -201,7 +201,7 @@ async def test_run_exec_polls_until_exited(session_data, monkeypatch):
         httpx.Response(200, json={"data": {"exited": 0}}),
         httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "done"}}),
     ]
-    exitcode, out, _err = await guest_browse._run_exec(session_data, "vm", "133", ["echo", "hi"])
+    exitcode, out, _err = await guest_browse._run_exec(session_data, "vm", "133", ["echo", "hi"], "localhost")
     assert exitcode == 0
     assert out == "done"
 
@@ -225,7 +225,7 @@ async def test_run_exec_retries_the_start_call_on_a_definite_error(session_data,
         return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "ok"}})
     )
 
-    exitcode, out, _err = await guest_browse._run_exec(session_data, "vm", "133", ["echo", "hi"])
+    exitcode, out, _err = await guest_browse._run_exec(session_data, "vm", "133", ["echo", "hi"], "localhost")
     assert exitcode == 0
     assert out == "ok"
     assert start_route.call_count == 2
@@ -237,7 +237,7 @@ async def test_run_exec_does_not_retry_start_call_on_timeout(session_data):
     start_route.side_effect = httpx.TimeoutException("timed out")
 
     with pytest.raises(httpx.TimeoutException):
-        await guest_browse._run_exec(session_data, "vm", "133", ["echo", "hi"])
+        await guest_browse._run_exec(session_data, "vm", "133", ["echo", "hi"], "localhost")
     assert start_route.call_count == 1
 
 
@@ -251,6 +251,6 @@ async def test_run_exec_tolerates_a_transient_error_mid_poll(session_data, monke
         httpx.Response(200, json={"data": {"exited": 0}}),
         httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "done"}}),
     ]
-    exitcode, out, _err = await guest_browse._run_exec(session_data, "vm", "133", ["echo", "hi"])
+    exitcode, out, _err = await guest_browse._run_exec(session_data, "vm", "133", ["echo", "hi"], "localhost")
     assert exitcode == 0
     assert out == "done"

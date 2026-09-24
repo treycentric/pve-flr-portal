@@ -138,6 +138,7 @@ def test_guest_os_family_unknown_when_no_osinfo():
 @respx.mock
 async def test_get_restore_capabilities_degrades_cleanly_when_agent_info_403s(session_data, monkeypatch):
     monkeypatch.setattr(guest_agent_lock.asyncio, "sleep", _fake_sleep)  # skip the real retry delay
+    _mock_cluster_node()
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
@@ -160,11 +161,22 @@ async def _fake_sleep(*_args, **_kwargs):
     return None
 
 
+def _mock_cluster_node(vmid: str = "133", node: str = "localhost") -> None:
+    """get_restore_capabilities() resolves the guest's real node (issue
+    #51) via /cluster/resources before its own guest-scoped calls -
+    every live test needs this mocked too, same as /version and
+    /access/permissions below."""
+    respx.get(f"{API}/cluster/resources").mock(
+        return_value=httpx.Response(200, json={"data": [{"vmid": int(vmid), "node": node, "name": "test-guest"}]})
+    )
+
+
 @respx.mock
 async def test_get_restore_capabilities_retries_agent_info_once_on_definite_http_error(session_data, monkeypatch):
     # Retry only applies to a *completed* bad response - PVE/QEMU already
     # finished handling it, so a second attempt is safe.
     monkeypatch.setattr(guest_agent_lock.asyncio, "sleep", _fake_sleep)
+    _mock_cluster_node()
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
@@ -193,6 +205,7 @@ async def test_get_restore_capabilities_does_not_retry_after_a_timeout(session_d
     # doesn't prove the in-guest command was actually abandoned. Sending
     # a second one anyway risks desyncing the channel, so this must NOT
     # retry - one attempt, then a clean "unavailable".
+    _mock_cluster_node()
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
@@ -216,6 +229,7 @@ async def test_get_restore_capabilities_does_not_retry_after_a_timeout(session_d
 async def test_get_restore_capabilities_does_not_retry_get_osinfo(session_data):
     # get-osinfo only feeds guest_os_family (a UI nicety), not the
     # availability gate itself - one attempt is enough, no retry needed.
+    _mock_cluster_node()
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
@@ -235,6 +249,7 @@ async def test_get_restore_capabilities_does_not_retry_get_osinfo(session_data):
 
 @respx.mock
 async def test_get_restore_capabilities_happy_path(session_data):
+    _mock_cluster_node()
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
@@ -268,10 +283,36 @@ async def test_get_restore_capabilities_happy_path(session_data):
     assert caps.design_a.available
     assert caps.design_b.available
     assert caps.guest_os_family == "linux"
+    assert caps.node == "localhost"
+
+
+@respx.mock
+async def test_get_restore_capabilities_targets_the_guests_real_node(session_data):
+    # Issue #51: on a multi-node cluster, every guest-scoped call here
+    # must target the guest's real node, not the literal "localhost".
+    _mock_cluster_node(node="pve2")
+    respx.get(f"{API}/nodes/pve2/qemu/133/config").mock(
+        return_value=httpx.Response(200, json={"data": {"agent": "1"}})
+    )
+    respx.get(f"{API}/access/permissions").mock(
+        return_value=httpx.Response(200, json={"data": {"/vms/133": {"VM.GuestAgent.FileWrite": 1}}})
+    )
+    respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
+    respx.get(f"{API}/nodes/pve2/qemu/133/agent/info").mock(
+        return_value=httpx.Response(200, json={"data": {"supported_commands": []}})
+    )
+    respx.get(f"{API}/nodes/pve2/qemu/133/agent/get-osinfo").mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+
+    caps = await get_restore_capabilities(session_data, "vm", "133")
+    assert caps.node == "pve2"
+    assert caps.design_a.available
 
 
 @respx.mock
 async def test_get_restore_capabilities_lxc_skips_agent_calls(session_data):
+    _mock_cluster_node()
     respx.get(f"{API}/nodes/localhost/lxc/133/config").mock(
         return_value=httpx.Response(200, json={"data": {}})
     )
@@ -290,6 +331,7 @@ async def test_get_restore_capabilities_unwraps_permissions_nested_under_path(se
     # real guest (docs/plan.md §7.5) - not a flat {"VM.GuestAgent...": 1}.
     # A response that also carries an unrelated path must not leak its
     # privileges onto this guest either.
+    _mock_cluster_node()
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )
@@ -319,6 +361,7 @@ async def test_get_restore_capabilities_unwraps_permissions_nested_under_path(se
 
 @respx.mock
 async def test_get_restore_capabilities_missing_path_key_means_no_privileges(session_data):
+    _mock_cluster_node()
     respx.get(f"{API}/nodes/localhost/qemu/133/config").mock(
         return_value=httpx.Response(200, json={"data": {"agent": "1"}})
     )

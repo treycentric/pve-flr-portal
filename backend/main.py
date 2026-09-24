@@ -333,8 +333,9 @@ async def restore_capabilities(
                 reason = f"your PVE account can't read this guest ({code} from {path}) - needs VM.Audit on /vms/{vmid}"
             elif code >= 500:
                 reason = (
-                    f"PVE returned {code} for {path} - on a cluster the guest may live on a node other than "
-                    "the one serving the API (the portal always asks 'localhost'; docs/plan.md §9)"
+                    f"PVE returned {code} for {path} - on a cluster this can mean the guest's real node "
+                    "couldn't be resolved (needs Sys.Audit on / for /cluster/resources; falls back to "
+                    "'localhost', which 500s for a guest on another node - issue #51, docs/plan.md §9)"
                 )
             else:
                 reason = f"could not read this guest's configuration/permissions (HTTP {code} from {path})"
@@ -434,6 +435,7 @@ async def restore(
             session=session,
             guest_type=guest_type,
             vmid=vmid,
+            node=caps.node,
             guest_label=guest_label,
             task_name=f"Restore {len(items)} item(s) → {destination}",
             snapshot_time=snapshot_time,
@@ -461,6 +463,7 @@ async def restore(
             session=session,
             guest_type=guest_type,
             vmid=vmid,
+            node=caps.node,
             guest_label=guest_label,
             task_name=f"Restore {name} → {destination}",
             snapshot_time=snapshot_time,
@@ -587,7 +590,9 @@ async def restore_browse(
             status_code=403, detail=caps.design_b.reason or "Browsing this guest's filesystem is not available"
         )
     try:
-        result = await guest_browse.list_directories(session, type, vmid, caps.guest_os_family, path or None)
+        result = await guest_browse.list_directories(
+            session, type, vmid, caps.guest_os_family, path or None, node=caps.node
+        )
     except guest_browse.UnsafePathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except (httpx.HTTPStatusError, guest_browse.ListingError) as exc:

@@ -685,7 +685,7 @@ def test_restore_browse_returns_listing(client, monkeypatch):
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(design_b=guest_agent.PathAvailability(True), guest_os_family="linux")
 
-    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+    async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         assert guest_os_family == "linux"
         assert path == "/etc"
         return {"path": "/etc", "parent": "/", "separator": "/", "entries": [{"name": "nginx", "path": "/etc/nginx"}]}
@@ -704,7 +704,7 @@ def test_restore_browse_unsafe_path_returns_400(client, monkeypatch):
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(design_b=guest_agent.PathAvailability(True))
 
-    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+    async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         raise guest_browse.UnsafePathError("nope")
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -719,7 +719,7 @@ def test_restore_browse_listing_error_returns_502(client, monkeypatch):
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(design_b=guest_agent.PathAvailability(True))
 
-    async def fake_list(session, guest_type, vmid, guest_os_family, path):
+    async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         raise guest_browse.ListingError("No such file or directory")
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)

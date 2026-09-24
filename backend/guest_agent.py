@@ -23,14 +23,14 @@ metadata restore, checksum verify) needs Unrestricted. Reading
 agent/info itself needs Audit, so a caller with none of the five
 grants gets a clean "unavailable", not a bubbled-up 403.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
 
 from .auth import SessionData, pve_headers
 from .config import settings
 from .guest_agent_lock import call_with_retries, guest_agent_command
-from .pve_client import api_node_type
+from .pve_client import api_node_type, resolve_guest_node
 
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 
@@ -51,6 +51,13 @@ class RestoreCapabilities:
     design_a: PathAvailability
     design_b: PathAvailability
     verify_supported: bool  # sha256-via-guest-exec verification available (implies design_b)
+    # The guest's real PVE node (issue #51) - resolved once by
+    # get_restore_capabilities() and carried here so callers (main.py's
+    # /api/restore, /api/restore-browse) can pass it on to every
+    # subsequent guest-scoped call for this guest without re-resolving.
+    # Defaults to "localhost" so every synthetic RestoreCapabilities
+    # built inline (e.g. main.py's error-path fallback) still works.
+    node: str = "localhost"
 
 
 def _guest_os_family(osinfo: dict | None) -> str | None:
@@ -177,7 +184,9 @@ def _extract_ip_addresses(network_interfaces: list[dict] | None) -> list[str]:
     return addresses
 
 
-async def get_guest_ip_addresses(session: SessionData, guest_type: str, vmid: str) -> list[str]:
+async def get_guest_ip_addresses(
+    session: SessionData, guest_type: str, vmid: str, *, node: str = "localhost"
+) -> list[str]:
     """Design C (docs/plan.md §7.6, issue #22): the guest's own reported
     IP(s), via QGA's network-get-interfaces (already-wrapped QMP call, no
     new PVE API surface) - used to pick which configured data NIC is
@@ -187,14 +196,15 @@ async def get_guest_ip_addresses(session: SessionData, guest_type: str, vmid: st
     VM.GuestAgent.Audit, LXC container with no QGA at all) just gets an
     empty list back, which select_data_nic() correctly treats as "no
     match" rather than this raising and failing the whole restore over a
-    capability check."""
+    capability check. `node` is the guest's real PVE node (issue #51,
+    normally `job.node` - see RestoreJob)."""
     node_type = api_node_type(guest_type)
     if node_type != "qemu":  # LXC containers have no qemu-guest-agent
         return []
     headers = pve_headers(session)
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         data = await _get_agent_json(
-            client, vmid, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/network-get-interfaces", headers, retry=False
+            client, vmid, f"{_API_ROOT}/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces", headers, retry=False
         )
     result = (data or {}).get("result") if isinstance(data, dict) else None
     return _extract_ip_addresses(result)
@@ -207,12 +217,18 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
     "no info available" rather than propagated - a missing grant should
     degrade to "unavailable", not a 500. `guest_type` is the app-internal
     "vm"/"ct" value (matching the rest of the app - task picker, groups,
-    etc.), translated to PVE's "qemu"/"lxc" API node segment here."""
+    etc.), translated to PVE's "qemu"/"lxc" API node segment here.
+
+    Resolves the guest's real node once (issue #51) and uses it for
+    every guest-scoped call below, carrying it on the returned
+    RestoreCapabilities.node so callers can reuse it for the rest of a
+    restore without re-resolving."""
     node_type = api_node_type(guest_type)
+    node = await resolve_guest_node(session, vmid)
     headers = pve_headers(session)
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         config_resp = await client.get(
-            f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/config", headers=headers
+            f"{_API_ROOT}/nodes/{node}/{node_type}/{vmid}/config", headers=headers
         )
         config_resp.raise_for_status()
         vm_config = config_resp.json()["data"]
@@ -242,17 +258,18 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
         osinfo = None
         if node_type == "qemu":
             agent_info = await _get_agent_json(
-                client, vmid, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/info", headers, retry=True
+                client, vmid, f"{_API_ROOT}/nodes/{node}/qemu/{vmid}/agent/info", headers, retry=True
             )
             osinfo_data = await _get_agent_json(
-                client, vmid, f"{_API_ROOT}/nodes/localhost/qemu/{vmid}/agent/get-osinfo", headers, retry=False
+                client, vmid, f"{_API_ROOT}/nodes/{node}/qemu/{vmid}/agent/get-osinfo", headers, retry=False
             )
             osinfo = osinfo_data.get("result") if osinfo_data else None
 
-    return parse_capabilities(
+    caps = parse_capabilities(
         vm_config=vm_config,
         agent_info=agent_info,
         permissions=permissions,
         pve_version_major=pve_version_major,
         osinfo=osinfo,
     )
+    return replace(caps, node=node)

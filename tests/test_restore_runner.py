@@ -104,7 +104,7 @@ async def test_small_file_no_flags_uses_fast_path_no_capability_check(manager, s
     _patch_download(monkeypatch, b"127.0.0.1 localhost")
     written = {}
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         written.update(path=path, content=content)
 
     async def fail_if_called(*a, **kw):
@@ -123,6 +123,31 @@ async def test_small_file_no_flags_uses_fast_path_no_capability_check(manager, s
     assert "Starting restore" in log_text
     assert "no guest-exec" in log_text
     assert "completed successfully" in log_text
+
+
+async def test_job_on_a_non_localhost_node_threads_it_through_every_guest_call(manager, session_data, monkeypatch):
+    # Issue #51: a job for a guest on another cluster node must pass that
+    # node - never the literal "localhost" - to every guest-scoped call
+    # it makes (write_guest_file here; run_guest_exec is covered by the
+    # Design B / metadata / verify tests, all of which go through the
+    # same job.node-aware _exec() helper).
+    job = _make_job(manager, session_data, node="pve2")
+    _patch_download(monkeypatch, b"127.0.0.1 localhost")
+    seen_nodes = []
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        seen_nodes.append(kwargs.get("node"))
+
+    async def fail_if_called(*a, **kw):
+        raise AssertionError("capability check should not run when no exec is needed")
+
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fail_if_called)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    assert seen_nodes == ["pve2"]
 
 
 async def test_oversized_file_fails_with_clear_message_when_no_exec_available(manager, session_data, monkeypatch):
@@ -154,7 +179,7 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     written_files = []
     exec_calls = []
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         written_files.append(path)
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -235,7 +260,7 @@ async def test_multi_chunk_write_reassembles_to_the_exact_original_bytes(manager
 
     written = []
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         written.append((path, wire_content))
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -264,7 +289,7 @@ async def test_progress_updates_incrementally_during_multi_chunk_write(manager, 
 
     seen_progress = []
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         seen_progress.append(job.progress_current)
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -296,7 +321,7 @@ async def test_multi_chunk_progress_total_is_exact_with_content_length(manager, 
 
     totals_during_write = []
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         totals_during_write.append(job.progress_total)
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -326,7 +351,7 @@ async def test_multi_chunk_progress_uses_job_source_size_when_no_content_length(
 
     totals = []
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         totals.append(job.progress_total)
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -348,7 +373,7 @@ async def test_multi_chunk_write_logs_a_percent_heartbeat(manager, session_data,
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -380,7 +405,7 @@ async def test_progress_total_includes_metadata_and_verify_units(manager, sessio
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -412,7 +437,7 @@ async def test_restore_metadata_runs_touch_on_linux(manager, session_data, monke
         exec_calls.append(argv)
         return 0, "", ""
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -439,7 +464,7 @@ async def test_restore_metadata_runs_powershell_on_windows(manager, session_data
         exec_calls.append(argv)
         return 0, "", ""
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -465,7 +490,7 @@ async def test_restore_metadata_without_mtime_is_a_no_op(manager, session_data, 
         # design_b available since restore_metadata=True triggers the exec path
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     exec_calls = []
@@ -497,7 +522,7 @@ async def test_verify_success_linux_marks_done(manager, session_data, monkeypatc
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     verify_call_kwargs = {}
@@ -532,7 +557,7 @@ async def test_verify_mismatch_marks_failed(manager, session_data, monkeypatch):
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -558,7 +583,7 @@ async def test_verify_windows_parses_certutil_output(manager, session_data, monk
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="windows")
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     certutil_output = (
@@ -619,7 +644,7 @@ async def test_design_c_unconfigured_falls_back_to_design_b_without_any_extra_ca
     async def fail_if_called(*a, **kw):
         raise AssertionError("Design C is unconfigured - should never probe the guest's network or a fetch tool")
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     exec_calls = []
@@ -650,10 +675,10 @@ async def test_design_c_no_subnet_match_falls_back_to_design_b(manager, session_
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["192.168.1.50"]  # doesn't match the configured 10.0.5.0/24
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     exec_calls = []
@@ -682,10 +707,10 @@ async def test_design_c_no_fetch_tool_falls_back_to_design_b(manager, session_da
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     exec_calls = []
@@ -717,10 +742,10 @@ async def test_design_c_used_when_nic_and_tool_are_both_available(manager, sessi
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     exec_calls = []
@@ -778,10 +803,10 @@ async def test_design_c_with_verify_hashes_the_drained_stream_correctly(manager,
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -819,10 +844,10 @@ async def test_design_c_fetch_failure_fails_the_job_rather_than_falling_back(man
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -859,10 +884,10 @@ async def _run_dnt_with_curl(manager, session_data, monkeypatch, curl_argv_sink)
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -906,10 +931,10 @@ async def _run_dnt_curl_seq(manager, session_data, monkeypatch, curl_results):
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -984,10 +1009,10 @@ async def _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls):
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1036,10 +1061,10 @@ async def _run_dnt_verify_ca(manager, session_data, monkeypatch, *, update_exit=
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         written.append((path, content))
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1127,7 +1152,7 @@ async def test_cancel_mid_multi_chunk_write_still_cleans_up_scratch(manager, ses
 
     write_count = 0
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         nonlocal write_count
         write_count += 1
         if write_count == 2:
@@ -1176,7 +1201,7 @@ async def test_pve_error_during_write_marks_failed(manager, session_data, monkey
     job = _make_job(manager, session_data)
     _patch_download(monkeypatch, b"small")
 
-    async def fake_write_guest_file(session, guest_type, vmid, path, content):
+    async def fake_write_guest_file(session, guest_type, vmid, path, content, **kwargs):
         raise httpx.HTTPStatusError(
             "x",
             request=httpx.Request("POST", "http://x"),
@@ -1214,7 +1239,7 @@ async def test_scratch_cleanup_failure_does_not_mask_a_successful_restore(manage
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, content):
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
 
     async def flaky_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1311,7 +1336,7 @@ async def test_bundle_restore_happy_path(manager, session_data, monkeypatch, tmp
     written = []
     exec_calls = []
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         written.append((path, wire_content))
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1367,7 +1392,7 @@ async def test_bundle_restore_happy_path_windows_zip_fallback(manager, session_d
 
     exec_calls = []
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1421,7 +1446,7 @@ async def test_bundle_restore_progress_total_reflects_real_chunk_count_from_the_
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         if "probe" not in path:  # skip the earlier tar.zst capability-probe write
             seen_totals_during_write.append(job.progress_total)
 
@@ -1485,7 +1510,7 @@ async def test_bundle_restore_logs_and_tracks_progress_during_build(manager, ses
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1546,7 +1571,7 @@ async def test_bundle_restore_progress_stays_none_without_content_length(manager
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1589,7 +1614,7 @@ async def test_bundle_restore_uses_direct_network_transfer_when_available(manage
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_ips(session, guest_type, vmid):
+    async def fake_ips(session, guest_type, vmid, **kwargs):
         return ["10.0.5.42"]
 
     written = []
@@ -1597,7 +1622,7 @@ async def test_bundle_restore_uses_direct_network_transfer_when_available(manage
     manifest_cleanup_calls = []
     progress_after_fetch = None
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         written.append(path)  # only the tar.zst probe write should land here, never bundle chunks
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1682,7 +1707,7 @@ async def test_bundle_restore_extract_failure_fails_the_job(manager, session_dat
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1714,7 +1739,7 @@ async def test_bundle_restore_verify_failure_fails_the_job_not_silently(manager,
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(guest_os_family="linux")
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
@@ -1763,7 +1788,7 @@ async def test_bundle_restore_cleans_up_scratch_and_temp_dir_on_failure(manager,
 
     rmdir_calls = []
 
-    async def fake_write(session, guest_type, vmid, path, wire_content):
+    async def fake_write(session, guest_type, vmid, path, wire_content, **kwargs):
         pass
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):

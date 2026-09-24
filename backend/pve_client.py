@@ -5,12 +5,19 @@ listing - everything the app needs now comes from PVE alone (docs/plan.md
 (`Cookie: PVEAuthCookie=...` + `CSRFPreventionToken`), rather than a
 static service-account token.
 
-Contract confirmed in docs/plan.md §3: the node segment is always the
-literal string "localhost" regardless of the real hostname; filepath is
-the literal string "/" for root and base64 for anything deeper. The
-list response already hands back ready-to-use base64 filepath tokens
-for each entry, so callers should treat filepath as an opaque token
-from the API rather than re-deriving it from a display path.
+Contract confirmed in docs/plan.md §3: storage-scoped calls
+(file-restore/*, storage/{id}/content, storage list) always use the
+literal node segment "localhost" - PVE proxies those cluster-wide
+regardless of which node actually holds the guest, so this is correct
+even on a multi-node cluster. Guest-scoped calls (agent/*, /config) are
+different: PVE resolves "localhost" to *the node serving the request*,
+not the guest's own node, so those need the guest's real node -
+resolve_guest_node() below, threaded through as the `node` kwarg
+(issue #51). filepath is the literal string "/" for root and base64 for
+anything deeper. The list response already hands back ready-to-use
+base64 filepath tokens for each entry, so callers should treat filepath
+as an opaque token from the API rather than re-deriving it from a
+display path.
 """
 import asyncio
 import logging
@@ -60,7 +67,7 @@ def check_path_safe(path: str) -> None:
 # App-internal guest type ("vm"/"ct", the second volid path segment - see
 # the docstring above) vs. PVE's actual API node-path segment ("qemu"/
 # "lxc", confirmed live against a real guest - docs/plan.md §7.5). PH.5's
-# guest-agent calls hit /nodes/localhost/{qemu|lxc}/{vmid}/... directly,
+# guest-agent calls hit /nodes/{node}/{qemu|lxc}/{vmid}/... directly,
 # so every such call needs this translated first - everywhere else in the
 # app (grouping, the task picker, display) stays in "vm"/"ct" throughout.
 API_NODE_TYPE = {"vm": "qemu", "ct": "lxc"}
@@ -73,6 +80,18 @@ def api_node_type(guest_type: str) -> str:
         raise ValueError(f"Unknown guest type: {guest_type}") from None
 
 
+async def _cluster_guests(session: SessionData) -> list[dict]:
+    """Raw /cluster/resources?type=vm entries - each has (at least) `vmid`,
+    `node`, and, when the caller can see it, `name`. Shared by
+    list_guest_names() (display names) and resolve_guest_node() (issue
+    #51 - the node segment a guest-scoped call needs on a multi-node
+    cluster), so both come from one API call rather than two."""
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        resp = await client.get(f"{_API_ROOT}/cluster/resources", params={"type": "vm"}, headers=pve_headers(session))
+        resp.raise_for_status()
+        return resp.json()["data"]
+
+
 async def list_guest_names(session: SessionData) -> dict[str, str]:
     """Best-effort vmid -> guest name map from /cluster/resources. This
     endpoint has no explicit privilege gate (allowtoken, permissions:
@@ -81,10 +100,30 @@ async def list_guest_names(session: SessionData) -> dict[str, str]:
     no VM.Audit) may get entries back with no 'name' field. Callers should
     treat a missing/absent name as "unknown", not an error.
     """
-    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
-        resp = await client.get(f"{_API_ROOT}/cluster/resources", params={"type": "vm"}, headers=pve_headers(session))
-        resp.raise_for_status()
-        return {str(item["vmid"]): item["name"] for item in resp.json()["data"] if item.get("name")}
+    return {str(item["vmid"]): item["name"] for item in await _cluster_guests(session) if item.get("name")}
+
+
+async def resolve_guest_node(session: SessionData, vmid: str) -> str:
+    """The real node a guest lives on (issue #51) - every guest-scoped
+    call (agent/*, /config) needs this instead of the literal
+    "localhost", since PVE resolves "localhost" to *the node serving the
+    request*, not the guest's own node. Storage-scoped calls
+    (file-restore/*, storage/{id}/content) are unaffected and stay on
+    "localhost" - PVE already proxies those cluster-wide.
+
+    Falls back to "localhost" when the guest isn't found (already
+    migrated away, or a filtered response from an account without
+    Sys.Audit on /cluster/resources) or the call itself fails - this
+    preserves today's single-node behaviour exactly and degrades safely
+    rather than raising, since callers use this to build a URL, not to
+    gate access."""
+    try:
+        for item in await _cluster_guests(session):
+            if str(item.get("vmid")) == str(vmid) and item.get("node"):
+                return item["node"]
+    except (httpx.HTTPError, KeyError, TypeError):
+        pass
+    return "localhost"
 
 
 @dataclass
@@ -213,7 +252,9 @@ async def list_path(session: SessionData, volume: str, filepath: str = "/") -> l
         return resp.json()["data"]
 
 
-async def write_guest_file(session: SessionData, guest_type: str, vmid: str, path: str, content: str) -> None:
+async def write_guest_file(
+    session: SessionData, guest_type: str, vmid: str, path: str, content: str, *, node: str = "localhost"
+) -> None:
     """One `agent/file-write` call (PH.5, docs/plan.md §7.5) - a genuine
     one-shot: no handle/offset, truncates and overwrites whatever was at
     `path`. `content` must already be the wire-ready string
@@ -221,6 +262,9 @@ async def write_guest_file(session: SessionData, guest_type: str, vmid: str, pat
     against a real guest to round-trip losslessly - NOT base64, which
     this endpoint does not decode). `guest_type` is the app-internal
     "vm"/"ct" value - translated to PVE's "qemu"/"lxc" node segment here.
+    `node` is the guest's real PVE node (issue #51, pve_client.resolve_guest_node) -
+    defaults to "localhost", which still works for a single-node setup or
+    a guest that happens to live on the API node.
     Runs under guest_agent_lock's per-vmid lock (serializes this app's own
     overlapping requests) and retries via call_with_retries (rides out a
     legitimate busy response from something else using the same channel -
@@ -231,7 +275,7 @@ async def write_guest_file(session: SessionData, guest_type: str, vmid: str, pat
 
     async def do_write():
         resp = await client.post(
-            f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/file-write",
+            f"{_API_ROOT}/nodes/{node}/{node_type}/{vmid}/agent/file-write",
             data={"file": path, "content": content},
             headers=pve_headers(session),
         )
@@ -249,11 +293,20 @@ class GuestExecTimeout(RuntimeError):
 
 
 async def run_guest_exec(
-    session: SessionData, guest_type: str, vmid: str, argv: list[str], timeout_seconds: float = 15.0
+    session: SessionData,
+    guest_type: str,
+    vmid: str,
+    argv: list[str],
+    timeout_seconds: float = 15.0,
+    *,
+    node: str = "localhost",
 ) -> tuple[int, str, str]:
     """Runs one guest-exec command to completion (polling exec-status) and
     returns (exitcode, stdout, stderr). `guest_type` is the app-internal
     "vm"/"ct" value, translated here like every other guest-agent call.
+    `node` is the guest's real PVE node (issue #51, pve_client.resolve_guest_node) -
+    defaults to "localhost" for a single-node setup or a guest that
+    happens to live on the API node.
 
     The whole exec-then-poll sequence runs under guest_agent_lock's
     per-vmid lock (see that module) - the exec-status polls are
@@ -283,7 +336,7 @@ async def run_guest_exec(
 
     async def start():
         resp = await client.post(
-            f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/exec",
+            f"{_API_ROOT}/nodes/{node}/{node_type}/{vmid}/agent/exec",
             data={"command": argv},
             headers=headers,
         )
@@ -301,7 +354,7 @@ async def run_guest_exec(
         for _ in range(max_polls):
             try:
                 status_resp = await client.get(
-                    f"{_API_ROOT}/nodes/localhost/{node_type}/{vmid}/agent/exec-status",
+                    f"{_API_ROOT}/nodes/{node}/{node_type}/{vmid}/agent/exec-status",
                     params={"pid": pid},
                     headers=headers,
                 )

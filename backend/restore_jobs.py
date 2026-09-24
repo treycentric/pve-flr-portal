@@ -59,6 +59,12 @@ class RestoreJob:
     source_filepath: str  # opaque file-restore filepath token (docs/plan.md §3) - unused for a bundle job
     source: str  # display path within the backup, or "N item(s)" for a bundle job
     destination: str  # single-file job: dest_dir + filename. Bundle job: the target directory itself.
+    # The guest's real PVE node (issue #51) - every guest-scoped call this
+    # job makes (guest-exec, agent/file-write) targets this instead of the
+    # literal "localhost", which PVE resolves to the API-serving node, not
+    # the guest's own. Defaults to "localhost" so an unresolved/single-node
+    # setup keeps working exactly as before.
+    node: str = "localhost"
     # Multi-file/directory restore (docs/plan.md §7.7, issue #24). None
     # (the default, and every job created before this existed) means an
     # ordinary single-file job - source_filepath/source/destination keep
@@ -179,6 +185,7 @@ class RestoreJobManager:
         source_filepath: str,
         source: str,
         destination: str,
+        node: str = "localhost",
         items: list[BundleItem] | None = None,
         restore_metadata: bool = False,
         verify: bool = False,
@@ -195,6 +202,7 @@ class RestoreJobManager:
             requested_by=session.username,
             guest_type=guest_type,
             vmid=vmid,
+            node=node,
             guest_label=guest_label,
             task_name=task_name,
             snapshot_time=snapshot_time,

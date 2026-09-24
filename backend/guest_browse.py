@@ -23,12 +23,15 @@ class ListingError(RuntimeError):
     pass
 
 
-async def _run_exec(session: SessionData, guest_type: str, vmid: str, argv: list[str]) -> tuple[int, str, str]:
+async def _run_exec(
+    session: SessionData, guest_type: str, vmid: str, argv: list[str], node: str
+) -> tuple[int, str, str]:
     """Thin wrapper around pve_client.run_guest_exec translating its
     timeout into this module's own ListingError, so callers below don't
-    need their own try/except at every call site."""
+    need their own try/except at every call site. `node` is the guest's
+    real PVE node (issue #51)."""
     try:
-        return await run_guest_exec(session, guest_type, vmid, argv)
+        return await run_guest_exec(session, guest_type, vmid, argv, node=node)
     except GuestExecTimeout as exc:
         raise ListingError(str(exc)) from exc
 
@@ -69,11 +72,19 @@ def _friendlier_windows_listing_error(path: str, raw_message: str) -> str:
 
 
 async def list_directories(
-    session: SessionData, guest_type: str, vmid: str, guest_os_family: str | None, path: str | None
+    session: SessionData,
+    guest_type: str,
+    vmid: str,
+    guest_os_family: str | None,
+    path: str | None,
+    *,
+    node: str = "localhost",
 ) -> dict:
     """{"path", "parent", "separator", "entries": [{"name", "path"}, ...]}.
     `path` of None/"" means "show the top level" - drives on Windows,
-    "/" on everything else."""
+    "/" on everything else. `node` is the guest's real PVE node (issue
+    #51, normally resolved by guest_agent.get_restore_capabilities and
+    passed in as caps.node)."""
     is_windows = guest_os_family == "windows"
     sep = "\\" if is_windows else "/"
 
@@ -97,6 +108,7 @@ async def list_directories(
                     "powershell", "-NoProfile", "-NonInteractive", "-Command",
                     "Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root",
                 ],
+                node,
             )
             if exitcode != 0:
                 raise ListingError(err.strip() or out.strip() or f"Listing failed (exit {exitcode})")
@@ -131,7 +143,7 @@ async def list_directories(
             "Select-Object -ExpandProperty Name } catch { Write-Error $_; exit 1 }"
         )
         exitcode, out, err = await _run_exec(
-            session, guest_type, vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
+            session, guest_type, vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], node
         )
         if exitcode != 0:
             raw = err.strip() or out.strip() or f"Listing failed (exit {exitcode})"
@@ -143,7 +155,7 @@ async def list_directories(
 
     target = path or "/"
     exitcode, out, err = await _run_exec(
-        session, guest_type, vmid, ["find", target, "-mindepth", "1", "-maxdepth", "1", "-type", "d"]
+        session, guest_type, vmid, ["find", target, "-mindepth", "1", "-maxdepth", "1", "-type", "d"], node
     )
     if exitcode != 0:
         raise ListingError(err.strip() or out.strip() or f"Listing failed (exit {exitcode})")
