@@ -122,6 +122,88 @@ async def login_submit(
     return response
 
 
+@app.get("/login/oidc/callback")
+async def login_oidc_callback(
+    request: Request,
+    code: str | None = Query(None),
+    state: str | None = Query(None),
+    error: str | None = Query(None),
+    error_description: str | None = Query(None),
+):
+    """Issue #56, leg 2: the identity provider's redirect back. Registered
+    *before* login_oidc_start's `/login/oidc/{realm}` below - Starlette
+    matches routes in registration order, and a `{realm}` path parameter
+    would otherwise swallow this literal path first (matching with
+    realm="callback"), confirmed live by this route's own tests.
+
+    A denied/cancelled login or a misconfigured client comes back as
+    `error` (standard OAuth2), not `code`/`state` - handled explicitly
+    here rather than letting a missing `code` fall through as an
+    unhandled 422/KeyError."""
+    if error or not (code and state):
+        realms = await auth.list_realms()
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "error": f"SSO login failed: {error_description or error or 'no authorization code returned'}",
+                "notice": None,
+                "realms": realms,
+            },
+            status_code=401,
+        )
+    redirect_url = str(request.url_for("login_oidc_callback"))
+    try:
+        session_id = await auth.oidc_login(state, code, redirect_url)
+    except (HTTPException, httpx.HTTPError):
+        realms = await auth.list_realms()
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "SSO login failed - the identity provider rejected it.", "notice": None, "realms": realms},
+            status_code=401,
+        )
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        "session_id",
+        session_id,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        max_age=60 * 60 * 24,
+    )
+    return response
+
+
+@app.get("/login/oidc/{realm}")
+async def login_oidc_start(realm: str, request: Request):
+    """Issue #56, leg 1: redirects the browser to the identity provider.
+    `redirect_url` is computed from this same route both here and in
+    login_oidc_callback() above via `url_for` - since it's derived from
+    whatever host/scheme the browser actually used to reach this route,
+    it naturally matches on the way back without needing a hardcoded
+    public-URL setting. PVE forwards it to the identity provider as the
+    OAuth2 redirect_uri, so it must already be allow-listed there for
+    this realm's OIDC client (a one-time config step on the identity
+    provider, not something this app or PVE can do for you)."""
+    redirect_url = str(request.url_for("login_oidc_callback"))
+    try:
+        auth_url = await auth.oidc_auth_url(realm, redirect_url)
+    except (HTTPException, httpx.HTTPError):
+        realms = await auth.list_realms()
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "error": "Could not start SSO login - check the realm is a valid OpenID Connect realm on PVE.",
+                "notice": None,
+                "realms": realms,
+            },
+            status_code=502,
+        )
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
 @app.get("/logout")
 async def logout_route(request: Request):
     session_id = request.cookies.get("session_id")

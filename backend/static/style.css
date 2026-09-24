@@ -881,6 +881,19 @@ body {
   font-size: 14px;
 }
 
+/* Issue #56: wraps the username/password fields so Alpine's x-show can
+   hide them together for an OpenID Connect realm. `.login-box` is a
+   flex column that relies on each label/input being its own *direct*
+   child to stack full-width - a plain wrapper div would become one
+   flex item instead, and its label/input children would fall back to
+   their native inline display and sit side by side. `display: contents`
+   makes the wrapper generate no box of its own, so its children rejoin
+   the flex column exactly as if unwrapped, while x-show's inline
+   `display: none` still hides them all together when collapsed. */
+.login-password-fields {
+  display: contents;
+}
+
 .login-checkbox-row {
   display: flex;
   align-items: center;

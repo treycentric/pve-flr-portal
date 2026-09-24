@@ -878,6 +878,97 @@ def test_login_submit_success_sets_cookie(monkeypatch):
     assert "session_id=session-abc" in resp.headers["set-cookie"]
 
 
+def test_login_oidc_start_redirects_to_the_returned_auth_url(monkeypatch):
+    captured = {}
+
+    async def fake_auth_url(realm, redirect_url):
+        captured["realm"] = realm
+        captured["redirect_url"] = redirect_url
+        return "https://idp.example.com/authorize?client_id=x&state=y"
+
+    monkeypatch.setattr(auth, "oidc_auth_url", fake_auth_url)
+    with TestClient(main.app) as c:
+        resp = c.get("/login/oidc/keycloak", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "https://idp.example.com/authorize?client_id=x&state=y"
+    assert captured["realm"] == "keycloak"
+    assert captured["redirect_url"].endswith("/login/oidc/callback")
+
+
+def test_login_oidc_start_shows_an_error_when_pve_rejects_the_realm(monkeypatch):
+    from fastapi import HTTPException
+
+    async def fake_auth_url(realm, redirect_url):
+        raise HTTPException(status_code=401, detail="nope")
+
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "oidc_auth_url", fake_auth_url)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.get("/login/oidc/bogus")
+    assert resp.status_code == 502
+    assert "Could not start SSO login" in resp.text
+
+
+def test_login_oidc_callback_sets_cookie_on_success(monkeypatch):
+    captured = {}
+
+    async def fake_oidc_login(state, code, redirect_url):
+        captured["state"] = state
+        captured["code"] = code
+        captured["redirect_url"] = redirect_url
+        return "session-oidc-1"
+
+    monkeypatch.setattr(auth, "oidc_login", fake_oidc_login)
+    with TestClient(main.app) as c:
+        resp = c.get(
+            "/login/oidc/callback",
+            params={"state": "st1", "code": "cd1"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+    assert "session_id=session-oidc-1" in resp.headers["set-cookie"]
+    assert captured == {"state": "st1", "code": "cd1", "redirect_url": captured["redirect_url"]}
+    assert captured["redirect_url"].endswith("/login/oidc/callback")
+
+
+def test_login_oidc_callback_handles_identity_provider_denial(monkeypatch):
+    # Standard OAuth2 error response (user cancelled, misconfigured
+    # client) - `error`/`error_description`, not `code`/`state`. Must not
+    # 422/KeyError on a missing `code`.
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.get(
+            "/login/oidc/callback",
+            params={"error": "access_denied", "error_description": "user cancelled"},
+        )
+    assert resp.status_code == 401
+    assert "user cancelled" in resp.text
+
+
+def test_login_oidc_callback_fails_cleanly_when_pve_rejects_the_exchange(monkeypatch):
+    from fastapi import HTTPException
+
+    async def fake_oidc_login(state, code, redirect_url):
+        raise HTTPException(status_code=401, detail="nope")
+
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "oidc_login", fake_oidc_login)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.get("/login/oidc/callback", params={"state": "st1", "code": "cd1"})
+    assert resp.status_code == 401
+    assert "SSO login failed" in resp.text
+
+
 def test_logout_clears_cookie_and_session(session_data):
     auth._sessions["session-xyz"] = session_data
     with TestClient(main.app) as c:
