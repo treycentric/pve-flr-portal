@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See [`docs/dev/versioning.md`](docs/dev/versioning.md) for how entries
 here are generated from commit messages.
 
+## [1.5.0] - 2026-09-24
+
+### Added
+- **auth:** support OIDC/SSO realm login (#56) (89aadef)
+
+### Fixed
+- **restore:** resolve the guest's real node for guest-scoped PVE calls (#51) (4a02456)
+
 ## [1.4.0] - 2026-09-09
 
 ### Added
