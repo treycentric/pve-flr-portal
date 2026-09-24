@@ -71,7 +71,7 @@ async def _exec(job: RestoreJob, argv: list[str], timeout_seconds: float | None 
     explicitly for a call whose duration scales with file size (see
     that setting's docstring)."""
     kwargs = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
-    return await pve_client.run_guest_exec(job.session, job.guest_type, job.vmid, argv, **kwargs)
+    return await pve_client.run_guest_exec(job.session, job.guest_type, job.vmid, argv, node=job.node, **kwargs)
 
 
 async def _create_scratch_dir(job: RestoreJob, guest_os_family: str | None, scratch_dir: str) -> None:
@@ -188,7 +188,7 @@ async def _write_chunks_to_scratch(
         chunk_path = scratch_dir + sep + scratch_filename(job.id, index)
         await ensure_fresh_ticket(job.session)
         await pve_client.write_guest_file(
-            job.session, job.guest_type, job.vmid, chunk_path, bytes_to_wire_str(piece)
+            job.session, job.guest_type, job.vmid, chunk_path, bytes_to_wire_str(piece), node=job.node
         )
         paths.append(chunk_path)
         job.progress_current += 1
@@ -317,7 +317,7 @@ async def _ensure_guest_trusts_ca(job: RestoreJob, guest_os_family: str | None) 
             job.log("Guest already trusts the data-plane CA.")
             return True
         scratch = guest_ca.windows_scratch_path(thumb[:12])
-        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, scratch, pem)
+        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, scratch, pem, node=job.node)
         code, out, err = await _exec(job, guest_ca.windows_install_argv(scratch))
         await _exec(job, guest_ca.windows_cleanup_argv(scratch))  # best effort
         if code != 0:
@@ -336,7 +336,7 @@ async def _ensure_guest_trusts_ca(job: RestoreJob, guest_os_family: str | None) 
         if only_if_missing and (await _exec(job, ["test", "-f", anchor]))[0] == 0:
             job.log("Guest already has the data-plane CA anchor file.")
             return True
-        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, anchor, pem)
+        await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, anchor, pem, node=job.node)
         code, out, err = await _exec(job, guest_ca.linux_update_argv(has_update_ca_certificates=has_deb))
         if code != 0:
             job.log(f"Could not refresh the guest CA trust store: {(err or out).strip()}")
@@ -420,7 +420,7 @@ async def _try_direct_network_transfer(
         )
         return False
 
-    guest_ips = await guest_agent.get_guest_ip_addresses(job.session, job.guest_type, job.vmid)
+    guest_ips = await guest_agent.get_guest_ip_addresses(job.session, job.guest_type, job.vmid, node=job.node)
     nic = restore_network_pull.select_data_nic(guest_ips, data_nics)
     if nic is None:
         job.log("Direct Network Transfer not available: no configured data NIC matches this guest's subnet.")
@@ -705,7 +705,7 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
 
         async def _write_fn(path: str, content: str) -> None:
             await ensure_fresh_ticket(job.session)
-            await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, path, content)
+            await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, path, content, node=job.node)
 
         zst_capable = await restore_bundle.probe_tar_zst_support(_write_fn, lambda argv: _exec(job, argv), probe_path)
         job.log(f"Guest can decompress .tar.zst directly: {zst_capable}.")
@@ -945,7 +945,8 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     job.log("Fits in one call and no metadata/verify requested - writing directly, no guest-exec.")
                     await ensure_fresh_ticket(job.session)
                     await pve_client.write_guest_file(
-                        job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece)
+                        job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece),
+                        node=job.node,
                     )
                     job.progress_current = 1
                     jobs.mark_done(job.id)
@@ -983,7 +984,8 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     hasher.update(first_piece)
                 await ensure_fresh_ticket(job.session)
                 await pve_client.write_guest_file(
-                    job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece)
+                    job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece),
+                    node=job.node,
                 )
                 job.progress_current += 1
                 job.log("Wrote the file directly (single chunk, exec still needed for a later step).")

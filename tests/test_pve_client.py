@@ -92,6 +92,60 @@ async def test_run_guest_exec_honors_a_longer_explicit_timeout(session_data, mon
     assert len(polls) == 10  # 5.0s / 0.5s poll interval - not the ~15s (30-poll) default
 
 
+@respx.mock
+async def test_run_guest_exec_honors_a_non_localhost_node(session_data):
+    # Issue #51: a guest on another cluster node needs its own node in
+    # the URL, not the literal "localhost" (which PVE resolves to the
+    # node serving the request).
+    respx.post(f"{API}/nodes/pve2/qemu/133/agent/exec").mock(
+        return_value=httpx.Response(200, json={"data": {"pid": 1}})
+    )
+    respx.get(f"{API}/nodes/pve2/qemu/133/agent/exec-status").mock(
+        return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "hi", "err-data": ""}})
+    )
+    exitcode, out, err = await pve_client.run_guest_exec(session_data, "vm", "133", ["echo", "hi"], node="pve2")
+    assert (exitcode, out, err) == (0, "hi", "")
+
+
+@respx.mock
+async def test_write_guest_file_honors_a_non_localhost_node(session_data):
+    route = respx.post(f"{API}/nodes/pve2/qemu/133/agent/file-write").mock(return_value=httpx.Response(200))
+    await pve_client.write_guest_file(session_data, "vm", "133", "/tmp/x", "content", node="pve2")
+    assert route.called
+
+
+@respx.mock
+async def test_resolve_guest_node_returns_the_guests_real_node(session_data):
+    respx.get(f"{API}/cluster/resources", params={"type": "vm"}).mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"vmid": 111, "node": "pve1", "name": "a"}, {"vmid": 133, "node": "pve2", "name": "b"}]}
+        )
+    )
+    assert await pve_client.resolve_guest_node(session_data, "133") == "pve2"
+
+
+@respx.mock
+async def test_resolve_guest_node_falls_back_to_localhost_when_vmid_missing(session_data):
+    respx.get(f"{API}/cluster/resources", params={"type": "vm"}).mock(
+        return_value=httpx.Response(200, json={"data": [{"vmid": 111, "node": "pve1", "name": "a"}]})
+    )
+    assert await pve_client.resolve_guest_node(session_data, "133") == "localhost"
+
+
+@respx.mock
+async def test_resolve_guest_node_falls_back_to_localhost_on_403(session_data):
+    # An account without Sys.Audit on /cluster/resources - degrades
+    # safely to today's single-node behaviour rather than raising.
+    respx.get(f"{API}/cluster/resources", params={"type": "vm"}).mock(return_value=httpx.Response(403))
+    assert await pve_client.resolve_guest_node(session_data, "133") == "localhost"
+
+
+@respx.mock
+async def test_resolve_guest_node_falls_back_to_localhost_when_unreachable(session_data):
+    respx.get(f"{API}/cluster/resources", params={"type": "vm"}).mock(side_effect=httpx.ConnectError("no route"))
+    assert await pve_client.resolve_guest_node(session_data, "133") == "localhost"
+
+
 async def _noop():
     return None
 

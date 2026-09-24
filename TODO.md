@@ -54,9 +54,6 @@ commit.
   Windows. Design + shakeout log: `docs/plan.md` §7.6.1. Remaining:
   squash-merge + version bump. Deferred follow-ups: `openssl s_client`
   POSIX candidate; `UNINSTALL_CA_AFTER`; `bitsadmin` over HTTPS.
-- #51 — restore-to-guest fails for a guest on another cluster node
-  (guest-scoped PVE calls hard-code `nodes/localhost`). Design in the
-  issue; not started.
 - #52 — bake certbot + a DNS-01 plugin into the LXC/Docker build, with a
   renewal deploy hook and a first-run helper. Design in the issue.
 

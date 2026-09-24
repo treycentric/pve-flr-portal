@@ -2236,11 +2236,23 @@ architectural purity.
   switches away from PBS, or a datastore that goes offline, takes the
   whole app's data source with it. There is no vzdump fallback and
   can't cheaply be one.
-- **`localhost` node segment.** `file-restore/list` is called with the
-  literal node name `localhost` (§3, confirmed). Fine for the current
-  single-node target; a multi-node cluster where backups/guests live on
-  a named node other than the one serving the API would need the real
-  node name resolved per guest.
+- **`localhost` node segment.** Storage-scoped calls (`file-restore/*`,
+  `storage/{id}/content`, `storage` list) are always called with the
+  literal node name `localhost` (§3, confirmed) — PVE proxies these
+  cluster-wide regardless of which node actually holds the guest, so
+  this is correct on a multi-node cluster too, not just the single-node
+  target. Guest-scoped calls (`agent/*`, `/config`) used to hard-code
+  the same literal, which broke restore-to-guest for any guest not on
+  the API node — PVE resolves `localhost` to *the node serving the
+  request*, not the guest's own. **Fixed in issue #51**:
+  `pve_client.resolve_guest_node()` looks the guest's real node up via
+  `/cluster/resources` and threads it through every guest-scoped call
+  (`RestoreCapabilities.node`, `RestoreJob.node`), falling back to
+  `"localhost"` when resolution fails or isn't needed (single-node
+  setups, or an account without `Sys.Audit` on `/cluster/resources`) —
+  no behaviour change there. A guest that migrates mid-restore is still
+  not handled (the resolved node goes stale; the job fails cleanly and
+  can be re-run) — not a supported scenario.
 
 ### 9.1 Scaling & limits
 
