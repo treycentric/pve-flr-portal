@@ -241,15 +241,64 @@ async def list_backup_archives(session: SessionData) -> "BackupListing":
     return listing
 
 
+_list_semaphore = asyncio.Semaphore(settings.file_restore_list_max_concurrency)
+_inflight_list_calls: dict[tuple[str, str, str], "asyncio.Task[list[dict]]"] = {}
+
+
 async def list_path(session: SessionData, volume: str, filepath: str = "/") -> list[dict]:
-    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client:
-        resp = await client.get(
-            f"{_file_restore_base(volume)}/list",
-            params={"volume": volume, "filepath": filepath},
-            headers=pve_headers(session),
-        )
-        resp.raise_for_status()
-        return resp.json()["data"]
+    """Issue #60: a cold `file-restore/list` call boots an ephemeral
+    helper VM on the PVE node, and PVE exposes no API to cap or tear
+    those down directly (docs/plan.md §9.1 "Helper-VM stampede") - so
+    this throttles/coalesces the calls this app makes instead:
+      - `_list_semaphore` caps how many calls are in flight to PVE at
+        once (FILE_RESTORE_LIST_MAX_CONCURRENCY); callers beyond the cap
+        queue rather than fail, so a fast timeline drag-scrub gets
+        serialized, not rejected.
+      - `_inflight_list_calls` coalesces exact-duplicate concurrent
+        requests (same user, volume, and path - e.g. two scrub events
+        landing on the same snapshot before the first response comes
+        back) into one outbound call. Keyed by `session.username`, not
+        just `(volume, filepath)`: file-restore access is permission-
+        gated per PVE ticket, so sharing a result across two different
+        users' sessions would let a second user see data PVE never
+        actually authorized for them.
+    `asyncio.shield` keeps a caller's own cancellation (e.g. the browser
+    request disconnecting) from cancelling the underlying task while
+    other callers may still be waiting on it.
+    """
+    key = (session.username, volume, filepath)
+    task = _inflight_list_calls.get(key)
+    if task is None:
+        task = asyncio.ensure_future(_fetch_list(session, volume, filepath))
+        _inflight_list_calls[key] = task
+
+        def _forget(_: "asyncio.Task[list[dict]]", key: tuple[str, str, str] = key) -> None:
+            if _inflight_list_calls.get(key) is task:
+                del _inflight_list_calls[key]
+
+        task.add_done_callback(_forget)
+    return await asyncio.shield(task)
+
+
+async def _fetch_list(session: SessionData, volume: str, filepath: str) -> list[dict]:
+    async with _list_semaphore:
+        async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=30.0) as client:
+            resp = await client.get(
+                f"{_file_restore_base(volume)}/list",
+                params={"volume": volume, "filepath": filepath},
+                headers=pve_headers(session),
+            )
+            resp.raise_for_status()
+            return resp.json()["data"]
+
+
+def clear_list_path_state() -> None:
+    """Test-only: drops tracked in-flight list_path() calls and rebuilds
+    the semaphore, same leak-between-tests/event-loop convention as
+    guest_agent_lock.clear()."""
+    global _list_semaphore
+    _inflight_list_calls.clear()
+    _list_semaphore = asyncio.Semaphore(settings.file_restore_list_max_concurrency)
 
 
 async def write_guest_file(

@@ -95,11 +95,10 @@ wasn't built for.
   (including auth) while it compresses. Single-file `/api/download` is
   unaffected (it streams). Fix: stream the archive as it's built; move
   compression to a thread via `run_in_executor`.
-- [ ] **No request coalescing/throttle on `file-restore/list` calls** —
-  drag-scrubbing the timeline can fire many cold lookups fast, each
-  booting a helper VM on the PVE node; two users on different guests
-  compounds it. Fix: cap in-flight calls, dedupe identical ones.
-  (Mostly moot once PH.6's cache lands.)
+- [x] **No request coalescing/throttle on `file-restore/list` calls** —
+  fixed in #60: `pve_client.list_path()` caps in-flight calls
+  (`FILE_RESTORE_LIST_MAX_CONCURRENCY`) and coalesces identical
+  concurrent requests per-user. (Mostly moot once PH.6's cache lands.)
 - [ ] **No pagination on huge directories** (Maildir, `node_modules`,
   WinSxS-scale folders) — full listing renders into one HTML partial
   and gets sorted/filtered entirely in JS. Fix: paginate or virtualize

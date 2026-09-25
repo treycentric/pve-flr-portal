@@ -225,6 +225,18 @@ class Settings:
     # can still switch themes from the user menu.
     default_theme: str
 
+    # Issue #60: caps how many `file-restore/list` calls this app has
+    # in flight to PVE at once. Each cold call boots an ephemeral helper
+    # VM on the PVE node (~3s, docs/plan.md §3) - Proxmox exposes no API
+    # to list or stop those VMs directly (they're not visible as regular
+    # guests and self-terminate on PVE's own internal idle timeout), so
+    # the only lever this app has is limiting how many it triggers.
+    # Concurrent callers queue for a slot rather than failing - a fast
+    # timeline drag-scrub gets serialized, not rejected. Paired with
+    # in-flight request coalescing (pve_client.list_path) for the exact-
+    # duplicate case (two scrubs landing on the same snapshot+path).
+    file_restore_list_max_concurrency: int
+
     # Issue #30: one writable directory for the app's own small, durable
     # state. Nothing writes here yet - it exists so the features that
     # will need persistence (#29's per-user prefs, #14's session store,
@@ -276,6 +288,7 @@ settings = Settings(
     tls_cert_file=_get("TLS_CERT_FILE", "certs/portal.crt"),
     tls_key_file=_get("TLS_KEY_FILE", "certs/portal.key"),
     guest_agent_min_command_gap_seconds=_float("GUEST_AGENT_MIN_COMMAND_GAP_SECONDS", 0.0),
+    file_restore_list_max_concurrency=_int("FILE_RESTORE_LIST_MAX_CONCURRENCY", 4),
     restore_data_nics_json=_get("RESTORE_DATA_NICS", "[]"),
     restore_download_token_ttl_seconds=_float("RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS", 120.0),
     restore_data_nic_port=_int("RESTORE_DATA_NIC_PORT", 0),
