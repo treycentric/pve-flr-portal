@@ -76,6 +76,44 @@ async def test_windows_partition_resolves_to_drive_letter(session_data, monkeypa
 
 
 @respx.mock
+async def test_flattened_partition_resolves_to_drive_letter(session_data, monkeypatch):
+    """Issue #66 regression: a disk whose `part` folder was flattened
+    away (the common case - `part` was its only child) has no literal
+    "part" crumb at all, just the partition number directly under the
+    disk. This used to fall through to "unavailable" until this shape
+    was recognized too."""
+
+    async def fake_list_path(session, volume, filepath="/"):
+        return [{"text": "disk0", "leaf": False, "filepath": "d0"}]
+
+    monkeypatch.setattr(gol, "list_path", fake_list_path)
+    _mock_exec("D\n")
+    result = await gol.resolve_original_directory(
+        session_data, "133", "windows", "localhost", "vol", _crumbs("disk0", "3", "Users", "alice")
+    )
+    assert result.available is True
+    assert result.directory == "D:\\Users\\alice"
+    sent = unquote_plus(_exec_route().calls.last.request.content.decode())
+    assert "PartitionNumber 3" in sent
+
+
+@respx.mock
+async def test_elevated_lvm_resolves_via_vg_lv_crumb(session_data):
+    """Issue #66 regression: LVM volume groups are elevated to root-level
+    "LVM <vg>" entries - browsing into one lands directly on its logical
+    volumes, with no disk/`lvm` crumb prefix at all anymore. This used to
+    fall through to "unavailable" until this shape was recognized too."""
+    _mock_exec("/home\n")
+    result = await gol.resolve_original_directory(
+        session_data, "133", "linux", "localhost", "vol", _crumbs("LVM rlm", "home", "alice")
+    )
+    assert result.available is True
+    assert result.directory == "/home/alice"
+    sent = unquote_plus(_exec_route().calls.last.request.content.decode())
+    assert "/dev/rlm/home" in sent
+
+
+@respx.mock
 async def test_windows_partition_with_no_drive_letter_is_unavailable(session_data, monkeypatch):
     async def fake_list_path(session, volume, filepath="/"):
         return [{"text": "disk0", "leaf": False, "filepath": "d0"}]
