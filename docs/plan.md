@@ -1111,6 +1111,25 @@ entry points at. Two reasons this matters, both raised in review:
     logic — worth a special eye during review until this has been
     confirmed against a real multi-bus-type guest.
 
+    **Real-world finding (2026-09-25): broke on its own first real use,
+    fixed same day.** `guest_original_location.py` was written against
+    the *raw* `part`/`lvm` disk structure, but issue #66 (LVM elevation
+    + `part`-flattening) landed in `main.py` in the same session, *after*
+    this module was designed against the pre-#66 shape — so every crumb
+    trail a real user could actually produce through the current UI
+    stopped matching what this parser expected, and it fell through to
+    "can't determine the original location" unconditionally. Confirmed
+    live against a real Linux/LVM guest. Fixed by recognizing all three
+    shapes `resolve_original_directory` can now actually see: elevated
+    LVM (`LVM <vg>/<lv>/...`, no disk/`lvm` prefix at all anymore),
+    flattened partition (`<disk>/<N>/...`, no literal `part` crumb when
+    it was the disk's only child — the common case), and unflattened
+    partition (`<disk>/part/<N>/...`, kept as a defensive fallback for
+    when something else sits alongside `part`). Lesson: a follow-on
+    change that reinterprets crumb-trail *shape* needs to be checked
+    against every other feature that parses that same shape, not just
+    the browse/tree endpoints it was written for.
+
     **Real-world finding (2026-09-02):** the Windows subfolder listing
     initially used `cmd /c dir <path> /b /ad` (bare names only), which
     can't distinguish a real directory from a reparse point - clicking

@@ -13,12 +13,13 @@ nothing to resolve for one.
 The file-restore browser only ever exposes a path *within* a partition
 (or, for LVM, within a logical volume) - drive letters and Linux
 mountpoints are guest-side state nothing in the backup itself records
-(docs/plan.md §3's confirmed disk/part/lvm structure: a disk's own
-listing is always `part/<N>/...` or `lvm/<vg>/<lv>/...`, never the
-guest's real filesystem root directly). The only place that mapping
-exists is the *live* running guest, so this needs the same guest-exec
-channel guest_browse.py already uses - the same "agent must be running
-and reachable" constraint every other PH.5 restore path already has.
+(docs/plan.md §3's confirmed disk/part/lvm structure, and issue #66's
+LVM-elevation/part-flattening on top of it - see
+resolve_original_directory's docstring for the exact shapes this
+parses). The only place that drive-letter/mountpoint mapping exists is
+the *live* running guest, so this needs the same guest-exec channel
+guest_browse.py already uses - the same "agent must be running and
+reachable" constraint every other PH.5 restore path already has.
 
 Deliberately conservative throughout: any crumb structure this doesn't
 recognize, or any live lookup that comes back ambiguous/empty/failed,
@@ -75,21 +76,44 @@ async def resolve_original_directory(
     """`crumbs` is the breadcrumb trail (as tracked client-side) of the
     folder the item(s) being restored live in - crumbs[0] is always the
     synthetic "Root" entry, crumbs[1:] are real file-restore/list labels
-    in order. Root only ever lists disks for a VM, so crumbs[1] is
-    always one; what follows is either `part`/<N>/... (a raw partition)
-    or `lvm`/<vg>/<lv>/... (an assembled LVM volume)."""
-    labels = [c.get("label", "") for c in crumbs[1:]]
-    if len(labels) < 3:
-        return _unavailable(_GENERIC_UNAVAILABLE)
-    disk_label, kind, *rest = labels
+    in order. Three shapes are recognized, all stemming from issue #66's
+    LVM-elevation/part-flattening (added to main.py after this module was
+    first written - a real regression this fixed, not a defensive
+    "just in case"):
 
-    if kind == "part" and rest and rest[0].isdigit():
-        partition_number = int(rest[0])
-        inner = rest[1:]
+    - Elevated LVM (the only shape reachable through today's UI for LVM):
+      `LVM <vg>`/<lv>/... - root-level entries are now labelled this way
+      instead of nesting under a disk's own `lvm` folder, so there's no
+      disk/`lvm` indirection to strip here at all.
+    - Flattened partition (the common case for a plain disk): a disk's
+      `part` folder is dropped from the crumb trail whenever it was the
+      disk's only child, so it's `<disk>`/<partition number>/... directly.
+    - Unflattened partition: `<disk>`/`part`/<partition number>/... -
+      `part` stays nested when something else sits alongside it (e.g. an
+      un-elevated `lvm` folder, or some other, currently unobserved,
+      category).
+    """
+    labels = [c.get("label", "") for c in crumbs[1:]]
+    if len(labels) < 2:
+        return _unavailable(_GENERIC_UNAVAILABLE)
+
+    if labels[0].startswith("LVM "):
+        vg = labels[0][len("LVM ") :]
+        lv, *inner = labels[1:]
+        return await _resolve_lvm(session, vmid, node, vg, lv, inner)
+
+    disk_label, second, *rest = labels
+    if second.isdigit():
+        return await _resolve_partition(session, vmid, guest_os_family, node, volume, disk_label, int(second), rest)
+    if second == "part" and rest and rest[0].isdigit():
         return await _resolve_partition(
-            session, vmid, guest_os_family, node, volume, disk_label, partition_number, inner
+            session, vmid, guest_os_family, node, volume, disk_label, int(rest[0]), rest[1:]
         )
-    if kind == "lvm" and len(rest) >= 2:
+    # Legacy/defensive: an un-elevated `lvm` folder directly under a disk
+    # - not reachable through today's UI (issue #66 always hides it under
+    # a disk's own listing), but handled here rather than assumed
+    # impossible, same spirit as the rest of this module.
+    if second == "lvm" and len(rest) >= 2:
         vg, lv, *inner = rest
         return await _resolve_lvm(session, vmid, node, vg, lv, inner)
     return _unavailable(_GENERIC_UNAVAILABLE)
