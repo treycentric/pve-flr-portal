@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See [`docs/dev/versioning.md`](docs/dev/versioning.md) for how entries
 here are generated from commit messages.
 
+## [1.6.0] - 2026-09-25
+
+### Added
+- **pve-client:** cap and coalesce file-restore/list calls (#60) (e5520c3)
+- **restore:** restore to original location for VM guests (#68) (677ca8a)
+
+### Fixed
+- sort tree subdirectories and use drive icons in the file grid (#63, #64) (73d9b1d)
+- **restore:** recognize the elevated-LVM/flattened-part crumb shapes (#70) (4dd1f59)
+- **restore:** clear ReadOnly/immutable attributes before overwriting (#72) (d7053b9)
+
 ## [1.5.0] - 2026-09-24
 
 ### Added
