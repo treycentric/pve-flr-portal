@@ -1040,6 +1040,41 @@ entry points at. Two reasons this matters, both raised in review:
     listing command), so it's simply absent, not merely disabled, when
     only `FileWrite` is held.
 
+    **"Original location" destination (issue #68).** A third segmented
+    option alongside Browse/Manual entry, VM guests only (LXC never
+    reaches this modal at all — `design_a`/`design_b` are always
+    unavailable for a container, since push-to-guest restore is built
+    entirely on `qemu-guest-agent`, which containers don't have).
+    Resolves the browsed item's own original path automatically instead
+    of requiring the user to re-navigate to it — attempted optimistically
+    whenever Browse mode is (same `Unrestricted` grant), and stepped down
+    to Browse/Manual on its own if it turns out unavailable for that
+    particular item, never left showing a stale/wrong guess. The file-
+    restore browser only ever exposes a path *within* a partition or LVM
+    volume (the confirmed `part`/`lvm` disk structure — §3) — drive
+    letters and Linux mountpoints are guest-side state nothing in the
+    backup records, so this needs the same live guest-exec channel
+    Browse mode already uses: `Get-Partition` (Windows) or `lsblk`/
+    `findmnt` (Linux), in `backend/guest_original_location.py`. LVM
+    paths resolve via the volume-group/logical-volume name PVE's own
+    listing already gives (`findmnt -S /dev/<vg>/<lv>`) — a stable,
+    semantic key. A plain partition has no such key, so its disk is
+    correlated to the running guest's own disk numbering purely by
+    *ordinal position in PVE's own root file-restore/list response* —
+    the best available proxy for attachment order, since nothing in the
+    API exposes a guest-independent disk identity (no raw partition-
+    table bytes are reachable through this API at all). **Not yet live-
+    verified**, and the scenario most likely to break it is a guest with
+    disks on mixed bus types (e.g. one `scsi` + one `sata`) — if the
+    ordinal guess is wrong, the live lookup can still return a
+    confident-looking but *wrong* drive letter/mountpoint (not caught by
+    the "disable when ambiguous" fallback, which only protects against
+    an empty/failed lookup). The existing "Restoring into: `<path>`"
+    confirmation text plus the required overwrite checkbox is the real
+    safety net for that residual risk, not just the disable-on-failure
+    logic — worth a special eye during review until this has been
+    confirmed against a real multi-bus-type guest.
+
     **Real-world finding (2026-09-02):** the Windows subfolder listing
     initially used `cmd /c dir <path> /b /ad` (bare names only), which
     can't distinguish a real directory from a reparse point - clicking

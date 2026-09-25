@@ -51,8 +51,11 @@ See "Provisioning access" below for how to grant a user access.
    guest via `qemu-guest-agent`, instead of downloading it. The button
    is only enabled for guests where the agent is reachable and your PVE
    account holds the separate restore grant (see "Restore-to-guest"
-   below); the confirmation dialog picks the destination directory and,
-   where available, offers "restore metadata" / "verify". Large
+   below); the confirmation dialog picks the destination directory -
+   "Original location" (resolved automatically from the item's own path
+   in the backup, when the app can confidently determine it), Browse, or
+   type one manually - and, where available, offers "restore metadata" /
+   "verify". Large
    transfers use a Direct Network Transfer path automatically when a
    data NIC is configured.
 7. **About** (user menu, top right) shows the running version and a
