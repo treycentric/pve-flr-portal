@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Proxmox File Level Restore Portal{% endblock %}</title>
+  <title>{% block title %}File Level Restore Portal for Proxmox Backup Server{% endblock %}</title>
   {# Theme (issue #29): resolve the persisted choice before first paint so
      there is no light-to-dark flash. Kept in sync afterwards by userMenu
      in app.js - the resolution logic is duplicated there on purpose. #}
@@ -35,7 +35,7 @@
   <header class="topbar">
     <div class="topbar-brand">
       <img class="topbar-icon" src="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}" alt="">
-      <h1>Proxmox File Level Restore Portal</h1>
+      <h1>File Level Restore Portal <span class="app-name-suffix">for Proxmox Backup Server</span></h1>
     </div>
     <div class="topbar-meta">
       {% block topbar_meta %}{% endblock %}

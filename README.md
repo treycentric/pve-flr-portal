@@ -1,4 +1,4 @@
-# Proxmox File Level Restore Portal (pve-flr-portal)
+# File Level Restore Portal for Proxmox Backup Server (pve-flr-portal)
 
 A small companion app for Proxmox VE + Proxmox Backup Server: a
 scrubbable snapshot timeline and file browser for file-level restore,
