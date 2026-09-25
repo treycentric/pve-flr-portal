@@ -367,10 +367,12 @@ async def tree(
         entries = []
     at_root = filepath == "/"
     parent_crumbs = json.loads(crumbs)
+    # Issue #63: PVE's file-restore/list response order isn't alphabetical
+    # (it's whatever order the backup's own filesystem metadata happens to
+    # be in) - /api/browse already sorts its entries, this endpoint didn't.
+    entries = sorted((e for e in entries if not bool(e.get("leaf", True))), key=lambda e: e.get("text", "").lower())
     nodes = []
     for entry in entries:
-        if bool(entry.get("leaf", True)):
-            continue
         text = entry.get("text", "")
         child_crumbs = [*parent_crumbs, {"label": text, "filepath": entry["filepath"]}]
         nodes.append(

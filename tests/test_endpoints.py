@@ -190,6 +190,27 @@ def test_browse_renders_file_grid(client, monkeypatch):
     assert "etc" in resp.text and "hosts" in resp.text
 
 
+def test_browse_renders_drive_icon_for_root_entries(client, monkeypatch):
+    """Issue #64: a root-level, non-leaf entry (a virtual disk) gets the
+    same drive SVG the tree pane already uses, not the plain folder
+    emoji a subdirectory gets."""
+
+    async def fake_list_path(session, volume, filepath="/"):
+        if filepath == "/":
+            return [{"text": "drive-scsi0.img.fidx", "leaf": False, "filepath": "L2RyaXZl"}]
+        return [{"text": "etc", "leaf": False, "filepath": "L2V0Yw=="}]
+
+    monkeypatch.setattr(pve_client, "list_path", fake_list_path)
+
+    root_resp = client.get("/api/browse", params={"volume": "vol", "filepath": "/"})
+    assert "tree-icon" in root_resp.text
+    assert "drive-scsi0.img.fidx" in root_resp.text
+
+    sub_resp = client.get("/api/browse", params={"volume": "vol", "filepath": "L2RyaXZl"})
+    assert "tree-icon" not in sub_resp.text
+    assert "&#128193;" in sub_resp.text  # plain folder emoji for a non-root directory
+
+
 def test_browse_error_partial_on_pve_failure(client, monkeypatch):
     async def boom(session, volume, filepath="/"):
         raise httpx.HTTPStatusError(
@@ -216,6 +237,26 @@ def test_tree_lists_only_directories(client, monkeypatch):
     assert resp.status_code == 200
     assert "etc" in resp.text
     assert "file.txt" not in resp.text
+
+
+def test_tree_sorts_subdirectories_alphabetically(client, monkeypatch):
+    """Issue #63: PVE's file-restore/list response order isn't
+    alphabetical - unlike /api/browse, /api/tree wasn't sorting its own
+    entries before this fix."""
+
+    async def fake_list_path(session, volume, filepath="/"):
+        return [
+            {"text": "var", "leaf": False, "filepath": "c"},
+            {"text": "Etc", "leaf": False, "filepath": "a"},
+            {"text": "bin", "leaf": False, "filepath": "b"},
+        ]
+
+    monkeypatch.setattr(pve_client, "list_path", fake_list_path)
+    resp = client.get("/api/tree", params={"volume": "vol", "filepath": "/", "crumbs": "[]"})
+    assert resp.status_code == 200
+    assert [resp.text.index(name) for name in ("bin", "Etc", "var")] == sorted(
+        resp.text.index(name) for name in ("bin", "Etc", "var")
+    )
 
 
 def test_restore_capabilities_rejects_unknown_guest_type(client):
