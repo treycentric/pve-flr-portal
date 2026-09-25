@@ -898,6 +898,84 @@ def test_restore_browse_listing_error_returns_502(client, monkeypatch):
     assert resp.status_code == 502
 
 
+def test_restore_original_path_rejects_unknown_guest_type(client):
+    resp = client.get("/api/restore-original-path", params={"type": "bogus", "vmid": "133", "volume": "vol"})
+    assert resp.status_code == 400
+
+
+def test_restore_original_path_rejects_containers(client):
+    """Issue #68: push-to-guest restore is never available for a
+    container at all (no qemu-guest-agent) - this whole modal, and so
+    this endpoint, is unreachable for one; 400 rather than a 200
+    available=false so a stray call doesn't look like a real answer."""
+    resp = client.get("/api/restore-original-path", params={"type": "ct", "vmid": "133", "volume": "vol"})
+    assert resp.status_code == 400
+    assert "container" in resp.json()["detail"].lower()
+
+
+def test_restore_original_path_blocked_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        reason = "missing VM.GuestAgent.Unrestricted privilege"
+        return _available_caps(design_b=guest_agent.PathAvailability(False, reason))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.get("/api/restore-original-path", params={"type": "vm", "vmid": "133", "volume": "vol"})
+    assert resp.status_code == 403
+    assert "Unrestricted" in resp.json()["detail"]
+
+
+def test_restore_original_path_returns_resolved_directory(client, monkeypatch):
+    from backend import guest_agent, guest_original_location
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True), guest_os_family="linux", node="pve2")
+
+    async def fake_resolve(session, vmid, guest_os_family, node, volume, crumbs):
+        assert guest_os_family == "linux"
+        assert node == "pve2"
+        assert volume == "vol"
+        assert crumbs == [{"label": "Root", "filepath": "/"}]
+        return guest_original_location.OriginalLocationResult(available=True, directory="/home/alice")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_original_location, "resolve_original_directory", fake_resolve)
+    crumbs = json.dumps([{"label": "Root", "filepath": "/"}])
+    resp = client.get(
+        "/api/restore-original-path",
+        params={"type": "vm", "vmid": "133", "volume": "vol", "crumbs": crumbs},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"available": True, "directory": "/home/alice", "reason": None}
+
+
+def test_restore_original_path_surfaces_unavailable_reason(client, monkeypatch):
+    from backend import guest_agent, guest_original_location
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def fake_resolve(session, vmid, guest_os_family, node, volume, crumbs):
+        return guest_original_location.OriginalLocationResult(available=False, reason="not mounted")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(guest_original_location, "resolve_original_directory", fake_resolve)
+    resp = client.get("/api/restore-original-path", params={"type": "vm", "vmid": "133", "volume": "vol"})
+    assert resp.status_code == 200
+    assert resp.json() == {"available": False, "directory": None, "reason": "not mounted"}
+
+
+def test_restore_original_path_requires_auth():
+    with TestClient(main.app) as c:
+        resp = c.get(
+            "/api/restore-original-path",
+            params={"type": "vm", "vmid": "133", "volume": "vol"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 401
+
+
 def test_restore_browse_requires_auth():
     with TestClient(main.app) as c:
         resp = c.get("/api/restore-browse", params={"type": "vm", "vmid": "133"}, follow_redirects=False)

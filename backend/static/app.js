@@ -330,12 +330,26 @@ function fileGridState() {
     // so it's only offered when that's available; otherwise restoreDestDir
     // stays a plain typed field.
     restoreBrowseAvailable: false,
-    restoreBrowsing: false,
+    // 'original' | 'browse' | 'manual' - which destination picker is
+    // showing. Replaces a plain browse/manual boolean now that there are
+    // three (issue #68).
+    restoreDestMode: 'manual',
     restoreBrowsePath: null,
     restoreBrowseParent: null,
     restoreBrowseEntries: [],
     restoreBrowseLoading: false,
     restoreBrowseError: null,
+    // Issue #68: "restore to original location" - resolved server-side
+    // from the item's own path (guest_original_location.py), so it needs
+    // the same guest-exec grant as Browse mode. Attempted optimistically
+    // whenever that grant is available (see openRestore) and stepped
+    // down to Browse/Manual automatically if it turns out unavailable
+    // for this particular item (e.g. an unmounted partition) - never
+    // left silently selected with a stale/wrong directory.
+    restoreOriginalAvailable: false,
+    restoreOriginalChecking: false,
+    restoreOriginalReason: null,
+    restoreOriginalDirectory: null,
     // Status messages (loading/error/empty) used to render inside the
     // folder-list box itself, above the entries - moved into the
     // toolbar's path display instead so the path/status line stays in
@@ -353,17 +367,19 @@ function fileGridState() {
       this.applySort();
     },
 
-    // guest/snapshotTime/browseAvailable come from the caller's Alpine
-    // expression (see file_grid.html), which - unlike this method body
-    // itself - is evaluated in the ancestor portalApp() scope, so it can
-    // read `guest`/`selectedSnapshotTime`/`restoreCaps` directly. A plain
-    // JS method here has no such scope-chaining, hence passing them in as
-    // arguments rather than trying `this.guest` from inside fileGridState().
-    openRestore(guestType, guestVmid, guestLabel, snapshotTime, browseAvailable) {
+    // guest/snapshotTime/browseAvailable/crumbs come from the caller's
+    // Alpine expression (see file_grid.html), which - unlike this method
+    // body itself - is evaluated in the ancestor portalApp() scope, so it
+    // can read `guest`/`selectedSnapshotTime`/`restoreCaps`/`crumbs`
+    // directly. A plain JS method here has no such scope-chaining, hence
+    // passing them in as arguments rather than trying `this.guest` from
+    // inside fileGridState().
+    openRestore(guestType, guestVmid, guestLabel, snapshotTime, browseAvailable, crumbs) {
       this._guestType = guestType;
       this._guestVmid = guestVmid;
       this._guestLabel = guestLabel;
       this._snapshotTime = snapshotTime;
+      this._crumbs = (crumbs || []).map((c) => ({ ...c }));
       this.restoreDestDir = '';
       this.restoreOverwrite = false;
       this.restoreMetadata = false;
@@ -371,23 +387,71 @@ function fileGridState() {
       this.restoreError = null;
       this.restoreSubmitted = false;
       this.restoreBrowseAvailable = browseAvailable;
-      this.restoreBrowsing = browseAvailable;
       this.restoreBrowsePath = null;
       this.restoreBrowseParent = null;
       this.restoreBrowseEntries = [];
       this.restoreBrowseError = null;
+      this.restoreOriginalAvailable = false;
+      this.restoreOriginalChecking = browseAvailable;
+      this.restoreOriginalReason = null;
+      this.restoreOriginalDirectory = null;
+      // Try original-location first (the most convenient when it works) -
+      // checkOriginalLocation() steps this down to browse/manual itself
+      // if it turns out unavailable for this item.
+      this.restoreDestMode = browseAvailable ? 'original' : 'manual';
       this.restoreOpen = true;
-      if (browseAvailable) this.browseInto(null);
+      if (browseAvailable) {
+        this.checkOriginalLocation();
+        // Pre-warm the folder browser in the background too, so switching
+        // to Browse mode later doesn't have to wait on its own first fetch.
+        this.browseInto(null);
+      }
     },
 
-    // mode is 'browse' or 'manual' - the segmented toggle above the
-    // destination picker calls this directly rather than a plain flip, so
-    // clicking the already-active side is a no-op instead of re-fetching.
+    async checkOriginalLocation() {
+      this.restoreOriginalChecking = true;
+      try {
+        const params = new URLSearchParams({
+          type: this._guestType,
+          vmid: this._guestVmid,
+          volume: this.$refs.form.dataset.volume,
+          crumbs: JSON.stringify(this._crumbs),
+        });
+        const resp = await apiFetch('/api/restore-original-path?' + params.toString());
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.available) {
+          this.restoreOriginalAvailable = true;
+          this.restoreOriginalDirectory = data.directory;
+          if (this.restoreDestMode === 'original') this.restoreDestDir = data.directory;
+        } else {
+          this.restoreOriginalAvailable = false;
+          this.restoreOriginalReason = (data && data.reason) || 'Not available for this item.';
+          if (this.restoreDestMode === 'original') {
+            this.setDestMode(this.restoreBrowseAvailable ? 'browse' : 'manual');
+          }
+        }
+      } catch (e) {
+        this.restoreOriginalAvailable = false;
+        this.restoreOriginalReason = 'Could not check the original location: ' + e;
+        if (this.restoreDestMode === 'original') {
+          this.setDestMode(this.restoreBrowseAvailable ? 'browse' : 'manual');
+        }
+      } finally {
+        this.restoreOriginalChecking = false;
+      }
+    },
+
+    // The segmented toggle above the destination picker calls this
+    // directly rather than a plain flip, so clicking the already-active
+    // mode is a no-op instead of re-fetching.
     setDestMode(mode) {
-      const wantBrowsing = mode === 'browse';
-      if (wantBrowsing === this.restoreBrowsing) return;
-      this.restoreBrowsing = wantBrowsing;
-      if (wantBrowsing) this.browseInto(this.restoreBrowsePath);
+      if (mode === this.restoreDestMode) return;
+      this.restoreDestMode = mode;
+      if (mode === 'original' && this.restoreOriginalDirectory) {
+        this.restoreDestDir = this.restoreOriginalDirectory;
+      } else if (mode === 'browse') {
+        this.browseInto(this.restoreBrowsePath);
+      }
     },
 
     async browseInto(path) {
@@ -405,7 +469,11 @@ function fileGridState() {
         this.restoreBrowsePath = data.path;
         this.restoreBrowseParent = data.parent;
         this.restoreBrowseEntries = data.entries || [];
-        if (data.path) this.restoreDestDir = data.path;
+        // Only steer the shared destination field while Browse is the
+        // active mode - openRestore() also pre-warms this in the
+        // background while "Original location" is showing, and that must
+        // not clobber the original-location result racing it (issue #68).
+        if (data.path && this.restoreDestMode === 'browse') this.restoreDestDir = data.path;
       } catch (e) {
         this.restoreBrowseError = 'Could not list that folder: ' + e;
       } finally {

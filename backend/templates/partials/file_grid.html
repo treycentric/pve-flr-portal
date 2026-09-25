@@ -22,7 +22,7 @@
       type="button"
       class="btn-outline"
       x-show="count > 0 && restoreCaps && (isSingleFile ? restoreCaps.design_a.available : restoreCaps.design_b.available)"
-      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime, restoreCaps.design_b.available)">Restore</button>
+      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime, restoreCaps.design_b.available, crumbs)">Restore</button>
 
     <button type="button" class="btn-outline" disabled x-show="count === 0">Download</button>
 
@@ -106,11 +106,27 @@
           </template>
 
           <div class="restore-mode-toggle" x-show="restoreBrowseAvailable" role="tablist">
-            <button type="button" class="restore-mode-btn" :class="{ 'is-active': restoreBrowsing }" role="tab" :aria-selected="restoreBrowsing" @click="setDestMode('browse')">Browse</button>
-            <button type="button" class="restore-mode-btn" :class="{ 'is-active': !restoreBrowsing }" role="tab" :aria-selected="!restoreBrowsing" @click="setDestMode('manual')">Manual entry</button>
+            <button
+              type="button"
+              class="restore-mode-btn"
+              :class="{ 'is-active': restoreDestMode === 'original' }"
+              role="tab"
+              :aria-selected="restoreDestMode === 'original'"
+              :disabled="!restoreOriginalChecking && !restoreOriginalAvailable"
+              :title="!restoreOriginalChecking && !restoreOriginalAvailable ? (restoreOriginalReason || 'Not available for this item') : ''"
+              @click="setDestMode('original')">Original location</button>
+            <button type="button" class="restore-mode-btn" :class="{ 'is-active': restoreDestMode === 'browse' }" role="tab" :aria-selected="restoreDestMode === 'browse'" @click="setDestMode('browse')">Browse</button>
+            <button type="button" class="restore-mode-btn" :class="{ 'is-active': restoreDestMode === 'manual' }" role="tab" :aria-selected="restoreDestMode === 'manual'" @click="setDestMode('manual')">Manual entry</button>
           </div>
 
-          <template x-if="restoreBrowseAvailable && restoreBrowsing">
+          <template x-if="restoreDestMode === 'original'">
+            <div class="restore-original">
+              <p class="restore-browse-status" x-show="restoreOriginalChecking">Checking the original location&hellip;</p>
+              <p class="restore-browse-selected" x-show="!restoreOriginalChecking && restoreOriginalAvailable">Restoring into: <strong x-text="restoreDestDir"></strong></p>
+            </div>
+          </template>
+
+          <template x-if="restoreDestMode === 'browse'">
             <div class="restore-browser">
               <div class="restore-browse-toolbar">
                 <button type="button" class="btn-outline restore-browse-nav" :disabled="restoreBrowseParent === null || restoreBrowseLoading" @click="browseUp()">&uarr; Up</button>
@@ -128,7 +144,7 @@
             </div>
           </template>
 
-          <template x-if="!restoreBrowseAvailable || !restoreBrowsing">
+          <template x-if="restoreDestMode === 'manual'">
             <label class="restore-field">
               Destination directory (in the guest)
               <input type="text" x-model="restoreDestDir" placeholder="e.g. C:\Windows\Temp or /etc" class="modal-filter-input">

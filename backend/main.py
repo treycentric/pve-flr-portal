@@ -21,6 +21,7 @@ from . import (
     auth,
     guest_agent,
     guest_browse,
+    guest_original_location,
     pve_client,
     restore_bundle,
     restore_download,
@@ -785,6 +786,43 @@ async def restore_browse(
     except (httpx.HTTPStatusError, guest_browse.ListingError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     return JSONResponse(result)
+
+
+@app.get("/api/restore-original-path")
+async def restore_original_path(
+    type: str,
+    vmid: str,
+    volume: str,
+    crumbs: str = "[]",
+    session: SessionData = Depends(auth.get_session),
+):
+    """Issue #68: resolves the "restore to original location" destination
+    for the item(s) currently browsed - VM guests only, since push-to-
+    guest restore (and therefore this whole modal) is never available
+    for a container at all (guest_original_location's module docstring).
+    Needs the same guest-exec channel/grant as Browse mode (design_b),
+    re-checked here regardless of what the capabilities response already
+    showed, same convention as /api/restore-browse above. Never raises
+    for a plain "couldn't figure it out" case - that comes back as a
+    normal 200 with available=false, same shape as design_a/design_b, so
+    the frontend can disable the option with a reason instead of
+    surfacing an error."""
+    if type not in ("vm", "ct"):
+        raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
+    if type == "ct":
+        raise HTTPException(
+            status_code=400,
+            detail="Original-location restore is not available for containers (no qemu-guest-agent)",
+        )
+    caps = await guest_agent.get_restore_capabilities(session, type, vmid)
+    if not caps.design_b.available:
+        raise HTTPException(
+            status_code=403, detail=caps.design_b.reason or "Browsing this guest's filesystem is not available"
+        )
+    result = await guest_original_location.resolve_original_directory(
+        session, vmid, caps.guest_os_family, caps.node, volume, json.loads(crumbs)
+    )
+    return JSONResponse(dataclasses.asdict(result))
 
 
 @app.get("/api/download")
