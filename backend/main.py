@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import io
 import json
@@ -306,6 +307,100 @@ def _type_label(entry: dict, at_root: bool) -> str:
     return f"{suffix[1:].upper()} File" if suffix else "File"
 
 
+async def _discover_lvm_volumes(session: SessionData, volume: str, disk_entries: list[dict]) -> list[dict]:
+    """Issue #66: an LVM volume group spanning multiple virtual disks shows
+    up as an identical `lvm/<vg>` subtree under EVERY disk it spans -
+    confirmed live 2026-09-25: PVE's helper VM attaches every disk in the
+    snapshot at once and assembles LVM across them, so drilling into
+    `lvm/<vg>/...` under any one of them shows the same merged contents.
+
+    Probes each root-level disk (in parallel - pve_client.list_path's own
+    semaphore/coalescing, issue #60, still caps how many of these actually
+    hit PVE at once) for an `lvm` child, and returns one synthetic
+    root-level entry per distinct volume-group name found, pointing at
+    whichever disk's copy was seen first (content is identical regardless
+    of which one). Entries are plain file-restore/list-shaped dicts
+    (filepath/text/leaf/...) so they flow through the same downstream
+    processing as any other entry."""
+    found: dict[str, dict] = {}
+
+    async def probe(disk: dict) -> None:
+        if bool(disk.get("leaf", True)):
+            return
+        try:
+            children = await pve_client.list_path(session, volume, disk["filepath"])
+        except httpx.HTTPStatusError:
+            return
+        lvm_folder = next((c for c in children if c.get("text") == "lvm" and not bool(c.get("leaf", True))), None)
+        if lvm_folder is None:
+            return
+        try:
+            vgs = await pve_client.list_path(session, volume, lvm_folder["filepath"])
+        except httpx.HTTPStatusError:
+            return
+        for vg in vgs:
+            name = vg.get("text", "")
+            if name and not bool(vg.get("leaf", True)) and name not in found:
+                found[name] = vg
+
+    await asyncio.gather(*(probe(d) for d in disk_entries))
+    # "LVM <name>" rather than the bare VG name - at root, alongside plain
+    # "drive-scsiN.img.fidx" entries, an unlabelled VG name reads as just
+    # another disk rather than the distinct thing it is.
+    return [{**found[name], "text": f"LVM {name}"} for name in sorted(found)]
+
+
+def _volid_guest_type(volid: str) -> str | None:
+    """None for anything that doesn't parse as a volid - /api/browse and
+    /api/tree don't otherwise validate `volume`'s shape, so this must
+    degrade quietly rather than 500 on unexpected input."""
+    try:
+        return _parse_volid(volid)[0]
+    except ValueError:
+        return None
+
+
+async def _disk_level_entries(session: SessionData, volume: str, entries: list[dict]) -> list[dict]:
+    """Issue #66: called only when `entries` is a disk's own listing (one
+    level below root). PVE always nests a disk's real content under a
+    synthetic `part` folder (raw partition-table entries) and, when the
+    disk is part of the guest's own LVM, an `lvm` folder (assembled volume
+    groups - see _discover_lvm_volumes, which elevates these to root-level
+    entries instead so browsing doesn't force picking an arbitrary disk).
+
+    Drops the `lvm` folder here (its content now lives at root) and, when
+    `part` is left as the disk's only remaining child, flattens it away so
+    partition numbers show directly under the disk instead of behind an
+    extra layer - only when it truly has no siblings, so this stays inert
+    if some other, currently unobserved, folder type ever shows up
+    alongside it."""
+    visible = [e for e in entries if not (e.get("text") == "lvm" and not bool(e.get("leaf", True)))]
+    if len(visible) == 1 and visible[0].get("text") == "part" and not bool(visible[0].get("leaf", True)):
+        return await pve_client.list_path(session, volume, visible[0]["filepath"])
+    return visible
+
+
+async def _apply_lvm_view(
+    session: SessionData, volume: str, filepath: str, crumbs: list, entries: list[dict]
+) -> tuple[list[dict], set[str]]:
+    """Shared by /api/browse and /api/tree (issue #66): returns the
+    entries to actually render plus the set of entry names that are
+    elevated LVM volume-group entries (so callers can label/icon them
+    distinctly). Applies _discover_lvm_volumes at root and
+    _disk_level_entries one level below it - both gated to `vm`-type
+    volumes, since containers have no disk/partition concept at all and a
+    CT's own root could legitimately contain a real folder named "part"
+    or "lvm"."""
+    if _volid_guest_type(volume) != "vm":
+        return entries, set()
+    if filepath == "/":
+        lvm_entries = await _discover_lvm_volumes(session, volume, entries)
+        return [*entries, *lvm_entries], {e["text"] for e in lvm_entries}
+    if len(crumbs) == 2:
+        return await _disk_level_entries(session, volume, entries), set()
+    return entries, set()
+
+
 def _pve_error_message(exc: httpx.HTTPStatusError) -> str:
     reason = exc.response.reason_phrase
     if reason and reason.strip().lower() not in ("bad request", ""):
@@ -320,7 +415,13 @@ def _pve_error_message(exc: httpx.HTTPStatusError) -> str:
 
 
 @app.get("/api/browse")
-async def browse(request: Request, volume: str, filepath: str = "/", session: SessionData = Depends(auth.get_session)):
+async def browse(
+    request: Request,
+    volume: str,
+    filepath: str = "/",
+    crumbs: str = "[]",
+    session: SessionData = Depends(auth.get_session),
+):
     try:
         entries = await pve_client.list_path(session, volume, filepath)
     except httpx.HTTPStatusError as exc:
@@ -330,6 +431,7 @@ async def browse(request: Request, volume: str, filepath: str = "/", session: Se
             {"detail": _pve_error_message(exc)},
         )
     at_root = filepath == "/"
+    entries, lvm_names = await _apply_lvm_view(session, volume, filepath, json.loads(crumbs), entries)
     for entry in entries:
         entry.setdefault("mtime", None)
         entry.setdefault("size", None)
@@ -339,7 +441,7 @@ async def browse(request: Request, volume: str, filepath: str = "/", session: Se
         entry["item_json"] = json.dumps(
             {"filepath": entry["filepath"], "leaf": leaf, "name": text, "mtime": entry["mtime"], "size": entry["size"]}
         )
-        entry["type_label"] = _type_label(entry, at_root)
+        entry["type_label"] = "LVM Volume" if text in lvm_names else _type_label(entry, at_root)
     entries.sort(key=lambda e: (bool(e.get("leaf", True)), e.get("text", "").lower()))
     return templates.TemplateResponse(
         request,
@@ -367,6 +469,7 @@ async def tree(
         entries = []
     at_root = filepath == "/"
     parent_crumbs = json.loads(crumbs)
+    entries, lvm_names = await _apply_lvm_view(session, volume, filepath, parent_crumbs, entries)
     # Issue #63: PVE's file-restore/list response order isn't alphabetical
     # (it's whatever order the backup's own filesystem metadata happens to
     # be in) - /api/browse already sorts its entries, this endpoint didn't.
@@ -379,7 +482,7 @@ async def tree(
             {
                 "filepath": entry["filepath"],
                 "text": text,
-                "type_label": _type_label(entry, at_root),
+                "type_label": "LVM Volume" if text in lvm_names else _type_label(entry, at_root),
                 "crumbs_json": json.dumps(child_crumbs),
             }
         )
