@@ -105,6 +105,18 @@ def clear_guest_agent_locks():
     guest_agent_lock.clear()
 
 
+@pytest.fixture(autouse=True)
+def clear_list_path_state():
+    """Same leak-between-tests/event-loop convention as
+    clear_guest_agent_locks above, for issue #60's per-(user, volume,
+    filepath) in-flight coalescing and its semaphore."""
+    from backend import pve_client
+
+    pve_client.clear_list_path_state()
+    yield
+    pve_client.clear_list_path_state()
+
+
 @pytest.fixture
 def api_base():
     from backend.config import settings

@@ -2320,12 +2320,22 @@ recorded here so the ceiling is known before anyone leans on it.
   live `file-restore/list` = the ~3s cold helper-VM round trip (§3).
   Scrubbing N snapshots in one folder pays it N times; revisiting pays
   again. This is the main day-to-day limit. *Fix: PH.6.*
-- **Helper-VM stampede.** Proxmox boots an ephemeral helper VM per
-  snapshot browsed. The timeline makes it trivial to fire many cold
-  lookups fast (drag-scrub), and there is no server-side throttle or
-  request coalescing — a fast scrub, or two users on different guests,
-  can pile helper VMs onto the PVE node and pressure its RAM. *Fix:
-  cap in-flight `file-restore/list` calls, dedupe identical ones.*
+- **Helper-VM stampede — mitigated (issue #60).** Proxmox boots an
+  ephemeral helper VM per cold snapshot browsed, and exposes no API to
+  list or stop those VMs directly — they aren't visible as regular
+  guests and self-terminate on PVE's own internal idle timeout, so this
+  app has no way to tear one down early. The only lever it has is
+  limiting how many `file-restore/list` calls it makes:
+  `pve_client.list_path()` now caps in-flight calls to PVE via a
+  semaphore (`FILE_RESTORE_LIST_MAX_CONCURRENCY`, default 4 — callers
+  beyond the cap queue rather than fail) and coalesces identical
+  concurrent requests, keyed by `(session.username, volume, filepath)`
+  so one user's in-flight call is never handed to a second user without
+  PVE re-checking that user's own permission. This caps the app's own
+  contribution to the stampede; it does not (and cannot) cap what PVE
+  itself decides to do with the calls that do go through. PH.6's
+  directory-listing cache would still reduce the underlying call volume
+  further — this is a ceiling, not a replacement for that.
 - **No pagination.** A directory with tens of thousands of entries
   (Maildir, `node_modules`, WinSxS) returns the full list, renders every
   row into the HTML partial, and the client sorts/filters all of it in

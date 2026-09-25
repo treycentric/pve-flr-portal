@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 
 import httpx
@@ -272,6 +273,71 @@ async def test_list_path_raises_on_http_error(session_data):
     respx.get(f"{base('vol')}/list").mock(return_value=httpx.Response(500, text="boom"))
     with pytest.raises(httpx.HTTPStatusError):
         await pve_client.list_path(session_data, "vol", "/")
+
+
+@respx.mock
+async def test_list_path_coalesces_identical_concurrent_requests(session_data):
+    """Issue #60: two scrub events landing on the same snapshot+path
+    before the first response comes back must share one outbound call -
+    each cold call boots a helper VM on the PVE node."""
+    calls = []
+
+    async def _slow(request):
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"data": [{"text": "etc"}]})
+
+    respx.get(f"{base('vol')}/list").mock(side_effect=_slow)
+    out1, out2 = await asyncio.gather(
+        pve_client.list_path(session_data, "vol", "/"),
+        pve_client.list_path(session_data, "vol", "/"),
+    )
+    assert out1 == out2 == [{"text": "etc"}]
+    assert len(calls) == 1
+
+
+@respx.mock
+async def test_list_path_does_not_coalesce_across_different_users(session_data):
+    """Coalescing is keyed on the requesting user, not just
+    (volume, filepath) - file-restore access is permission-gated per PVE
+    ticket, so a second user must never receive a result PVE never
+    actually authorized for them."""
+    other = dataclasses.replace(session_data, username="mallory@pam")
+    calls = []
+
+    async def _slow(request):
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"data": []})
+
+    respx.get(f"{base('vol')}/list").mock(side_effect=_slow)
+    await asyncio.gather(
+        pve_client.list_path(session_data, "vol", "/"),
+        pve_client.list_path(other, "vol", "/"),
+    )
+    assert len(calls) == 2
+
+
+@respx.mock
+async def test_list_path_caps_concurrent_calls_to_pve(session_data, monkeypatch):
+    """Issue #60: callers beyond FILE_RESTORE_LIST_MAX_CONCURRENCY queue
+    for a slot rather than all firing at once and piling helper VMs onto
+    the PVE node."""
+    monkeypatch.setattr(pve_client, "_list_semaphore", asyncio.Semaphore(1))
+    in_flight = 0
+    max_in_flight = 0
+
+    async def _track(request):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.02)
+        in_flight -= 1
+        return httpx.Response(200, json={"data": []})
+
+    respx.get(f"{base('vol')}/list").mock(side_effect=_track)
+    await asyncio.gather(*(pve_client.list_path(session_data, "vol", f"/{i}") for i in range(5)))
+    assert max_in_flight == 1
 
 
 @respx.mock
