@@ -1495,7 +1495,8 @@ function portalApp(rawSnapshots, guest) {
       const current = this.crumbs[this.crumbs.length - 1];
       const url =
         '/api/browse?volume=' + encodeURIComponent(this.volume) +
-        '&filepath=' + encodeURIComponent(current.filepath);
+        '&filepath=' + encodeURIComponent(current.filepath) +
+        '&crumbs=' + encodeURIComponent(JSON.stringify(this.crumbs));
       this.loading = true;
       await htmx.ajax('GET', url, { target: '#file-grid', indicator: '#loading' });
       this.loading = false;
