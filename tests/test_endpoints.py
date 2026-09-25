@@ -269,7 +269,7 @@ def test_browse_root_elevates_lvm_volume_groups(client, monkeypatch):
     # Every disk still shows (the "part" side of each is still real content).
     for disk in ("drive-scsi0.img.fidx", "drive-scsi1.img.fidx", "drive-scsi2.img.fidx", "drive-efidisk0.img.fidx"):
         assert disk in resp.text
-    assert "myvg" in resp.text
+    assert "LVM myvg" in resp.text  # prefixed so it doesn't read as just another disk
     # Deduped to exactly one disk's copy - not the same VG showing up once
     # per disk it spans (which disk wins is non-deterministic - asyncio.
     # gather races the 3 probes - so check exactly one token, not a specific one).
@@ -335,7 +335,7 @@ def test_tree_root_elevates_lvm_volume_groups(client, monkeypatch):
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
     resp = client.get("/api/tree", params={"volume": _LVM_VOLUME, "filepath": "/", "crumbs": "[]"})
     assert resp.status_code == 200
-    assert "myvg" in resp.text
+    assert "LVM myvg" in resp.text
     winners = [t for t in ("tok-disk0-vg", "tok-disk1-vg", "tok-disk2-vg") if t in resp.text]
     assert len(winners) == 1
 

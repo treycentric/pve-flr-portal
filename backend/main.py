@@ -344,7 +344,10 @@ async def _discover_lvm_volumes(session: SessionData, volume: str, disk_entries:
                 found[name] = vg
 
     await asyncio.gather(*(probe(d) for d in disk_entries))
-    return [found[name] for name in sorted(found)]
+    # "LVM <name>" rather than the bare VG name - at root, alongside plain
+    # "drive-scsiN.img.fidx" entries, an unlabelled VG name reads as just
+    # another disk rather than the distinct thing it is.
+    return [{**found[name], "text": f"LVM {name}"} for name in sorted(found)]
 
 
 def _volid_guest_type(volid: str) -> str | None:
