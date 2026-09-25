@@ -368,28 +368,36 @@ test('startRestore surfaces a message when the fetch itself throws', async () =>
   assert.equal(s.restoreSubmitted, false);
 });
 
-test('openRestore kicks off an initial browseInto(null) when browsing is available', async () => {
+test('openRestore kicks off an initial browseInto(null) and checks original-location when browsing is available', async () => {
   const { fileGridState } = loadApp();
   const s = fileGridState();
-  let requestedUrl = null;
+  s.$refs = { form: { dataset: { volume: 'vol1' } } };
+  const requestedUrls = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
-    requestedUrl = url;
+    requestedUrls.push(url);
+    if (url.startsWith('/api/restore-original-path')) {
+      // Unavailable for this item - openRestore should step the mode
+      // down to 'browse' once this resolves (issue #68).
+      return { ok: true, json: async () => ({ available: false, directory: null, reason: 'no drive letter' }) };
+    }
     return { ok: true, json: async () => ({ path: null, parent: null, entries: [{ name: 'C:', path: 'C:\\' }] }) };
   };
   try {
-    s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z', true);
-    await new Promise((r) => setTimeout(r, 0)); // let the fire-and-forget browseInto() settle
+    s.openRestore('qemu', '133', 'web (133)', '2026-08-30T14:48:06Z', true, [{ label: 'Root', filepath: '/' }]);
+    await new Promise((r) => setTimeout(r, 0)); // let the fire-and-forget checks settle
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(s.restoreBrowsing, true);
-  assert.ok(requestedUrl.startsWith('/api/restore-browse?'));
-  assert.ok(!requestedUrl.includes('path='));
+  assert.equal(s.restoreDestMode, 'browse');
+  assert.ok(requestedUrls.some((u) => u.startsWith('/api/restore-original-path?')));
+  const browseUrl = requestedUrls.find((u) => u.startsWith('/api/restore-browse?'));
+  assert.ok(browseUrl);
+  assert.ok(!browseUrl.includes('path='));
   assert.deepEqual(s.restoreBrowseEntries, [{ name: 'C:', path: 'C:\\' }]);
 });
 
-test('openRestore does not browse when browsing is unavailable', () => {
+test('openRestore does not browse or check original-location when browsing is unavailable', () => {
   const { fileGridState } = loadApp();
   const s = fileGridState();
   const originalFetch = globalThis.fetch;
@@ -401,7 +409,79 @@ test('openRestore does not browse when browsing is unavailable', () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(s.restoreBrowsing, false);
+  assert.equal(s.restoreDestMode, 'manual');
+  assert.equal(s.restoreOriginalChecking, false);
+});
+
+test('checkOriginalLocation populates the resolved directory and keeps original mode active on success', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.$refs = { form: { dataset: { volume: 'vol1' } } };
+  s._guestType = 'qemu';
+  s._guestVmid = '133';
+  s._crumbs = [{ label: 'Root', filepath: '/' }];
+  s.restoreDestMode = 'original';
+  let requestedUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ available: true, directory: '/home/alice', reason: null }) };
+  };
+  try {
+    await s.checkOriginalLocation();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requestedUrl.startsWith('/api/restore-original-path?'));
+  assert.equal(s.restoreOriginalAvailable, true);
+  assert.equal(s.restoreOriginalDirectory, '/home/alice');
+  assert.equal(s.restoreDestDir, '/home/alice');
+  assert.equal(s.restoreDestMode, 'original');
+  assert.equal(s.restoreOriginalChecking, false);
+});
+
+test('checkOriginalLocation steps down to browse and surfaces the reason when unavailable', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.$refs = { form: { dataset: { volume: 'vol1' } } };
+  s.restoreBrowseAvailable = true;
+  s.restoreDestMode = 'original';
+  s.restoreBrowsePath = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (url.startsWith('/api/restore-original-path')) {
+      return { ok: true, json: async () => ({ available: false, directory: null, reason: 'not mounted' }) };
+    }
+    return { ok: true, json: async () => ({ path: '/', parent: null, entries: [] }) };
+  };
+  try {
+    await s.checkOriginalLocation();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreOriginalAvailable, false);
+  assert.equal(s.restoreOriginalReason, 'not mounted');
+  assert.equal(s.restoreDestMode, 'browse');
+});
+
+test('checkOriginalLocation surfaces a message and steps down when the fetch itself throws', async () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.$refs = { form: { dataset: { volume: 'vol1' } } };
+  s.restoreBrowseAvailable = false;
+  s.restoreDestMode = 'original';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('offline');
+  };
+  try {
+    await s.checkOriginalLocation();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreOriginalAvailable, false);
+  assert.ok(s.restoreOriginalReason.includes('offline'));
+  assert.equal(s.restoreDestMode, 'manual'); // no browse available either, so falls all the way back
 });
 
 test('browseInto updates path/parent/entries and mirrors destDir', async () => {
@@ -409,6 +489,7 @@ test('browseInto updates path/parent/entries and mirrors destDir', async () => {
   const s = fileGridState();
   s._guestType = 'qemu';
   s._guestVmid = '133';
+  s.restoreDestMode = 'browse'; // browseInto only steers restoreDestDir while this is the active mode
   const originalFetch = globalThis.fetch;
   let requestedUrl = null;
   globalThis.fetch = async (url) => {
@@ -511,10 +592,10 @@ test('browseUp browses into the current parent, including null (top level)', asy
 test('setDestMode switches to manual, then back re-browses the current path', async () => {
   const { fileGridState } = loadApp();
   const s = fileGridState();
-  s.restoreBrowsing = true;
+  s.restoreDestMode = 'browse';
   s.restoreBrowsePath = '/etc';
   s.setDestMode('manual');
-  assert.equal(s.restoreBrowsing, false);
+  assert.equal(s.restoreDestMode, 'manual');
 
   let requestedUrl = null;
   const originalFetch = globalThis.fetch;
@@ -528,14 +609,14 @@ test('setDestMode switches to manual, then back re-browses the current path', as
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(s.restoreBrowsing, true);
+  assert.equal(s.restoreDestMode, 'browse');
   assert.ok(requestedUrl.includes('path=%2Fetc'));
 });
 
 test('setDestMode is a no-op when the requested mode is already active', async () => {
   const { fileGridState } = loadApp();
   const s = fileGridState();
-  s.restoreBrowsing = true;
+  s.restoreDestMode = 'browse';
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
     throw new Error('should not re-fetch when already in browse mode');
@@ -545,5 +626,24 @@ test('setDestMode is a no-op when the requested mode is already active', async (
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(s.restoreBrowsing, true);
+  assert.equal(s.restoreDestMode, 'browse');
+});
+
+test('setDestMode switching to original restores the cached resolved directory without re-fetching', () => {
+  const { fileGridState } = loadApp();
+  const s = fileGridState();
+  s.restoreDestMode = 'manual';
+  s.restoreOriginalDirectory = '/home/alice';
+  s.restoreDestDir = 'something-else';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('should not fetch - the resolved directory is already cached');
+  };
+  try {
+    s.setDestMode('original');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(s.restoreDestMode, 'original');
+  assert.equal(s.restoreDestDir, '/home/alice');
 });
