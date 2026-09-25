@@ -192,6 +192,21 @@ body {
   letter-spacing: 0.2px;
 }
 
+.app-name-suffix {
+  font-style: italic;
+  font-weight: 400;
+  font-size: 0.85em;
+}
+
+.topbar h1 .app-name-suffix {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.about-title .app-name-suffix {
+  display: block;
+  color: var(--text-muted);
+}
+
 .status-title {
   display: block;
   color: rgba(255, 255, 255, 0.65);
@@ -738,7 +753,7 @@ body {
 }
 
 .about-box {
-  width: 360px;
+  width: 400px;
   padding: 32px 24px 24px;
   text-align: center;
   align-items: center;
