@@ -1317,6 +1317,49 @@ entry points at. Two reasons this matters, both raised in review:
    `dir`/`wmic` findings above: a Windows shell command's exit code
    alone is not always trustworthy evidence that it did what it claims.
 
+   **Real-world finding (2026-09-25), issue #72:** restoring `desktop.ini`
+   to its original location (via the #68 feature, once its own crumb-
+   parsing bug — see the 2026-09-25 finding at the top of this section —
+   was fixed) failed with `Agent error: failed to open file
+   '...\desktop.ini': Access is denied.` — a resolved path that was
+   entirely correct. Every restore write goes through
+   `pve_client.write_guest_file()`, a thin wrapper around QEMU guest
+   agent's native `guest-file-open`/`write`/`close` — and Windows'
+   `CreateFile` refuses write access to a **ReadOnly**-attributed file no
+   matter who's asking, even SYSTEM (what the guest agent runs as).
+   Explorer creates `desktop.ini` with ReadOnly (often Hidden+System too)
+   by default in nearly every folder, making it the single most common
+   file to hit this, but any pre-existing destination carrying the
+   attribute has the same problem. Fixed with a new
+   `_clear_readonly_if_present()` in `restore_runner.py`, called
+   *proactively* before every write whenever `VM.GuestAgent.Unrestricted`
+   is available — not just reactively after a failure, since the
+   restore modal's own "I understand this overwrites the destination"
+   checkbox already states the intent this fulfils, and the failure mode
+   otherwise is a hard stop with no useful partial state to recover
+   from. Covers Linux too (clearing the owner-write bit and the
+   immutable flag) even without a confirmed real-world case there yet.
+   Best-effort and silenced — a destination that doesn't exist yet (the
+   common case) has nothing to clear.
+
+   Making this proactive (rather than reactive-on-failure) meant
+   capabilities now have to be checked even for the single-chunk
+   restore's previous "no metadata/verify requested, skip the capability
+   check entirely" fast path — a deliberate, small latency tradeoff (one
+   extra `get_restore_capabilities` round trip on every restore) in
+   exchange for actually avoiding the failure rather than just reacting
+   to it. `check_path_safe()` still only applies once guest-exec is
+   actually going to be used, not unconditionally — a destination with
+   shell-metacharacters that only ever needed the plain `agent/file-write`
+   call must keep working even without `Unrestricted`.
+
+   **Not yet extended to Direct Network Transfer's guest-side fetch**
+   (§7.6 below) — a DNT restore has the guest fetch and write the file
+   itself via its own tool (curl/wget/etc.), which would plausibly hit
+   the identical ReadOnly-attribute failure, just not yet confirmed live
+   and out of scope for this fix (a different code path with its own
+   guest-side bootstrap script, not `write_guest_file`).
+
    **Real-world finding (2026-09-01), first live test of the two
    functions above:** their original Windows commands
    (`cmd /c if not exist "X" mkdir "X"` / `cmd /c if exist "X" (echo

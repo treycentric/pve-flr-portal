@@ -290,6 +290,48 @@ async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | Non
         )
 
 
+async def _clear_readonly_if_present(job: RestoreJob, guest_os_family: str | None, path: str | None = None) -> None:
+    """Issue #72: clears attributes that would otherwise make the
+    upcoming write fail. On Windows, `CreateFile` refuses write access
+    to a ReadOnly-attributed file no matter who's asking - even SYSTEM,
+    which is what the guest agent runs as - so a pre-existing
+    `agent/file-write` destination with that attribute set fails with a
+    raw, confusing "Access is denied" agent error. Confirmed live
+    2026-09-25 restoring `desktop.ini` to its original location:
+    Explorer creates these with ReadOnly (often Hidden+System too) by
+    default in nearly every folder, making it the single most common
+    file this hits, but any pre-existing destination carrying the
+    attribute has the same problem. Linux gets the equivalent treatment
+    (clearing the owner-write bit and the immutable flag) even without a
+    confirmed real-world case yet, on the same reasoning.
+
+    Called proactively before every write once guest-exec is confirmed
+    available - not just reactively after a failure - since the
+    restore's own "I understand this overwrites the destination"
+    confirmation already states the intent this fulfils, and the
+    failure mode otherwise is a hard stop with no useful partial state
+    to recover from.
+
+    Best-effort and silenced: a destination that doesn't exist yet (the
+    common case) has nothing to clear, and every tool used here fails
+    cleanly against a missing path - swallowed rather than failing the
+    whole restore over what is, worst case, a no-op."""
+    target = job.destination if path is None else path
+    try:
+        if guest_os_family == "windows":
+            script = (
+                f"if (Test-Path -LiteralPath '{target}') {{ "
+                f"Set-ItemProperty -LiteralPath '{target}' -Name Attributes -Value Normal "
+                "-ErrorAction SilentlyContinue }"
+            )
+            await _exec(job, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+        else:
+            await _exec(job, ["chmod", "u+w", target])
+            await _exec(job, ["chattr", "-i", target])
+    except (httpx.HTTPStatusError, pve_client.GuestExecTimeout):
+        pass  # best-effort - the write immediately after surfaces any real problem on its own
+
+
 async def _ensure_guest_trusts_ca(job: RestoreJob, guest_os_family: str | None) -> bool:
     """Install the Direct Network Transfer data-plane CA into the guest's
     trust store so `verify` mode works (issue #47 §7.6.1). Returns
@@ -941,29 +983,26 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                 needs_exec = job.restore_metadata or job.verify
                 job.progress_total = 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
 
-                if not needs_exec:
-                    job.log("Fits in one call and no metadata/verify requested - writing directly, no guest-exec.")
-                    await ensure_fresh_ticket(job.session)
-                    await pve_client.write_guest_file(
-                        job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece),
-                        node=job.node,
-                    )
-                    job.progress_current = 1
-                    jobs.mark_done(job.id)
-                    return
-
-                # Everything past this point talks to guest-exec, so the
-                # destination has to be safe to embed in a shell/
-                # PowerShell command string (concatenation, LastWriteTime,
-                # certutil aren't all pure-argv invocations the way
-                # file-write is) - checked once up front rather than at
-                # each individual step.
-                pve_client.check_path_safe(job.destination)
-
+                # Issue #72: capabilities are now checked even when
+                # nothing else needs guest-exec, purely so a ReadOnly/
+                # Hidden/System-attributed destination (desktop.ini and
+                # friends - Explorer creates these with ReadOnly set by
+                # default in nearly every folder) can be cleared before
+                # the write, when Unrestricted happens to be available.
+                # CreateFile refuses write access to one of those no
+                # matter who's asking - the write would otherwise fail
+                # with a raw, confusing "Access is denied" agent error
+                # despite the restore's own "this overwrites the
+                # destination" confirmation already covering the intent.
+                # check_path_safe() only matters once guest-exec is
+                # actually about to be used below, not unconditionally -
+                # a destination with shell-metacharacters that only needs
+                # the plain file-write call must keep working even
+                # without Unrestricted.
                 job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
                 await ensure_fresh_ticket(job.session)
                 caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
-                if not caps.design_b.available:
+                if needs_exec and not caps.design_b.available:
                     jobs.mark_failed(
                         job.id,
                         caps.design_b.reason
@@ -972,13 +1011,19 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     )
                     return
                 guest_os_family = caps.guest_os_family
-                job.log(f"guest-exec available (guest OS family: {guest_os_family or 'unknown'}).")
+                exec_available = caps.design_b.available
 
-                await _ensure_destination_dir(job, guest_os_family)
-                job.log("Confirmed the destination directory exists.")
-                if job.cancel_requested:
-                    jobs.mark_cancelled(job.id)
-                    return
+                if exec_available:
+                    pve_client.check_path_safe(job.destination)
+                    job.log(f"guest-exec available (guest OS family: {guest_os_family or 'unknown'}).")
+                    await _ensure_destination_dir(job, guest_os_family)
+                    job.log("Confirmed the destination directory exists.")
+                    if job.cancel_requested:
+                        jobs.mark_cancelled(job.id)
+                        return
+                    await _clear_readonly_if_present(job, guest_os_family)
+                else:
+                    job.log("guest-exec not available - writing directly, no attribute pre-clearing possible.")
 
                 if hasher is not None:
                     hasher.update(first_piece)
@@ -987,6 +1032,10 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece),
                     node=job.node,
                 )
+                if not needs_exec:
+                    job.progress_current = 1
+                    jobs.mark_done(job.id)
+                    return
                 job.progress_current += 1
                 job.log("Wrote the file directly (single chunk, exec still needed for a later step).")
             else:
@@ -1051,6 +1100,7 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                         len(chunk_paths) + 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
                     )
                     job.log(f"Wrote all {len(chunk_paths)} chunk(s) to scratch; concatenating into the destination.")
+                    await _clear_readonly_if_present(job, guest_os_family)
                     await _concat_chunks(job, chunk_paths, job.destination, guest_os_family)
                     await _verify_destination_exists(job, guest_os_family)
                     job.progress_current += 1
