@@ -182,6 +182,42 @@ No live response-body capture was ultimately needed — the published
 schema is authoritative for shape, and the empirical capture already
 locked down timing and encoding quirks the schema doesn't document.
 
+**Confirmed 2026-09-25 (real usage, issue #66): what's under a disk.**
+Drilling into a root-level disk entry never lands directly on the
+guest's filesystem — PVE always nests it one level deeper, under one or
+both of two synthetic classification folders:
+- **`part`** — the disk's raw partition table, one numbered folder per
+  partition (`part/1`, `part/2`, ...), each drilling into that
+  partition's own filesystem root. This is the only folder present for
+  a disk with no LVM on it.
+- **`lvm`** — present only when the disk holds a physical volume that's
+  part of an LVM volume group, one folder per **volume group** name
+  found (`lvm/<vg>`), each containing that VG's logical volumes.
+
+  **Confirmed live, same date:** a VG spanning multiple virtual disks
+  (a 3-disk guest, one VG across all three) shows an **identical**
+  `lvm/<vg>` subtree under *every* disk it spans, not just one — PVE's
+  helper VM attaches every disk in the snapshot at once and assembles
+  LVM across them, the same as a real boot would. Browsing into
+  `lvm/<vg>` under disk 0, 1, or 2 all show the same merged contents.
+
+  The app elevates each distinct VG to a root-level entry instead
+  (deduped across the disks it spans — content is identical regardless
+  of which disk's copy is used) and hides the now-redundant `lvm`
+  folder from each disk's own listing; `part` is further flattened away
+  when it's left as a disk's only remaining child, so partition numbers
+  show directly under the disk instead of behind an extra layer. See
+  `main.py`'s `_discover_lvm_volumes`/`_disk_level_entries`. Only `part`
+  and `lvm` have actually been observed as classification folders under
+  a disk — if a third one ever turns up, the `part`-flattening rule is
+  written to require zero siblings, so it stays inert rather than
+  guessing.
+
+  Not yet captured live: whether an analogous folder exists for other
+  block-layer assemblies PVE's helper VM might support (software RAID/
+  `mdadm`, ZFS) — no evidence either way, not something a guest in this
+  project's own testing has exercised.
+
 **Why `FileRestoreReader` needs exactly the privileges it has.**
 `PVE::Storage::check_volume_access` (pve-storage source) requires, for
 a `backup`-type volume, *both* `Datastore.AllocateSpace` on
@@ -2332,6 +2368,16 @@ recorded here so the ceiling is known before anyone leans on it.
   JS. Big directories bloat the partial and make the grid sluggish.
 
 **Softer limits:**
+
+- **LVM elevation (issue #66) probes every disk on every VM-guest root
+  browse.** `_discover_lvm_volumes` calls `file-restore/list` on each
+  root-level disk (in parallel) to check for an `lvm` folder, even for
+  the common case of a guest that doesn't use LVM at all — there's no
+  cache (same underlying limit as above), so this cost is paid on every
+  root view, not just the first. Adds up to one more cold-lookup round
+  trip to every VM guest's root browse, worst case. Accepted as a
+  reasonable cost for the convenience on a single-admin homelab tool;
+  would be the first thing to revisit if PH.6's cache ever lands.
 
 - **In-memory sessions + `reload=True`, one worker** (`run.py`): can't
   run multiple uvicorn workers or scale horizontally — each worker would

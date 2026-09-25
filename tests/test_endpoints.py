@@ -8,6 +8,7 @@ unauthenticated path.
 
 import asyncio
 import io
+import json
 import time
 import zipfile
 
@@ -209,6 +210,134 @@ def test_browse_renders_drive_icon_for_root_entries(client, monkeypatch):
     sub_resp = client.get("/api/browse", params={"volume": "vol", "filepath": "L2RyaXZl"})
     assert "tree-icon" not in sub_resp.text
     assert "&#128193;" in sub_resp.text  # plain folder emoji for a non-root directory
+
+
+# Issue #66: a 3-disk VM whose LVM volume group ("myvg", to avoid any
+# substring collision with the filepath tokens below) spans all three -
+# every disk's own "lvm" folder shows the identical VG (different filepath
+# tokens per disk, same content - confirmed live 2026-09-25), same shape
+# the real screenshot behind #66 showed. "disk0" also has a "boot" entry
+# alongside "part"/"lvm" (a stand-in for some as-yet-unobserved third
+# category) so flattening only fires when "part" truly has zero siblings.
+# "drive-efidisk0" has no LVM at all and only a single "part" child, to
+# exercise the lone-part flatten.
+_LVM_VOLUME = "pbs:backup/vm/205/2026-09-25T00:00:00Z"
+_LVM_TREE = {
+    "/": [
+        {"text": "drive-scsi0.img.fidx", "leaf": False, "filepath": "tok-disk0"},
+        {"text": "drive-scsi1.img.fidx", "leaf": False, "filepath": "tok-disk1"},
+        {"text": "drive-scsi2.img.fidx", "leaf": False, "filepath": "tok-disk2"},
+        {"text": "drive-efidisk0.img.fidx", "leaf": False, "filepath": "tok-efidisk0"},
+    ],
+    "tok-disk0": [
+        {"text": "part", "leaf": False, "filepath": "tok-disk0-part"},
+        {"text": "lvm", "leaf": False, "filepath": "tok-disk0-lvm"},
+        {"text": "boot", "leaf": False, "filepath": "tok-disk0-boot"},
+    ],
+    "tok-disk1": [
+        {"text": "part", "leaf": False, "filepath": "tok-disk1-part"},
+        {"text": "lvm", "leaf": False, "filepath": "tok-disk1-lvm"},
+    ],
+    "tok-disk2": [
+        {"text": "part", "leaf": False, "filepath": "tok-disk2-part"},
+        {"text": "lvm", "leaf": False, "filepath": "tok-disk2-lvm"},
+    ],
+    "tok-disk0-lvm": [{"text": "myvg", "leaf": False, "filepath": "tok-disk0-vg"}],
+    "tok-disk1-lvm": [{"text": "myvg", "leaf": False, "filepath": "tok-disk1-vg"}],
+    "tok-disk2-lvm": [{"text": "myvg", "leaf": False, "filepath": "tok-disk2-vg"}],
+    "tok-disk0-vg": [
+        {"text": "home", "leaf": False, "filepath": "tok-vg-home"},
+        {"text": "root", "leaf": False, "filepath": "tok-vg-root"},
+        {"text": "swap", "leaf": False, "filepath": "tok-vg-swap"},
+    ],
+    "tok-efidisk0": [{"text": "part", "leaf": False, "filepath": "tok-efidisk0-raw"}],
+    "tok-efidisk0-raw": [{"text": "1", "leaf": False, "filepath": "tok-efidisk0-raw-1"}],
+}
+
+
+async def _fake_lvm_list_path(session, volume, filepath="/"):
+    return _LVM_TREE[filepath]
+
+
+def test_browse_root_elevates_lvm_volume_groups(client, monkeypatch):
+    """Issue #66: a VG spanning multiple disks gets ONE root-level entry
+    (deduped across the disks it spans) instead of forcing the user to
+    pick an arbitrary disk to find it under."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "/", "crumbs": "[]"})
+    assert resp.status_code == 200
+    # Every disk still shows (the "part" side of each is still real content).
+    for disk in ("drive-scsi0.img.fidx", "drive-scsi1.img.fidx", "drive-scsi2.img.fidx", "drive-efidisk0.img.fidx"):
+        assert disk in resp.text
+    assert "myvg" in resp.text
+    # Deduped to exactly one disk's copy - not the same VG showing up once
+    # per disk it spans (which disk wins is non-deterministic - asyncio.
+    # gather races the 3 probes - so check exactly one token, not a specific one).
+    winners = [t for t in ("tok-disk0-vg", "tok-disk1-vg", "tok-disk2-vg") if t in resp.text]
+    assert len(winners) == 1
+    assert "LVM Volume" in resp.text
+    assert "polygon points" in resp.text  # the LVM icon, distinct from the drive icon
+
+
+def test_browse_disk_level_hides_lvm_and_keeps_part_with_a_real_sibling(client, monkeypatch):
+    """Issue #66: a disk that still has other real, non-LVM content
+    alongside "part" (here "boot") keeps "part" as its own folder when
+    browsed directly - only the now-redundant "lvm" folder (elevated to
+    root) is hidden, and "part" is left alone only when it's truly the
+    sole remaining child (see the lone-part test below)."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
+    crumbs = json.dumps(
+        [{"label": "Root", "filepath": "/"}, {"label": "drive-scsi0.img.fidx", "filepath": "tok-disk0"}]
+    )
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "tok-disk0", "crumbs": crumbs})
+    assert resp.status_code == 200
+    assert "boot" in resp.text
+    assert "part" in resp.text
+    assert "lvm" not in resp.text
+
+
+def test_browse_disk_level_flattens_lone_part(client, monkeypatch):
+    """Issue #66: when "part" is a disk's only remaining child (no LVM or
+    anything else alongside it), the indirection folder itself is skipped
+    - partition numbers show directly under the disk."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
+    crumbs = json.dumps(
+        [{"label": "Root", "filepath": "/"}, {"label": "drive-efidisk0.img.fidx", "filepath": "tok-efidisk0"}]
+    )
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "tok-efidisk0", "crumbs": crumbs})
+    assert resp.status_code == 200
+    assert 'data-name="part"' not in resp.text
+    assert "tok-efidisk0-raw-1" in resp.text  # the "part" folder's own child, shown directly instead
+
+
+def test_browse_never_applies_lvm_view_to_container_volumes(client, monkeypatch):
+    """Issue #66: containers have no disk/partition concept - a CT backup
+    could legitimately have real top-level folders literally named "part"
+    or "lvm", which must never be touched by this logic."""
+
+    async def fake_ct_list_path(session, volume, filepath="/"):
+        return [
+            {"text": "part", "leaf": False, "filepath": "a"},
+            {"text": "lvm", "leaf": False, "filepath": "b"},
+        ]
+
+    monkeypatch.setattr(pve_client, "list_path", fake_ct_list_path)
+    resp = client.get(
+        "/api/browse", params={"volume": "pbs:backup/ct/205/2026-09-25T00:00:00Z", "filepath": "/", "crumbs": "[]"}
+    )
+    assert resp.status_code == 200
+    assert "part" in resp.text
+    assert "lvm" in resp.text
+    assert "LVM Volume" not in resp.text
+
+
+def test_tree_root_elevates_lvm_volume_groups(client, monkeypatch):
+    monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
+    resp = client.get("/api/tree", params={"volume": _LVM_VOLUME, "filepath": "/", "crumbs": "[]"})
+    assert resp.status_code == 200
+    assert "myvg" in resp.text
+    winners = [t for t in ("tok-disk0-vg", "tok-disk1-vg", "tok-disk2-vg") if t in resp.text]
+    assert len(winners) == 1
 
 
 def test_browse_error_partial_on_pve_failure(client, monkeypatch):
