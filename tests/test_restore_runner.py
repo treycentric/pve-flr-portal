@@ -99,7 +99,13 @@ def _patch_download(monkeypatch, content: bytes, *, content_length: bool = False
 # --- fast path (no exec needed) ------------------------------------------
 
 
-async def test_small_file_no_flags_uses_fast_path_no_capability_check(manager, session_data, monkeypatch):
+async def test_small_file_no_flags_writes_directly_after_checking_capabilities(manager, session_data, monkeypatch):
+    # Issue #72: capabilities are now checked even in this no-metadata/
+    # no-verify case - purely so a ReadOnly-attributed destination can be
+    # cleared before the write when Unrestricted happens to be available
+    # (see test_readonly_destination_is_cleared_before_write_when_available
+    # below). This trades the old "zero extra calls" fast path for that
+    # correctness fix - a deliberate choice, not a regression.
     job = _make_job(manager, session_data)
     _patch_download(monkeypatch, b"127.0.0.1 localhost")
     written = {}
@@ -107,11 +113,11 @@ async def test_small_file_no_flags_uses_fast_path_no_capability_check(manager, s
     async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         written.update(path=path, content=content)
 
-    async def fail_if_called(*a, **kw):
-        raise AssertionError("capability check should not run when no exec is needed")
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing Unrestricted"))
 
     monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
-    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fail_if_called)
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
 
     await run_restore(job, manager)
 
@@ -121,8 +127,101 @@ async def test_small_file_no_flags_uses_fast_path_no_capability_check(manager, s
     assert (job.progress_total, job.progress_current) == (1, 1)
     log_text = "\n".join(job.log_lines)
     assert "Starting restore" in log_text
-    assert "no guest-exec" in log_text
+    assert "no attribute pre-clearing possible" in log_text
     assert "completed successfully" in log_text
+
+
+async def test_readonly_destination_is_cleared_before_write_when_available(manager, session_data, monkeypatch):
+    """Issue #72: a ReadOnly-attributed destination (desktop.ini and
+    friends) makes CreateFile refuse write access no matter who's
+    asking - cleared proactively before the write whenever Unrestricted
+    happens to be available, even when the user didn't request metadata
+    restore or verify."""
+    job = _make_job(manager, session_data, destination="C:\\Users\\bob\\Documents\\desktop.ini")
+    _patch_download(monkeypatch, b"[.ShellClassInfo]")
+    exec_calls = []
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        # The clear must happen before the write, not after.
+        assert any(c[0] == "powershell" for c in exec_calls)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="windows", design_b=guest_agent.PathAvailability(True))
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_calls.append(argv)
+        return 0, "", ""
+
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    clear_calls = [c for c in exec_calls if c[0] == "powershell" and "Set-ItemProperty" in c[-1]]
+    assert len(clear_calls) == 1
+    assert "desktop.ini" in clear_calls[0][-1]
+
+
+async def test_readonly_destination_is_cleared_on_linux_too(manager, session_data, monkeypatch):
+    """Issue #72: same treatment on Linux - clearing the owner-write bit
+    and the immutable flag before the write, even without a confirmed
+    real-world case yet (unlike the Windows ReadOnly-attribute one)."""
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"127.0.0.1 localhost")
+    exec_calls = []
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        assert ["chmod", "u+w", "/etc/hosts"] in exec_calls
+        assert ["chattr", "-i", "/etc/hosts"] in exec_calls
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux", design_b=guest_agent.PathAvailability(True))
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_calls.append(argv)
+        return 0, "", ""
+
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+
+
+async def test_readonly_clear_failure_does_not_fail_the_restore(manager, session_data, monkeypatch):
+    """Best-effort: chattr commonly doesn't exist/apply on a given guest
+    or filesystem - a failure clearing attributes must never fail the
+    whole restore, since the write immediately after surfaces any real
+    problem on its own."""
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"127.0.0.1 localhost")
+    written = {}
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        written["called"] = True
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux", design_b=guest_agent.PathAvailability(True))
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[0] == "chattr":
+            raise httpx.HTTPStatusError(
+                "x", request=httpx.Request("POST", "http://x"), response=httpx.Response(500)
+            )
+        return 0, "", ""
+
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    assert written.get("called") is True
 
 
 async def test_job_on_a_non_localhost_node_threads_it_through_every_guest_call(manager, session_data, monkeypatch):
@@ -138,11 +237,11 @@ async def test_job_on_a_non_localhost_node_threads_it_through_every_guest_call(m
     async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         seen_nodes.append(kwargs.get("node"))
 
-    async def fail_if_called(*a, **kw):
-        raise AssertionError("capability check should not run when no exec is needed")
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing Unrestricted"))
 
     monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
-    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fail_if_called)
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
 
     await run_restore(job, manager)
 
@@ -200,6 +299,9 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     concat_call = next(c for c in exec_calls if c[:2] == ["sh", "-c"])
     assert "cat" in concat_call[2] and job.destination in concat_call[2]
     assert any(c[:2] == ["test", "-f"] for c in exec_calls)
+    # Issue #72: readonly-clearing runs right before the concat, not just
+    # for the single-chunk path.
+    assert exec_calls.index(["chmod", "u+w", job.destination]) < exec_calls.index(concat_call)
     assert exec_calls.count(["mkdir", "-p", "/etc"]) == 1  # dest dir, not just scratch
     assert exec_calls[-1][:2] == ["rm", "-rf"]
     # 2 chunk-write units + 1 concat unit, all complete
@@ -528,9 +630,10 @@ async def test_verify_success_linux_marks_done(manager, session_data, monkeypatc
     verify_call_kwargs = {}
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
-        # Ensuring the destination directory exists runs first; the
-        # checksum verification command is the last exec call.
-        if argv[:2] == ["mkdir", "-p"]:
+        # Ensuring the destination directory exists runs first, then
+        # issue #72's best-effort readonly-clearing (chmod/chattr on
+        # Linux); the checksum verification command is the last exec call.
+        if argv[:2] == ["mkdir", "-p"] or argv[0] in ("chmod", "chattr"):
             return 0, "", ""
         assert argv == ["sha256sum", "/etc/hosts"]
         verify_call_kwargs.update(kwargs)
@@ -610,13 +713,19 @@ async def test_verify_windows_parses_certutil_output(manager, session_data, monk
 
 
 async def test_unsafe_destination_fails_before_any_exec_call(manager, session_data, monkeypatch):
+    # Issue #72: capabilities are now checked before this rejection fires
+    # (needed to know whether exec - and so the path-safety requirement -
+    # even applies), but no actual exec call must ever be made.
     job = _make_job(manager, session_data, destination="/etc/hosts; rm -rf /", verify=True)
     _patch_download(monkeypatch, b"small")
 
-    async def fail_if_called(*a, **kw):
-        raise AssertionError("should never reach a capability check or exec call")
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
 
-    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fail_if_called)
+    async def fail_if_called(*a, **kw):
+        raise AssertionError("should never reach an actual exec call")
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     monkeypatch.setattr(pve_client, "run_guest_exec", fail_if_called)
 
     await run_restore(job, manager)
@@ -1201,6 +1310,9 @@ async def test_pve_error_during_write_marks_failed(manager, session_data, monkey
     job = _make_job(manager, session_data)
     _patch_download(monkeypatch, b"small")
 
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing Unrestricted"))
+
     async def fake_write_guest_file(session, guest_type, vmid, path, content, **kwargs):
         raise httpx.HTTPStatusError(
             "x",
@@ -1210,6 +1322,7 @@ async def test_pve_error_during_write_marks_failed(manager, session_data, monkey
             ),
         )
 
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     monkeypatch.setattr(pve_client, "write_guest_file", fake_write_guest_file)
 
     await run_restore(job, manager)
