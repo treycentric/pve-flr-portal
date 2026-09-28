@@ -167,6 +167,37 @@ async def test_windows_ambiguous_ide_falls_back_to_ordinal(session_data, monkeyp
     assert result.directory == "C:\\x"
 
 
+async def test_windows_bus_match_http_error_falls_back_to_ordinal_not_a_500(session_data, monkeypatch):
+    """Regression: the bus-matching guest-exec call (Get-PhysicalDisk/
+    Win32_DiskDrive) failing with a real PVE HTTP error - not just a
+    timeout - must fall back to the ordinal guess exactly like every
+    other failure mode here, not propagate and break the whole
+    original-location-restore endpoint (its own docstring promises it
+    never raises for a "couldn't figure it out" case)."""
+
+    async def fake_list_path(session, volume, filepath="/"):
+        return [{"text": "drive-sata1.img.fidx", "leaf": False, "filepath": "d0"}]
+
+    monkeypatch.setattr(gol, "list_path", fake_list_path)
+
+    async def fake_run_guest_exec(session, guest_type, vmid, argv, node="localhost", **kwargs):
+        if "Get-PhysicalDisk" in argv[-1]:
+            raise httpx.HTTPStatusError(
+                "guest agent unreachable",
+                request=httpx.Request("GET", "http://pve.test/x"),
+                response=httpx.Response(500),
+            )
+        assert "DiskNumber 0" in argv[-1]
+        return 0, "D\n", ""
+
+    monkeypatch.setattr(gol, "run_guest_exec", fake_run_guest_exec)
+    result = await gol.resolve_original_directory(
+        session_data, "133", "windows", "localhost", "vol", _crumbs("drive-sata1.img.fidx", "part", "1", "x")
+    )
+    assert result.available is True
+    assert result.directory == "D:\\x"
+
+
 @respx.mock
 async def test_windows_virtio_blk_bus_falls_back_to_ordinal(session_data, monkeypatch):
     """virtio (virtio-blk, not virtio-scsi) was never live-verified -

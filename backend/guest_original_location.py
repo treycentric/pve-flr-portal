@@ -239,7 +239,7 @@ async def list_windows_drive_letters(session: SessionData, vmid: str, node: str,
         exitcode, out, _err = await run_guest_exec(
             session, "vm", vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], node=node
         )
-    except GuestExecTimeout:
+    except (GuestExecTimeout, httpx.HTTPStatusError):
         return {}
     if exitcode != 0 or not out.strip():
         return {}
@@ -285,7 +285,7 @@ async def _windows_disk_number_by_bus(
         exitcode, out, _err = await run_guest_exec(
             session, "vm", vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], node=node
         )
-    except GuestExecTimeout:
+    except (GuestExecTimeout, httpx.HTTPStatusError):
         return None
     if exitcode != 0 or not out.strip():
         return None
