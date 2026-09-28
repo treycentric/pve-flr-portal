@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 import httpx
+import zstandard
 
 from . import guest_agent, guest_ca, pve_client, restore_bundle, restore_download, restore_network_pull
 from .auth import ensure_fresh_ticket
@@ -652,6 +653,31 @@ async def _restore_mtime(job: RestoreJob, guest_os_family: str | None) -> None:
         raise RuntimeError(f"Could not restore the original modified time: {err.strip() or out.strip()}")
 
 
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def _decompress_prefix(buf: bytes) -> bytes:
+    """Issue #20: confirmed live 2026-09-28 - PVE's `tar=1` output is
+    NOT consistently one format or the other. A single-file download
+    came back as a genuine plain tar in one live test, and zstd-framed
+    (the documented `.tar.zst` behavior) in another, same endpoint/
+    parameter - so detect via the zstd magic number rather than
+    assuming either way. Uses a streaming reader, not a single-shot
+    `decompress()`, since `buf` is a deliberately bounded prefix, not a
+    complete frame - a single-shot call needs either a known content
+    size or a whole frame, neither guaranteed by a truncated read.
+    Returns `buf` unchanged (never raises) if it isn't zstd-framed at
+    all, or if streaming decompression of the truncated prefix fails -
+    the caller's own tarfile parse is what actually decides success."""
+    if not buf.startswith(_ZSTD_MAGIC):
+        return buf
+    try:
+        reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(buf))
+        return reader.read(65536)
+    except zstandard.ZstdError:
+        return buf
+
+
 async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | None:
     """Issue #20: confirmed live 2026-09-28 (docs/plan.md §7.5) - PVE's
     file-restore/download with tar=1 wraps even a single file's content
@@ -661,7 +687,8 @@ async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | Non
     including any GNU/PAX long-name extension blocks, are small - 16KB
     is generous headroom) to parse just the first entry's header, never
     downloading the file's full content a second time, then closes the
-    connection immediately.
+    connection immediately. See _decompress_prefix for why that prefix
+    is checked for zstd-framing first, not assumed to be a plain tar.
 
     Returns None (never raises) on any failure to determine ownership -
     the caller treats that as "nothing to restore, skip it", the same
@@ -683,6 +710,7 @@ async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | Non
             buf += piece
             if len(buf) >= 16384:
                 break
+        buf = _decompress_prefix(buf)
         try:
             with tarfile.open(fileobj=io.BytesIO(buf)) as tf:
                 info = tf.next()

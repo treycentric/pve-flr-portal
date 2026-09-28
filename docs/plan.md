@@ -1139,6 +1139,43 @@ entry points at. Two reasons this matters, both raised in review:
     ARE in hand, a `chown`/`chmod` failure raises and fails the job,
     same as a failed mtime restore.
 
+    **Real-world finding (2026-09-28): `tar=1`'s output is not
+    consistently one format, and this bug hid from local testing for a
+    genuinely subtle reason.** A live single-file restore against a
+    real Turnkey Linux guest failed to determine ownership at all —
+    diagnostic logging showed the `tar=1` response starting with the
+    zstd magic number (`\x28\xb5\x2f\xfd`), fed straight into
+    `tarfile.open()` unmodified, which naturally failed ("truncated
+    header"). The exact same endpoint/parameter had returned a genuine
+    *plain*, uncompressed tar for a different file earlier in the same
+    investigation — so PVE's `tar=1` isn't reliably `.tar.zst` despite
+    the name suggesting it, and code consuming it must detect via the
+    magic number and handle either, never assume one. Fixed with
+    `_decompress_prefix` — checks for the magic number, and if present,
+    uses a *streaming* zstd reader (not a single-shot `decompress()`,
+    which needs either a known content size or a complete frame,
+    neither guaranteed by the deliberately-truncated 16KB prefix this
+    function reads).
+
+    **The regression test for this needed a second, more direct form,
+    for an equally subtle reason: Python 3.14 (this project's dev
+    environment) masked the bug entirely.** An initial end-to-end test
+    (a zstd-compressed fake tar fed through the full restore flow)
+    passed even with the fix *reverted* — confirmed live that Python
+    3.14's stdlib `tarfile.open()` auto-detects and transparently
+    decompresses zstd-framed input natively (new that release, per its
+    own new `compression.zstd` support), silently absorbing exactly the
+    bug this fix addresses. The Docker deployment target is Python 3.11
+    (this project's own `docker-compose.yml`/README testing note),
+    which has no such native support — the environment where the live
+    bug actually happened. Added a direct unit test of
+    `_decompress_prefix` itself (asserting it round-trips a real
+    zstd-compressed blob back to the original bytes) as the actual
+    regression guard, since it doesn't depend on tarfile's own auto-
+    detection and so can't be masked by which Python version runs the
+    suite — the end-to-end test is kept too, but only as an integration
+    check, not the thing proving this fix works.
+
     **Windows ACLs: confirmed infeasible via any Proxmox-exposed API
     today, not just untested (investigated 2026-09-28).** The NTFS
     Security Descriptor survives intact inside a PBS backup (PBS backs
