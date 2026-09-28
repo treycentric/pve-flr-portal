@@ -67,6 +67,19 @@ pays that N times. The app is correct without this — it's purely "stop
 paying the same 3s tax repeatedly." Single SQLite file, no background
 job, per CLAUDE.md's "no extra services" constraint. Est. 1-2 days.
 
+**More motivated after #80:** hiding unmountable partitions/disks/LVM
+volumes (main.py's `_filter_unmountable_children`/
+`_disk_has_visible_content`) adds one extra `file-restore/list` call
+*per child* on top of the listing itself, so expanding a disk with
+several partitions in the tree can now take several seconds even on a
+warm PVE. Live-reported (2026-09-28): 6-10s to expand a disk in the
+tree view, previously near-instant. Worked around for now by making
+the wait visible (`app.js`'s `_syncTreeToCrumbs`/
+`_restoreTreeExpansion` now reuse the file grid's `#loading` indicator
+during tree-sync fetches, since it wasn't shown there at all before and
+made the slow-but-working case look identical to broken) rather than
+by caching - this cache is the real fix for the underlying cost.
+
 ## Server-side per-user preferences store (follow-up to #29)
 
 The colour theme (#29) persists per-browser in `localStorage` today, plus

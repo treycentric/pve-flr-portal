@@ -1499,7 +1499,7 @@ function portalApp(rawSnapshots, guest) {
         if (!ul || ul.tagName !== 'UL') continue;
         const url = btn.getAttribute('hx-get');
         try {
-          await htmx.ajax('GET', url, { target: ul, swap: 'innerHTML' });
+          await htmx.ajax('GET', url, { target: ul, swap: 'innerHTML', indicator: '#loading' });
         } catch (e) {
           continue;
         }
@@ -1588,7 +1588,17 @@ function portalApp(rawSnapshots, guest) {
         if (!ul || ul.tagName !== 'UL') break;
         const fetchUrl = btn.getAttribute('hx-get');
         try {
-          await htmx.ajax('GET', fetchUrl, { target: ul, swap: 'innerHTML' });
+          // Issue #80's partition/disk readability probes add a
+          // file-restore/list round trip per child on top of the
+          // listing itself - a disk with several partitions can take
+          // several seconds to expand here. Reuses the file grid's own
+          // #loading indicator (same "helper VM booting" message) so
+          // this doesn't look finished/stuck while it's still working -
+          // load()'s own indicator: '#loading' fetch has already
+          // resolved by the time this runs, so without this the
+          // indicator disappears and nothing shows the tree is still
+          // catching up.
+          await htmx.ajax('GET', fetchUrl, { target: ul, swap: 'innerHTML', indicator: '#loading' });
         } catch (e) {
           break;
         }
