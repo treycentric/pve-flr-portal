@@ -43,17 +43,16 @@ commit.
   separate from restore-to-guest) still buffers the whole archive in
   RAM; the streaming techniques #24 built are directly reusable there
   but haven't been applied yet.
-- #47 — HTTPS on the Direct Network Transfer data plane. **Built and
+- #47 — HTTPS on the Direct Network Transfer data plane. **SHIPPED** —
   live-verified (2026-09-08, Windows + Linux VMs, self-signed and
-  step-ca certs)**; on branch `feat/dnt-https-verify-ca-47`, not yet
-  squash-merged. `verify`/`insecure`/`plaintext` policy + downgrade
-  ladder (steps down on a runtime TLS-trust failure too), self-signed
-  data-plane cert with IP SANs, HTTPS data listener, per-fetch-tool
-  skip-verify, per-NIC `hostname`, minimum TLS version, automatic guest
-  CA install, `PREFERRED` default `verify`, `curl.exe` preferred on
-  Windows. Design + shakeout log: `docs/plan.md` §7.6.1. Remaining:
-  squash-merge + version bump. Deferred follow-ups: `openssl s_client`
-  POSIX candidate; `UNINSTALL_CA_AFTER`; `bitsadmin` over HTTPS.
+  step-ca certs) and merged into `main`. `verify`/`insecure`/`plaintext`
+  policy + downgrade ladder (steps down on a runtime TLS-trust failure
+  too), self-signed data-plane cert with IP SANs, HTTPS data listener,
+  per-fetch-tool skip-verify, per-NIC `hostname`, minimum TLS version,
+  automatic guest CA install, `PREFERRED` default `verify`, `curl.exe`
+  preferred on Windows. Design + shakeout log: `docs/plan.md` §7.6.1.
+  Deferred follow-ups: `openssl s_client` POSIX candidate;
+  `UNINSTALL_CA_AFTER`; `bitsadmin` over HTTPS.
 - #52 — bake certbot + a DNS-01 plugin into the LXC/Docker build, with a
   renewal deploy hook and a first-run helper. Design in the issue.
 
