@@ -117,6 +117,20 @@ def clear_list_path_state():
     pve_client.clear_list_path_state()
 
 
+@pytest.fixture(autouse=True)
+def clear_windows_disk_cache():
+    """Same leak-between-tests convention as sessions/restore jobs above,
+    for issue #77's per-vmid whole-VM disk-bus/drive-letter cache -
+    tests widely reuse vmid "133", so a cached hit from an earlier test
+    would silently short-circuit a later test's own fake guest-exec
+    response."""
+    from backend import guest_original_location
+
+    guest_original_location.clear_windows_disk_cache()
+    yield
+    guest_original_location.clear_windows_disk_cache()
+
+
 @pytest.fixture
 def api_base():
     from backend.config import settings

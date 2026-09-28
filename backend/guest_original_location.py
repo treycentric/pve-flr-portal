@@ -74,6 +74,7 @@ against an *empty* or *failed* lookup, not a wrong-but-plausible one.
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -86,6 +87,28 @@ _log = logging.getLogger("pve_flr_portal.guest_original_location")
 _DISK_LABEL_RE = re.compile(r"^drive-(ide|sata|scsi|virtio)(\d+)\.img\.fidx$")
 _BUS_TYPE_BY_PVE_BUS = {"ide": "ATA", "sata": "SATA", "scsi": "SAS"}
 _LUN_RE = re.compile(r"LUN (\d+)")
+
+# Issue #77 follow-on: both whole-VM guest-exec queries below
+# (Win32_DiskDrive/Get-PhysicalDisk bus info, and Get-Partition's drive
+# letters) already cover every disk/partition in one call regardless of
+# which single one a given request cares about - cached per vmid so
+# drilling into a second/third disk in the same browsing session reuses
+# them instead of re-querying identical guest state from scratch. Short
+# TTL (not persisted, not invalidated on guest changes) since this is a
+# browse-time convenience trading a little possible staleness for far
+# fewer guest-exec round trips, not something correctness-critical
+# depends on staying fresh. Process-wide, in-memory dicts - same
+# "no database" tradeoff as auth._sessions/restore_jobs.manager, cleared
+# between tests the same way (see conftest.py).
+_CACHE_TTL_SECONDS = 120
+_disk_bus_rows_cache: dict[str, tuple[float, list[dict]]] = {}
+_partition_rows_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def clear_windows_disk_cache() -> None:
+    """Test/dev helper - mirrors auth._sessions.clear()'s role in tests."""
+    _disk_bus_rows_cache.clear()
+    _partition_rows_cache.clear()
 
 
 @dataclass(frozen=True)
@@ -226,39 +249,107 @@ async def resolve_windows_disk_number(
     return disk_number
 
 
-async def list_windows_drive_letters(session: SessionData, vmid: str, node: str, disk_number: int) -> dict[str, str]:
-    """Issue #77: one batched `Get-Partition -DiskNumber` call for every
-    partition on a disk, instead of resolve_original_directory's
-    one-item-at-a-time query - used to annotate the browse tree's
-    partition labels, not to resolve a single restore destination.
-    Returns {} (never raises) on any guest-exec failure, same
-    "unavailable, not a guess" posture as the rest of this module -
-    the tree simply shows plain partition numbers when this comes back
-    empty."""
+def _cache_get(cache: dict[str, tuple[float, list[dict]]], vmid: str) -> list[dict] | None:
+    cached = cache.get(vmid)
+    if cached is None or time.time() - cached[0] >= _CACHE_TTL_SECONDS:
+        return None
+    return cached[1]
+
+
+async def _fetch_partition_rows(session: SessionData, vmid: str, node: str) -> list[dict] | None:
+    """Issue #77 follow-on: one whole-VM `Get-Partition` call (every
+    disk's partitions, not just one) - cached per vmid (see module-level
+    comment above). Returns None (never raises, never cached) on any
+    guest-exec failure, same "unavailable, not a guess" posture as the
+    rest of this module."""
+    cached = _cache_get(_partition_rows_cache, vmid)
+    if cached is not None:
+        return cached
+
     script = (
-        f"@(Get-Partition -DiskNumber {disk_number} -ErrorAction Stop | "
+        "@(Get-Partition -ErrorAction Stop | "
         "Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } | "
-        "Select-Object PartitionNumber, DriveLetter) | ConvertTo-Json -Compress"
+        "Select-Object DiskNumber, PartitionNumber, DriveLetter) | ConvertTo-Json -Compress"
     )
     try:
         exitcode, out, _err = await run_guest_exec(
             session, "vm", vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], node=node
         )
     except (GuestExecTimeout, httpx.HTTPStatusError):
-        return {}
+        return None
     if exitcode != 0 or not out.strip():
-        return {}
+        return None
     try:
         rows = json.loads(out)
     except ValueError:
-        return {}
+        return None
     if isinstance(rows, dict):
         rows = [rows]
+    _partition_rows_cache[vmid] = (time.time(), rows)
+    return rows
+
+
+async def list_windows_drive_letters(session: SessionData, vmid: str, node: str, disk_number: int) -> dict[str, str]:
+    """Issue #77: used to annotate the browse tree's partition labels,
+    not to resolve a single restore destination. Returns {} (never
+    raises) whenever the underlying whole-VM fetch does - the tree
+    simply shows plain partition numbers when this comes back empty."""
+    rows = await _fetch_partition_rows(session, vmid, node)
+    if rows is None:
+        return {}
     return {
         str(row["PartitionNumber"]): f"{row['DriveLetter']}:"
         for row in rows
-        if row.get("PartitionNumber") is not None and row.get("DriveLetter")
+        if row.get("DiskNumber") == disk_number and row.get("PartitionNumber") is not None and row.get("DriveLetter")
     }
+
+
+async def _fetch_disk_bus_rows(session: SessionData, vmid: str, node: str) -> list[dict] | None:
+    """Issue #77 follow-on: one whole-VM Win32_DiskDrive/Get-PhysicalDisk
+    query (every disk's bus info, not just one) - cached per vmid (see
+    module-level comment above). Returns None (never raises, never
+    cached) on any guest-exec failure - the caller falls back to the
+    ordinal-position guess exactly as before this existed."""
+    cached = _cache_get(_disk_bus_rows_cache, vmid)
+    if cached is not None:
+        return cached
+
+    script = (
+        # Get-PhysicalDisk's DeviceId is a *string* ("0", "1", ...) while
+        # Win32_DiskDrive.Index is numeric - an un-cast hashtable lookup
+        # here silently misses every entry (confirmed live: every row
+        # came back BusType=$null), so both sides are cast to [string]
+        # to guarantee a matching key type regardless of the underlying
+        # CIM property type.
+        "$phys = @{}; Get-PhysicalDisk | ForEach-Object { $phys[[string]$_.DeviceId] = $_.BusType }; "
+        "@(Get-CimInstance Win32_DiskDrive | ForEach-Object { "
+        "$loc = $null; "
+        "try { $loc = (Get-PnpDeviceProperty -InstanceId $_.PNPDeviceID "
+        "-KeyName DEVPKEY_Device_LocationInfo -ErrorAction Stop).Data } catch {}; "
+        "[pscustomobject]@{DiskNumber=$_.Index; BusType=$phys[[string]$_.Index]; SCSIBus=$_.SCSIBus; Location=$loc} "
+        "}) | ConvertTo-Json -Compress"
+    )
+    try:
+        exitcode, out, err = await run_guest_exec(
+            session, "vm", vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], node=node
+        )
+    except (GuestExecTimeout, httpx.HTTPStatusError) as exc:
+        _log.warning("windows disk-bus match: guest-exec failed for vmid %s: %s", vmid, exc)
+        return None
+    if exitcode != 0 or not out.strip():
+        _log.warning(
+            "windows disk-bus match: script exited %s for vmid %s, stderr=%r, stdout=%r", exitcode, vmid, err, out
+        )
+        return None
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        _log.warning("windows disk-bus match: non-JSON output for vmid %s: %r", vmid, out)
+        return None
+    if isinstance(rows, dict):
+        rows = [rows]
+    _disk_bus_rows_cache[vmid] = (time.time(), rows)
+    return rows
 
 
 async def _windows_disk_number_by_bus(
@@ -281,40 +372,9 @@ async def _windows_disk_number_by_bus(
         )
         return None  # virtio (virtio-blk) - never tested, always falls back
 
-    script = (
-        # Get-PhysicalDisk's DeviceId is a *string* ("0", "1", ...) while
-        # Win32_DiskDrive.Index is numeric - an un-cast hashtable lookup
-        # here silently misses every entry (confirmed live: every row
-        # came back BusType=$null), so both sides are cast to [string]
-        # to guarantee a matching key type regardless of the underlying
-        # CIM property type.
-        "$phys = @{}; Get-PhysicalDisk | ForEach-Object { $phys[[string]$_.DeviceId] = $_.BusType }; "
-        "@(Get-CimInstance Win32_DiskDrive | ForEach-Object { "
-        "$loc = $null; "
-        "try { $loc = (Get-PnpDeviceProperty -InstanceId $_.PNPDeviceID "
-        "-KeyName DEVPKEY_Device_LocationInfo -ErrorAction Stop).Data } catch {}; "
-        "[pscustomobject]@{DiskNumber=$_.Index; BusType=$phys[[string]$_.Index]; SCSIBus=$_.SCSIBus; Location=$loc} "
-        "}) | ConvertTo-Json -Compress"
-    )
-    try:
-        exitcode, out, err = await run_guest_exec(
-            session, "vm", vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], node=node
-        )
-    except (GuestExecTimeout, httpx.HTTPStatusError) as exc:
-        _log.warning("windows disk-bus match: guest-exec failed for %s: %s", disk_label, exc)
+    rows = await _fetch_disk_bus_rows(session, vmid, node)
+    if rows is None:
         return None
-    if exitcode != 0 or not out.strip():
-        _log.warning(
-            "windows disk-bus match: script exited %s for %s, stderr=%r, stdout=%r", exitcode, disk_label, err, out
-        )
-        return None
-    try:
-        rows = json.loads(out)
-    except ValueError:
-        _log.warning("windows disk-bus match: non-JSON output for %s: %r", disk_label, out)
-        return None
-    if isinstance(rows, dict):
-        rows = [rows]
 
     candidates = [r for r in rows if r.get("BusType") == wanted_bus_type]
     if bus == "sata":

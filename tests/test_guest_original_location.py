@@ -1,3 +1,4 @@
+import json
 from urllib.parse import unquote_plus
 
 import httpx
@@ -196,6 +197,113 @@ async def test_windows_bus_match_http_error_falls_back_to_ordinal_not_a_500(sess
     )
     assert result.available is True
     assert result.directory == "D:\\x"
+
+
+async def test_windows_disk_bus_rows_are_cached_per_vmid(session_data, monkeypatch):
+    """Issue #77 follow-on: resolving a second, different disk on the
+    same vmid within the TTL must not re-invoke guest-exec - the
+    whole-VM query already covered every disk in the first call."""
+    calls = []
+
+    async def fake_run_guest_exec(session, guest_type, vmid, argv, node="localhost", **kwargs):
+        calls.append(vmid)
+        return (
+            0,
+            json.dumps(
+                [
+                    {"DiskNumber": 0, "BusType": "SATA", "SCSIBus": 1, "Location": None},
+                    {"DiskNumber": 1, "BusType": "SATA", "SCSIBus": 2, "Location": None},
+                ]
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(gol, "run_guest_exec", fake_run_guest_exec)
+
+    d1 = await gol.resolve_windows_disk_number(session_data, "133", "localhost", "vol", "drive-sata1.img.fidx")
+    d2 = await gol.resolve_windows_disk_number(session_data, "133", "localhost", "vol", "drive-sata2.img.fidx")
+
+    assert d1 == 0
+    assert d2 == 1
+    assert len(calls) == 1  # second resolve reused the cached rows
+
+
+async def test_windows_drive_letters_are_cached_per_vmid(session_data, monkeypatch):
+    """Same caching, the list_windows_drive_letters side - a second
+    disk_number lookup on the same vmid reuses the whole-VM
+    Get-Partition dump instead of re-querying it."""
+    calls = []
+
+    async def fake_run_guest_exec(session, guest_type, vmid, argv, node="localhost", **kwargs):
+        calls.append(vmid)
+        return (
+            0,
+            json.dumps(
+                [
+                    {"DiskNumber": 0, "PartitionNumber": 2, "DriveLetter": "C"},
+                    {"DiskNumber": 1, "PartitionNumber": 1, "DriveLetter": "D"},
+                ]
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(gol, "run_guest_exec", fake_run_guest_exec)
+
+    letters0 = await gol.list_windows_drive_letters(session_data, "133", "localhost", 0)
+    letters1 = await gol.list_windows_drive_letters(session_data, "133", "localhost", 1)
+
+    assert letters0 == {"2": "C:"}
+    assert letters1 == {"1": "D:"}
+    assert len(calls) == 1
+
+
+async def test_windows_disk_bus_failure_is_not_cached(session_data, monkeypatch):
+    """A failed fetch must not poison the cache for the rest of the TTL
+    window - the very next resolve attempt should retry, not keep
+    silently falling back."""
+    calls = {"n": 0}
+
+    async def fake_run_guest_exec(session, guest_type, vmid, argv, node="localhost", **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.HTTPStatusError(
+                "guest agent unreachable",
+                request=httpx.Request("GET", "http://pve.test/x"),
+                response=httpx.Response(500),
+            )
+        return 0, json.dumps([{"DiskNumber": 0, "BusType": "SATA", "SCSIBus": 1, "Location": None}]), ""
+
+    async def fake_list_path(session, volume, filepath="/"):
+        return [{"text": "drive-sata1.img.fidx", "leaf": False, "filepath": "d0"}]
+
+    monkeypatch.setattr(gol, "run_guest_exec", fake_run_guest_exec)
+    monkeypatch.setattr(gol, "list_path", fake_list_path)
+
+    first = await gol.resolve_windows_disk_number(session_data, "133", "localhost", "vol", "drive-sata1.img.fidx")
+    second = await gol.resolve_windows_disk_number(session_data, "133", "localhost", "vol", "drive-sata1.img.fidx")
+
+    assert first == 0  # ordinal fallback, since the bus query failed
+    assert second == 0  # bus match this time, since the failure wasn't cached
+    assert calls["n"] == 2
+
+
+async def test_windows_disk_bus_cache_expires_after_ttl(session_data, monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_run_guest_exec(session, guest_type, vmid, argv, node="localhost", **kwargs):
+        calls["n"] += 1
+        return 0, json.dumps([{"DiskNumber": 0, "BusType": "SATA", "SCSIBus": 1, "Location": None}]), ""
+
+    monkeypatch.setattr(gol, "run_guest_exec", fake_run_guest_exec)
+
+    await gol.resolve_windows_disk_number(session_data, "133", "localhost", "vol", "drive-sata1.img.fidx")
+    assert calls["n"] == 1
+
+    fetched_at, rows = gol._disk_bus_rows_cache["133"]
+    gol._disk_bus_rows_cache["133"] = (fetched_at - gol._CACHE_TTL_SECONDS - 1, rows)
+
+    await gol.resolve_windows_disk_number(session_data, "133", "localhost", "vol", "drive-sata1.img.fidx")
+    assert calls["n"] == 2
 
 
 @respx.mock

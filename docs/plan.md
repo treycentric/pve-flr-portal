@@ -1203,7 +1203,31 @@ entry points at. Two reasons this matters, both raised in review:
     `crumbs_json`) that this same module's `disk_label_for_partition_
     listing`/`resolve_original_directory` parse as a partition number;
     corrupting it would silently break original-location restore for
-    anything browsed through an annotated folder.
+    anything browsed through an annotated folder. The same drive letter
+    is also carried in the breadcrumb bar once that folder is entered
+    (a separate `driveLetter` field on the crumb object, same
+    display-only treatment — never folded into `label`).
+
+    **Real-world finding (2026-09-28): both whole-VM guest-exec queries
+    already covered every disk, so per-vmid caching was a straight win,
+    not a prefetch-timing tradeoff.** `_windows_disk_number_by_bus`'s
+    `Win32_DiskDrive`/`Get-PhysicalDisk` query and (once widened to drop
+    its `-DiskNumber` filter) `list_windows_drive_letters`'s
+    `Get-Partition` query each already return every disk's/partition's
+    data in one guest-exec call, regardless of which single one a given
+    request needs — so drilling into a second or third disk in the same
+    browsing session was needlessly re-running an identical whole-VM
+    query and discarding everything but the one disk it needed. Fixed
+    with a short-TTL (`_CACHE_TTL_SECONDS = 120`), per-vmid, in-memory
+    cache (`_fetch_disk_bus_rows`/`_fetch_partition_rows`) — only
+    successful fetches are cached, so a transient failure doesn't
+    poison the cache for the rest of the TTL window. Deliberately
+    cache-on-first-use rather than eager-prefetch-on-guest-select: an
+    eager fetch would pay the guest-exec cost (and its per-vmid QGA
+    lock contention) for every Windows VM browse session even when the
+    user never drills into a disk at all, where caching what's already
+    being fetched gets the same steady-state speedup for repeat
+    drilling without that unconditional up-front tax.
 
     **Real-world finding (2026-09-25): broke on its own first real use,
     fixed same day.** `guest_original_location.py` was written against
