@@ -72,6 +72,7 @@ just the "disable when ambiguous" fallback below, which only protects
 against an *empty* or *failed* lookup, not a wrong-but-plausible one.
 """
 import json
+import logging
 import re
 from dataclasses import dataclass
 
@@ -79,6 +80,8 @@ import httpx
 
 from .auth import SessionData
 from .pve_client import GuestExecTimeout, UnsafePathError, check_path_safe, list_path, run_guest_exec
+
+_log = logging.getLogger("pve_flr_portal.guest_original_location")
 
 _DISK_LABEL_RE = re.compile(r"^drive-(ide|sata|scsi|virtio)(\d+)\.img\.fidx$")
 _BUS_TYPE_BY_PVE_BUS = {"ide": "ATA", "sata": "SATA", "scsi": "SAS"}
@@ -218,7 +221,9 @@ async def resolve_windows_disk_number(
     disk_number = await _windows_disk_number_by_bus(session, vmid, node, disk_label)
     if disk_number is not None:
         return disk_number
-    return await _disk_ordinal(session, volume, disk_label)
+    disk_number = await _disk_ordinal(session, volume, disk_label)
+    _log.warning("windows disk-bus match: %s fell back to the ordinal guess -> DiskNumber %s", disk_label, disk_number)
+    return disk_number
 
 
 async def list_windows_drive_letters(session: SessionData, vmid: str, node: str, disk_number: int) -> dict[str, str]:
@@ -266,10 +271,14 @@ async def _windows_disk_number_by_bus(
     before this existed."""
     match = _DISK_LABEL_RE.match(disk_label)
     if match is None:
+        _log.warning("windows disk-bus match: %r doesn't match the expected drive-<bus><N>.img.fidx shape", disk_label)
         return None
     bus, index = match.group(1), int(match.group(2))
     wanted_bus_type = _BUS_TYPE_BY_PVE_BUS.get(bus)
     if wanted_bus_type is None:
+        _log.warning(
+            "windows disk-bus match: bus %r (from %r) has no address-based match - falling back", bus, disk_label
+        )
         return None  # virtio (virtio-blk) - never tested, always falls back
 
     script = (
@@ -282,16 +291,21 @@ async def _windows_disk_number_by_bus(
         "}) | ConvertTo-Json -Compress"
     )
     try:
-        exitcode, out, _err = await run_guest_exec(
+        exitcode, out, err = await run_guest_exec(
             session, "vm", vmid, ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], node=node
         )
-    except (GuestExecTimeout, httpx.HTTPStatusError):
+    except (GuestExecTimeout, httpx.HTTPStatusError) as exc:
+        _log.warning("windows disk-bus match: guest-exec failed for %s: %s", disk_label, exc)
         return None
     if exitcode != 0 or not out.strip():
+        _log.warning(
+            "windows disk-bus match: script exited %s for %s, stderr=%r, stdout=%r", exitcode, disk_label, err, out
+        )
         return None
     try:
         rows = json.loads(out)
     except ValueError:
+        _log.warning("windows disk-bus match: non-JSON output for %s: %r", disk_label, out)
         return None
     if isinstance(rows, dict):
         rows = [rows]
@@ -309,8 +323,15 @@ async def _windows_disk_number_by_bus(
         matches = candidates
 
     if len(matches) != 1:
+        _log.warning(
+            "windows disk-bus match: %s (bus=%s index=%s) -> %d match(es), want exactly 1. "
+            "wanted_bus_type=%s candidates=%r all_rows=%r",
+            disk_label, bus, index, len(matches), wanted_bus_type, candidates, rows,
+        )
         return None
-    return matches[0]["DiskNumber"]
+    disk_number = matches[0]["DiskNumber"]
+    _log.warning("windows disk-bus match: %s (bus=%s index=%s) -> DiskNumber %s", disk_label, bus, index, disk_number)
+    return disk_number
 
 
 async def _resolve_windows_partition(
