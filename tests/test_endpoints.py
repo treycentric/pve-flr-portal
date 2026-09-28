@@ -377,6 +377,81 @@ def test_browse_never_probes_partition_readability_for_containers(client, monkey
     assert 'data-filepath="1"' in resp.text
 
 
+_HIDDEN_TREE = {
+    "/": [
+        {"text": "drive-scsi0.img.fidx", "leaf": False, "filepath": "h-d0"},
+        {"text": "drive-scsi1.img.fidx", "leaf": False, "filepath": "h-d1"},
+    ],
+    "h-d0": [{"text": "part", "leaf": False, "filepath": "h-d0-part"}],
+    "h-d0-part": [{"text": "1", "leaf": False, "filepath": "h-d0-part-1"}],
+    "h-d1": [
+        {"text": "part", "leaf": False, "filepath": "h-d1-part"},
+        {"text": "lvm", "leaf": False, "filepath": "h-d1-lvm"},
+    ],
+    "h-d1-part": [{"text": "1", "leaf": False, "filepath": "h-d1-part-1"}],
+    "h-d1-lvm": [{"text": "datavg", "leaf": False, "filepath": "h-vg"}],
+    "h-vg": [
+        {"text": "data", "leaf": False, "filepath": "h-vg-data"},
+        {"text": "swap", "leaf": False, "filepath": "h-vg-swap"},
+    ],
+    "h-vg-data": [{"text": "somefile.txt", "leaf": True, "filepath": "h-vg-data-f"}],
+}
+
+
+async def _fake_hidden_list_path(session, volume, filepath="/"):
+    if filepath in ("h-d0-part-1", "h-d1-part-1", "h-vg-swap"):
+        raise httpx.HTTPStatusError(
+            "mounting failed: all mounts failed or no supported file system",
+            request=httpx.Request("GET", "http://pve.test/x"),
+            response=httpx.Response(400),
+        )
+    return _HIDDEN_TREE[filepath]
+
+
+def test_browse_root_hides_a_disk_whose_partitions_are_all_unmountable(client, monkeypatch):
+    """A disk with no LVM content of its own and every partition
+    unmountable shows nothing if browsed into - hide it from root
+    entirely rather than offering a dead end."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_hidden_list_path)
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "/", "crumbs": "[]"})
+    assert resp.status_code == 200
+    assert "drive-scsi0.img.fidx" not in resp.text
+
+
+def test_browse_root_keeps_a_disk_with_elevated_lvm_despite_unmountable_partitions(client, monkeypatch):
+    """A disk whose own partitions are all unmountable still stays
+    visible at root if it contributed to an elevated LVM volume group -
+    that real content lives at root regardless of the disk's own `part`
+    side."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_hidden_list_path)
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "/", "crumbs": "[]"})
+    assert resp.status_code == 200
+    assert "drive-scsi1.img.fidx" in resp.text
+    assert "LVM datavg" in resp.text
+
+
+def test_browse_hides_swap_volume_inside_an_lvm_group(client, monkeypatch):
+    """A logical volume PVE's file-restore helper can't mount - a swap
+    LV, in this case - is hidden from an elevated LVM volume group's
+    own listing the same way an unmountable partition is hidden from a
+    disk's."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_hidden_list_path)
+    crumbs = json.dumps([{"label": "Root", "filepath": "/"}, {"label": "LVM datavg", "filepath": "h-vg"}])
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "h-vg", "crumbs": crumbs})
+    assert resp.status_code == 200
+    assert 'data-filepath="h-vg-data"' in resp.text
+    assert 'data-filepath="h-vg-swap"' not in resp.text
+
+
+def test_tree_hides_swap_volume_inside_an_lvm_group(client, monkeypatch):
+    monkeypatch.setattr(pve_client, "list_path", _fake_hidden_list_path)
+    crumbs = json.dumps([{"label": "Root", "filepath": "/"}, {"label": "LVM datavg", "filepath": "h-vg"}])
+    resp = client.get("/api/tree", params={"volume": _LVM_VOLUME, "filepath": "h-vg", "crumbs": crumbs})
+    assert resp.status_code == 200
+    assert 'data-filepath="h-vg-data"' in resp.text
+    assert 'data-filepath="h-vg-swap"' not in resp.text
+
+
 def test_browse_never_applies_lvm_view_to_container_volumes(client, monkeypatch):
     """Issue #66: containers have no disk/partition concept - a CT backup
     could legitimately have real top-level folders literally named "part"
