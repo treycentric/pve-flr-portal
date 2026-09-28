@@ -25,6 +25,7 @@ reaching the Direct Network Transfer eligibility check).
 import asyncio
 import hashlib
 import io
+import logging
 import ntpath
 import posixpath
 import tarfile
@@ -45,6 +46,8 @@ from .restore_chunking import (
     scratch_path_sep,
 )
 from .restore_jobs import RestoreJob, RestoreJobManager, RestoreStatus
+
+_log = logging.getLogger("pve_flr_portal.restore_runner")
 
 
 def _one_rung_down(mode: str) -> str:
@@ -671,7 +674,8 @@ async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | Non
         client, response = await pve_client.open_download(
             job.session, job.source_volume, job.source_filepath, tar=True
         )
-    except httpx.HTTPStatusError:
+    except httpx.HTTPStatusError as exc:
+        _log.warning("ownership fetch: open_download(tar=1) failed for job %s: %s", job.id, exc)
         return None
     try:
         buf = b""
@@ -682,10 +686,20 @@ async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | Non
         try:
             with tarfile.open(fileobj=io.BytesIO(buf)) as tf:
                 info = tf.next()
-        except tarfile.TarError:
+        except tarfile.TarError as exc:
+            _log.warning(
+                "ownership fetch: not a valid tar for job %s (%d bytes read): %s - first 64 bytes: %r",
+                job.id, len(buf), exc, buf[:64],
+            )
             return None
         if info is None:
+            _log.warning(
+                "ownership fetch: tar had no entries for job %s (%d bytes read): %r", job.id, len(buf), buf[:64]
+            )
             return None
+        _log.warning(
+            "ownership fetch: job %s -> name=%r uid=%s gid=%s mode=%s", job.id, info.name, info.uid, info.gid, info.mode
+        )
         return info.uid, info.gid, info.mode & 0o7777
     finally:
         await response.aclose()
