@@ -218,6 +218,38 @@ both of two synthetic classification folders:
   `mdadm`, ZFS) — no evidence either way, not something a guest in this
   project's own testing has exercised.
 
+**Confirmed live 2026-09-28: an unmountable partition errors, it
+doesn't list empty.** Browsing into a `part/N` folder PVE's file-restore
+helper VM can't mount any filesystem on (a member of a Windows Storage
+Spaces stripe set, in this real test — see the software-RAID finding
+above) returns a genuine PVE API error, not an empty/degenerate listing:
+`mounting 'drive-sata2.img.fidx/part/2' failed: all mounts failed or no
+supported file system`. That's the signal issue #80's readability
+filter (`main.py`'s `_readable_entries`, dispatched from
+`_filter_unmountable_children`) keys off — an actual
+`httpx.HTTPStatusError`, never "the listing came back empty," since a
+genuinely empty-but-mountable partition/volume also lists empty and
+must not be hidden by the same logic.
+
+Two follow-ons landed on the same issue, both reusing this exact probe:
+- **A disk with nothing visible in it is hidden from the root listing
+  entirely** (`_disk_has_visible_content`), not just its unreadable
+  partitions one level down — computed by mirroring exactly what
+  disk-level browsing would show (flatten + readability-probe) and
+  hiding the disk if that comes back empty. A disk that contributed to
+  an elevated LVM volume group is never hidden this way, regardless of
+  its own `part` side, since that content already shows up at root via
+  its own elevated entry.
+- **The same probe applies inside an elevated `LVM <vg>` volume group's
+  own listing**, e.g. hiding an unmountable `swap` logical volume
+  alongside real ones — the digit-only restriction that's correct for
+  a disk's numbered partitions doesn't apply there (LV names are
+  arbitrary), so `_readable_entries` takes a `digits_only` flag and
+  `_filter_unmountable_children` picks the right variant based on
+  which of `_is_partition_listing`/`_is_lvm_volume_group_listing` the
+  current crumb position matches (mutually exclusive by construction —
+  a real disk label is never `LVM <name>`).
+
 **Why `FileRestoreReader` needs exactly the privileges it has.**
 `PVE::Storage::check_volume_access` (pve-storage source) requires, for
 a `backup`-type volume, *both* `Datastore.AllocateSpace` on

@@ -391,15 +391,126 @@ async def _apply_lvm_view(
     _disk_level_entries one level below it - both gated to `vm`-type
     volumes, since containers have no disk/partition concept at all and a
     CT's own root could legitimately contain a real folder named "part"
-    or "lvm"."""
+    or "lvm". Also hides a disk from the root listing entirely (issue
+    #80 follow-on) when it has no elevated LVM content of its own and
+    every one of its partitions is unmountable - see
+    _disk_has_visible_content."""
     if _volid_guest_type(volume) != "vm":
         return entries, set()
     if filepath == "/":
         lvm_entries = await _discover_lvm_volumes(session, volume, entries)
-        return [*entries, *lvm_entries], {e["text"] for e in lvm_entries}
+        lvm_names = {e["text"] for e in lvm_entries}
+        disks = [e for e in entries if not bool(e.get("leaf", True))]
+        has_content = await asyncio.gather(*(_disk_has_visible_content(session, volume, d, lvm_names) for d in disks))
+        hidden = {d["text"] for d, visible in zip(disks, has_content) if not visible}
+        visible_entries = [e for e in entries if e.get("text") not in hidden]
+        return [*visible_entries, *lvm_entries], lvm_names
     if len(crumbs) == 2:
         return await _disk_level_entries(session, volume, entries), set()
     return entries, set()
+
+
+async def _disk_has_visible_content(
+    session: SessionData, volume: str, disk: dict, lvm_names: set[str]
+) -> bool:
+    """Issue #80 follow-on: would browsing into this disk show anything
+    at all? A disk that hosts part of an elevated LVM volume group
+    always counts as visible - that content already shows up at root
+    via its own elevated entry, regardless of whether this disk's own
+    `part` side has anything readable. Otherwise, mirrors exactly what
+    disk-level browsing would compute (_disk_level_entries, then the
+    same mount-readability probe _filter_unmountable_children uses)
+    and reports whether that comes back non-empty."""
+    try:
+        children = await pve_client.list_path(session, volume, disk["filepath"])
+    except httpx.HTTPStatusError:
+        return False
+    if any(c.get("text") == "lvm" and not bool(c.get("leaf", True)) for c in children):
+        return True  # this disk contributed to an elevated volume group - real content lives at root
+    disk_level = await _disk_level_entries(session, volume, children)
+    readable = await _readable_entries(session, volume, disk_level, digits_only=True)
+    return bool(readable)
+
+
+def _is_partition_listing(volume: str, crumbs: list) -> bool:
+    """True when `crumbs` is the crumb trail of a folder whose own
+    children are the numbered partition folders directly - either a
+    disk's flattened listing, or an unflattened disk's `part` folder
+    (the same two shapes `_disk_level_entries` recognizes). VM-type
+    volumes only - containers have no disk/partition concept. A real
+    disk label is never "LVM <name>" (PVE's own naming is always
+    `drive-<bus><N>.img.fidx`), but a single-crumb position is
+    otherwise ambiguous with an elevated LVM volume group's own
+    listing (_is_lvm_volume_group_listing) - explicitly excluded here
+    rather than left to caller ordering."""
+    if _volid_guest_type(volume) != "vm":
+        return False
+    labels = [c.get("label", "") for c in crumbs[1:]]
+    if len(labels) == 1:
+        return not labels[0].startswith("LVM ")
+    return len(labels) == 2 and labels[1] == "part"
+
+
+def _is_lvm_volume_group_listing(crumbs: list) -> bool:
+    """True when `crumbs` is the crumb trail of an elevated "LVM <vg>"
+    root entry's own listing - its children are that volume group's
+    logical volumes, named arbitrarily (never digits), so the
+    partition probe's digit guard doesn't apply here - any of them,
+    e.g. a swap LV, can be individually unmountable the same way a
+    partition can."""
+    labels = [c.get("label", "") for c in crumbs[1:]]
+    return len(labels) == 1 and labels[0].startswith("LVM ")
+
+
+async def _readable_entries(
+    session: SessionData, volume: str, entries: list[dict], *, digits_only: bool
+) -> list[dict]:
+    """Issue #80 (+ LVM follow-on): the actual mount-readability probe -
+    a child PVE's file-restore helper VM can't mount any filesystem on
+    is dropped entirely. Confirmed live 2026-09-28: a member of a
+    Windows Storage Spaces stripe set comes back as a real PVE error -
+    "mounting '...' failed: all mounts failed or no supported file
+    system" - not an empty listing, which is the safe signal to key off
+    here; an empty-but-genuinely-mountable partition/volume lists fine
+    and must never be hidden by this. Probes one level into each
+    candidate in parallel, same pattern _discover_lvm_volumes already
+    uses, so wall time stays ~one round trip regardless of child count.
+
+    `digits_only` restricts candidates to digit-named entries (real
+    partition numbers) for a disk/part listing, where a non-digit
+    sibling can exist (e.g. some other, currently unobserved, category
+    alongside `part`) and must never be probed as if it were a mountable
+    leaf itself. An LVM volume group's children are always logical
+    volumes with arbitrary names, so that restriction doesn't apply
+    there - every non-leaf child is a real probe candidate."""
+
+    async def readable(entry: dict) -> bool:
+        if bool(entry.get("leaf", True)):
+            return True
+        if digits_only and not entry.get("text", "").isdigit():
+            return True  # not a partition-number folder - leave alone
+        try:
+            await pve_client.list_path(session, volume, entry["filepath"])
+        except httpx.HTTPStatusError:
+            return False
+        return True
+
+    keep = await asyncio.gather(*(readable(e) for e in entries))
+    return [e for e, ok in zip(entries, keep) if ok]
+
+
+async def _filter_unmountable_children(
+    session: SessionData, volume: str, crumbs: list, entries: list[dict]
+) -> list[dict]:
+    """Applies _readable_entries only at an actual partition-listing or
+    LVM-volume-group-listing crumb position - see _is_partition_listing
+    / _is_lvm_volume_group_listing. The two shapes are mutually
+    exclusive at a given crumb position."""
+    if _is_partition_listing(volume, crumbs):
+        return await _readable_entries(session, volume, entries, digits_only=True)
+    if _is_lvm_volume_group_listing(crumbs):
+        return await _readable_entries(session, volume, entries, digits_only=False)
+    return entries
 
 
 async def _annotate_windows_drive_letters(session: SessionData, volume: str, crumbs: list, entries: list[dict]) -> None:
@@ -420,7 +531,10 @@ async def _annotate_windows_drive_letters(session: SessionData, volume: str, cru
     it swallows - this runs on every disk-folder expansion, not behind
     an explicit user action with its own capability check the way
     restore-to-original-location is, so a flaky guest agent must never
-    turn into a broken tree/browse view."""
+    turn into a broken tree/browse view. Callers should run this after
+    _filter_unmountable_children (issue #80), not before - no point
+    querying guest-exec for a drive letter on an entry that's about to
+    be hidden anyway."""
     try:
         guest_type, vmid, _iso = _parse_volid(volume)
     except ValueError:
@@ -480,6 +594,7 @@ async def browse(
     at_root = filepath == "/"
     parent_crumbs = json.loads(crumbs)
     entries, lvm_names = await _apply_lvm_view(session, volume, filepath, parent_crumbs, entries)
+    entries = await _filter_unmountable_children(session, volume, parent_crumbs, entries)
     await _annotate_windows_drive_letters(session, volume, parent_crumbs, entries)
     for entry in entries:
         entry.setdefault("mtime", None)
@@ -523,6 +638,7 @@ async def tree(
     # (it's whatever order the backup's own filesystem metadata happens to
     # be in) - /api/browse already sorts its entries, this endpoint didn't.
     entries = sorted((e for e in entries if not bool(e.get("leaf", True))), key=lambda e: e.get("text", "").lower())
+    entries = await _filter_unmountable_children(session, volume, parent_crumbs, entries)
     await _annotate_windows_drive_letters(session, volume, parent_crumbs, entries)
     nodes = []
     for entry in entries:
