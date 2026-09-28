@@ -301,9 +301,11 @@ async def index(request: Request, task: str | None = None, session: SessionData 
     )
 
 
-def _type_label(entry: dict, at_root: bool) -> str:
+def _type_label(entry: dict, at_root: bool, filesystem_root: bool = False) -> str:
     if not bool(entry.get("leaf", True)):
-        return "Drive" if at_root else "Folder"
+        if at_root:
+            return "Drive"
+        return "Partition" if filesystem_root else "Folder"
     suffix = PurePosixPath(entry.get("text", "")).suffix
     return f"{suffix[1:].upper()} File" if suffix else "File"
 
@@ -462,6 +464,17 @@ def _is_lvm_volume_group_listing(crumbs: list) -> bool:
     return len(labels) == 1 and labels[0].startswith("LVM ")
 
 
+def _is_filesystem_root_listing(volume: str, crumbs: list) -> bool:
+    """Issue #83: true when the entries about to be rendered are
+    themselves filesystem roots - a disk's numbered partitions, or an
+    elevated LVM volume group's own logical volumes - rather than plain
+    directories within one. Drives `_type_label`'s "Partition" type_label
+    (a distinct icon), reusing the exact same crumb-position checks
+    issue #80's readability probe already needs for the same
+    distinction."""
+    return _is_partition_listing(volume, crumbs) or _is_lvm_volume_group_listing(crumbs)
+
+
 async def _readable_entries(
     session: SessionData, volume: str, entries: list[dict], *, digits_only: bool
 ) -> list[dict]:
@@ -596,6 +609,7 @@ async def browse(
     entries, lvm_names = await _apply_lvm_view(session, volume, filepath, parent_crumbs, entries)
     entries = await _filter_unmountable_children(session, volume, parent_crumbs, entries)
     await _annotate_windows_drive_letters(session, volume, parent_crumbs, entries)
+    filesystem_root = _is_filesystem_root_listing(volume, parent_crumbs)
     for entry in entries:
         entry.setdefault("mtime", None)
         entry.setdefault("size", None)
@@ -605,7 +619,9 @@ async def browse(
         entry["item_json"] = json.dumps(
             {"filepath": entry["filepath"], "leaf": leaf, "name": text, "mtime": entry["mtime"], "size": entry["size"]}
         )
-        entry["type_label"] = "LVM Volume" if text in lvm_names else _type_label(entry, at_root)
+        entry["type_label"] = (
+            "LVM Volume" if text in lvm_names else _type_label(entry, at_root, filesystem_root=filesystem_root)
+        )
     entries.sort(key=lambda e: (bool(e.get("leaf", True)), e.get("text", "").lower()))
     return templates.TemplateResponse(
         request,
@@ -640,6 +656,7 @@ async def tree(
     entries = sorted((e for e in entries if not bool(e.get("leaf", True))), key=lambda e: e.get("text", "").lower())
     entries = await _filter_unmountable_children(session, volume, parent_crumbs, entries)
     await _annotate_windows_drive_letters(session, volume, parent_crumbs, entries)
+    filesystem_root = _is_filesystem_root_listing(volume, parent_crumbs)
     nodes = []
     for entry in entries:
         text = entry.get("text", "")
@@ -659,7 +676,9 @@ async def tree(
                 "filepath": entry["filepath"],
                 "text": text,
                 "drive_letter": drive_letter,
-                "type_label": "LVM Volume" if text in lvm_names else _type_label(entry, at_root),
+                "type_label": (
+                    "LVM Volume" if text in lvm_names else _type_label(entry, at_root, filesystem_root=filesystem_root)
+                ),
                 "crumbs_json": json.dumps(child_crumbs),
             }
         )

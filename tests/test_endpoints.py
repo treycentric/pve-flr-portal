@@ -250,6 +250,9 @@ _LVM_TREE = {
         {"text": "root", "leaf": False, "filepath": "tok-vg-root"},
         {"text": "swap", "leaf": False, "filepath": "tok-vg-swap"},
     ],
+    "tok-vg-home": [],  # mountable but empty - issue #80's readability probe lands here
+    "tok-vg-root": [],
+    "tok-vg-swap": [],
     "tok-efidisk0": [{"text": "part", "leaf": False, "filepath": "tok-efidisk0-raw"}],
     "tok-efidisk0-raw": [{"text": "1", "leaf": False, "filepath": "tok-efidisk0-raw-1"}],
     "tok-efidisk0-raw-1": [],  # mountable but empty - issue #80's readability probe lands here
@@ -309,6 +312,30 @@ def test_browse_disk_level_flattens_lone_part(client, monkeypatch):
     assert resp.status_code == 200
     assert 'data-name="part"' not in resp.text
     assert "tok-efidisk0-raw-1" in resp.text  # the "part" folder's own child, shown directly instead
+
+
+def test_browse_partition_folder_gets_the_partition_type_label(client, monkeypatch):
+    """Issue #83: a numbered partition folder (this disk's flattened "1")
+    gets a distinct "Partition" type_label/icon, not the generic
+    "Folder" every other directory gets."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
+    crumbs = json.dumps(
+        [{"label": "Root", "filepath": "/"}, {"label": "drive-efidisk0.img.fidx", "filepath": "tok-efidisk0"}]
+    )
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "tok-efidisk0", "crumbs": crumbs})
+    assert resp.status_code == 200
+    assert "<td>Partition</td>" in resp.text
+
+
+def test_browse_lvm_logical_volume_gets_the_partition_type_label(client, monkeypatch):
+    """Issue #83: same distinct type_label/icon for a logical volume
+    inside an elevated LVM volume group's own listing - also a
+    filesystem root, not a plain directory."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
+    crumbs = json.dumps([{"label": "Root", "filepath": "/"}, {"label": "LVM myvg", "filepath": "tok-disk0-vg"}])
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "tok-disk0-vg", "crumbs": crumbs})
+    assert resp.status_code == 200
+    assert resp.text.count("<td>Partition</td>") == 3  # home, root, swap
 
 
 def test_browse_annotates_windows_drive_letter_on_partition_folder(client, monkeypatch):
