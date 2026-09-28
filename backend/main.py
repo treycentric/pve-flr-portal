@@ -402,6 +402,49 @@ async def _apply_lvm_view(
     return entries, set()
 
 
+def _is_partition_listing(volume: str, crumbs: list) -> bool:
+    """True when `crumbs` is the crumb trail of a folder whose own
+    children are the numbered partition folders directly - either a
+    disk's flattened listing, or an unflattened disk's `part` folder
+    (the same two shapes `_disk_level_entries` recognizes). VM-type
+    volumes only - containers have no disk/partition concept."""
+    if _volid_guest_type(volume) != "vm":
+        return False
+    labels = [c.get("label", "") for c in crumbs[1:]]
+    if len(labels) == 1:
+        return True
+    return len(labels) == 2 and labels[1] == "part"
+
+
+async def _filter_unreadable_partitions(
+    session: SessionData, volume: str, crumbs: list, entries: list[dict]
+) -> list[dict]:
+    """Issue #80: hides a partition folder entirely when PVE's file-
+    restore helper VM can't mount any filesystem on it. Confirmed live
+    2026-09-28: a member of a Windows Storage Spaces stripe set comes
+    back as a real PVE error - "mounting '...' failed: all mounts
+    failed or no supported file system" - not an empty listing, which
+    is the safe signal to key off here; an empty-but-genuinely-
+    mountable partition lists fine and must never be hidden by this.
+    Probes one level into each candidate partition in parallel, same
+    pattern _discover_lvm_volumes already uses, so wall time stays
+    ~one round trip regardless of partition count."""
+    if not _is_partition_listing(volume, crumbs):
+        return entries
+
+    async def readable(entry: dict) -> bool:
+        if bool(entry.get("leaf", True)) or not entry.get("text", "").isdigit():
+            return True  # not a partition-number folder - leave alone
+        try:
+            await pve_client.list_path(session, volume, entry["filepath"])
+        except httpx.HTTPStatusError:
+            return False
+        return True
+
+    keep = await asyncio.gather(*(readable(e) for e in entries))
+    return [e for e, ok in zip(entries, keep) if ok]
+
+
 def _pve_error_message(exc: httpx.HTTPStatusError) -> str:
     reason = exc.response.reason_phrase
     if reason and reason.strip().lower() not in ("bad request", ""):
@@ -432,7 +475,9 @@ async def browse(
             {"detail": _pve_error_message(exc)},
         )
     at_root = filepath == "/"
-    entries, lvm_names = await _apply_lvm_view(session, volume, filepath, json.loads(crumbs), entries)
+    parent_crumbs = json.loads(crumbs)
+    entries, lvm_names = await _apply_lvm_view(session, volume, filepath, parent_crumbs, entries)
+    entries = await _filter_unreadable_partitions(session, volume, parent_crumbs, entries)
     for entry in entries:
         entry.setdefault("mtime", None)
         entry.setdefault("size", None)
@@ -475,6 +520,7 @@ async def tree(
     # (it's whatever order the backup's own filesystem metadata happens to
     # be in) - /api/browse already sorts its entries, this endpoint didn't.
     entries = sorted((e for e in entries if not bool(e.get("leaf", True))), key=lambda e: e.get("text", "").lower())
+    entries = await _filter_unreadable_partitions(session, volume, parent_crumbs, entries)
     nodes = []
     for entry in entries:
         text = entry.get("text", "")

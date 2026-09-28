@@ -218,6 +218,18 @@ both of two synthetic classification folders:
   `mdadm`, ZFS) — no evidence either way, not something a guest in this
   project's own testing has exercised.
 
+**Confirmed live 2026-09-28: an unmountable partition errors, it
+doesn't list empty.** Browsing into a `part/N` folder PVE's file-restore
+helper VM can't mount any filesystem on (a member of a Windows Storage
+Spaces stripe set, in this real test — see the software-RAID finding
+above) returns a genuine PVE API error, not an empty/degenerate listing:
+`mounting 'drive-sata2.img.fidx/part/2' failed: all mounts failed or no
+supported file system`. That's the signal issue #80's partition-
+readability filter (`main.py`'s `_filter_unreadable_partitions`) keys
+off — an actual `httpx.HTTPStatusError`, never "the listing came back
+empty," since a genuinely empty-but-mountable partition also lists
+empty and must not be hidden by the same logic.
+
 **Why `FileRestoreReader` needs exactly the privileges it has.**
 `PVE::Storage::check_volume_access` (pve-storage source) requires, for
 a `backup`-type volume, *both* `Datastore.AllocateSpace` on

@@ -252,6 +252,7 @@ _LVM_TREE = {
     ],
     "tok-efidisk0": [{"text": "part", "leaf": False, "filepath": "tok-efidisk0-raw"}],
     "tok-efidisk0-raw": [{"text": "1", "leaf": False, "filepath": "tok-efidisk0-raw-1"}],
+    "tok-efidisk0-raw-1": [],  # mountable but empty - issue #80's readability probe lands here
 }
 
 
@@ -308,6 +309,72 @@ def test_browse_disk_level_flattens_lone_part(client, monkeypatch):
     assert resp.status_code == 200
     assert 'data-name="part"' not in resp.text
     assert "tok-efidisk0-raw-1" in resp.text  # the "part" folder's own child, shown directly instead
+
+
+_UNREADABLE_TREE = {
+    "/": [{"text": "drive-scsi0.img.fidx", "leaf": False, "filepath": "d0"}],
+    "d0": [{"text": "part", "leaf": False, "filepath": "d0-part"}],
+    "d0-part": [
+        {"text": "1", "leaf": False, "filepath": "d0-part-1"},
+        {"text": "2", "leaf": False, "filepath": "d0-part-2"},
+        {"text": "3", "leaf": False, "filepath": "d0-part-3"},
+    ],
+    "d0-part-1": [{"text": "Windows", "leaf": False, "filepath": "d0-part-1-w"}],
+    "d0-part-3": [],  # empty but genuinely mountable - must not be hidden
+}
+
+
+async def _fake_unreadable_list_path(session, volume, filepath="/"):
+    if filepath == "d0-part-2":
+        raise httpx.HTTPStatusError(
+            "mounting 'drive-scsi0.img.fidx/part/2' failed: all mounts failed or no supported file system",
+            request=httpx.Request("GET", "http://pve.test/x"),
+            response=httpx.Response(400),
+        )
+    return _UNREADABLE_TREE[filepath]
+
+
+def test_browse_hides_partition_pve_cant_mount(client, monkeypatch):
+    """Issue #80: confirmed live 2026-09-28 - a partition PVE's file-
+    restore helper can't mount (e.g. a Windows Storage Spaces stripe
+    member) errors on `file-restore/list`, it doesn't list empty. That's
+    the signal to hide it - and a genuinely empty-but-mountable
+    partition (partition 3 here) must still show up, since "empty" on
+    its own is indistinguishable from a real empty filesystem."""
+    monkeypatch.setattr(pve_client, "list_path", _fake_unreadable_list_path)
+    crumbs = json.dumps([{"label": "Root", "filepath": "/"}, {"label": "drive-scsi0.img.fidx", "filepath": "d0"}])
+    resp = client.get("/api/browse", params={"volume": _LVM_VOLUME, "filepath": "d0", "crumbs": crumbs})
+    assert resp.status_code == 200
+    assert 'data-filepath="d0-part-1"' in resp.text
+    assert 'data-filepath="d0-part-3"' in resp.text
+    assert 'data-filepath="d0-part-2"' not in resp.text
+
+
+def test_tree_hides_partition_pve_cant_mount(client, monkeypatch):
+    monkeypatch.setattr(pve_client, "list_path", _fake_unreadable_list_path)
+    crumbs = json.dumps([{"label": "Root", "filepath": "/"}, {"label": "drive-scsi0.img.fidx", "filepath": "d0"}])
+    resp = client.get("/api/tree", params={"volume": _LVM_VOLUME, "filepath": "d0", "crumbs": crumbs})
+    assert resp.status_code == 200
+    assert 'data-filepath="d0-part-1"' in resp.text
+    assert 'data-filepath="d0-part-3"' in resp.text
+    assert 'data-filepath="d0-part-2"' not in resp.text
+
+
+def test_browse_never_probes_partition_readability_for_containers(client, monkeypatch):
+    """Issue #80: containers have no partition concept - must never even
+    attempt the extra mount-probe call."""
+
+    async def fake_ct_list_path(session, volume, filepath="/"):
+        if filepath == "/":
+            return [{"text": "1", "leaf": False, "filepath": "1"}]
+        raise AssertionError("must not probe a container's own folders for mount readability")
+
+    monkeypatch.setattr(pve_client, "list_path", fake_ct_list_path)
+    resp = client.get(
+        "/api/browse", params={"volume": "pbs:backup/ct/205/2026-09-25T00:00:00Z", "filepath": "/", "crumbs": "[]"}
+    )
+    assert resp.status_code == 200
+    assert 'data-filepath="1"' in resp.text
 
 
 def test_browse_never_applies_lvm_view_to_container_volumes(client, monkeypatch):
