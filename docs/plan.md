@@ -1094,22 +1094,95 @@ entry points at. Two reasons this matters, both raised in review:
     `findmnt` (Linux), in `backend/guest_original_location.py`. LVM
     paths resolve via the volume-group/logical-volume name PVE's own
     listing already gives (`findmnt -S /dev/<vg>/<lv>`) — a stable,
-    semantic key. A plain partition has no such key, so its disk is
-    correlated to the running guest's own disk numbering purely by
-    *ordinal position in PVE's own root file-restore/list response* —
-    the best available proxy for attachment order, since nothing in the
-    API exposes a guest-independent disk identity (no raw partition-
-    table bytes are reachable through this API at all). **Not yet live-
-    verified**, and the scenario most likely to break it is a guest with
-    disks on mixed bus types (e.g. one `scsi` + one `sata`) — if the
-    ordinal guess is wrong, the live lookup can still return a
-    confident-looking but *wrong* drive letter/mountpoint (not caught by
-    the "disable when ambiguous" fallback, which only protects against
-    an empty/failed lookup). The existing "Restoring into: `<path>`"
-    confirmation text plus the required overwrite checkbox is the real
-    safety net for that residual risk, not just the disable-on-failure
-    logic — worth a special eye during review until this has been
-    confirmed against a real multi-bus-type guest.
+    semantic key. A plain partition has no such key; for Linux it's
+    still correlated to the running guest's own disk numbering (`lsblk`)
+    purely by *ordinal position in PVE's own root file-restore/list
+    response* — the best available proxy for attachment order, since
+    nothing in the API exposes a guest-independent disk identity (no raw
+    partition-table bytes are reachable through this API at all). A
+    guest with disks on mixed bus types is the scenario most likely to
+    break this for Linux, and it hasn't been live-verified there.
+
+    **Real-world finding (2026-09-27): Windows disk identity is
+    resolvable by real guest-reported bus address, not just ordinal
+    guessing — confirmed live against a Proxmox VM (`win10test`) with
+    one `ide0`, two `sata` disks (`sata1`/`sata2`, with a cdrom
+    deliberately occupying `sata0` to test gap-tolerance), and multiple
+    `scsi` disks including one reassigned to `scsi5` (also to test
+    gap-tolerance).** `backend/guest_original_location.py`'s
+    `_windows_disk_number_by_bus` now tries an address-based match
+    before ever falling back to the ordinal guess:
+    - **`sataN`** → `Get-PhysicalDisk`'s `BusType=SATA` +
+      `Win32_DiskDrive.SCSIBus == N`. Confirmed gap-tolerant: the cdrom
+      at `sata0` never enumerates through `Win32_DiskDrive` at all
+      (cdrom drives aren't hard disks), so `sata1`/`sata2`'s `SCSIBus`
+      values weren't shifted by the gap.
+    - **`scsiN`** (virtio-scsi, PVE's default `scsihw=virtio-scsi-single`)
+      → `BusType=SAS` + the LUN from `Get-PnpDeviceProperty -KeyName
+      DEVPKEY_Device_LocationInfo` (Device Manager's "Location
+      information" field: `Bus Number 0, Target Id 0, LUN N`) `== N`.
+      Confirmed gap-tolerant up to `scsi5`. **`Win32_DiskDrive`'s own
+      `SCSIBus`/`SCSITargetId` are useless here** — `virtio-scsi-single`
+      gives every scsi disk its own dedicated controller instance, so
+      those fields read `0`/`0` identically for every scsi disk
+      regardless of PVE index; the LUN is the only field that actually
+      varies.
+    - **`ideN`** → `BusType=ATA`, but only ever verified with a single
+      IDE disk present (PVE caps IDE at 4 slots and multi-IDE guests are
+      rare) — falls back to the ordinal guess when more than one ATA
+      disk exists.
+    - **`virtio`** (virtio-blk, not virtio-scsi) was never tested at all
+      — always falls through to the ordinal guess.
+    - **Also confirmed, and worth a specific warning:**
+      `Win32_DiskDrive.InterfaceType` is *not* a reliable bus
+      discriminator by itself — a real SATA/AHCI disk in this test
+      reported `InterfaceType: IDE`, indistinguishable from the genuine
+      legacy-IDE disk without cross-checking `Get-PhysicalDisk`'s modern
+      `BusType` (which correctly separated `ATA`/`SATA`/`SAS`). Anyone
+      reaching for `Win32_DiskDrive` again for this should reach for
+      `BusType` from `Get-PhysicalDisk` instead, or alongside it.
+    - **Separately confirmed, and not yet fixed anywhere:** the disk-
+      level entry returned by `file-restore/list` (e.g.
+      `drive-ide0.img.fidx`) reports `size: 0` even for a real 8GB disk
+      — the portal's own tree UI shows this. The `size` field on
+      `file-restore/list` entries is evidently only meaningful for leaf
+      files, not disk/folder-shaped entries — don't use it for
+      disk-level size corroboration.
+    - **Also confirmed (Windows-only, real guest, real Storage-Spaces
+      striped volume): Windows software RAID (Storage Spaces striping,
+      and by extension Dynamic Disks/LDM) is not readable through the
+      portal at all** — PBS's file-restore helper VM is a minimal Linux
+      environment that can't assemble Windows' own proprietary
+      volume-manager metadata, so it shows raw/unreadable partitions.
+      This matches the never-live-verified concern already on file for
+      Linux `mdadm`/ZFS above — recovering files from a Windows
+      software-RAID guest needs the `proxmox-backup-client map` +
+      helper-VM workaround PVE's own docs describe, entirely outside
+      this app's scope, not something worth trying to support here.
+
+    Any Windows bus this can't resolve (ambiguous/multi-disk `ide`,
+    `virtio`, or a guest-exec failure) — and Linux, still ordinal-only —
+    falls back to the pre-existing ordinal-position guess. The existing
+    "Restoring into: `<path>`" confirmation text plus the required
+    overwrite checkbox remains the real safety net for that residual
+    risk, not just the disable-on-failure logic.
+
+    **Issue #77 (browse tree drive-letter display)** reuses this exact
+    same resolver (`guest_original_location.resolve_windows_disk_number`)
+    plus a new batched `list_windows_drive_letters` (one `Get-Partition
+    -DiskNumber` call for every partition on a disk, instead of
+    resolve_original_directory's one-item-at-a-time query) to annotate
+    the browse tree's partition folders directly — e.g. `2 (C:)` — for
+    Windows VMs, cosmetic-only and silently absent whenever the guest
+    agent isn't reachable or the bus can't be resolved. Deliberately
+    display-only: the annotation is a separate `drive_letter` field
+    rendered alongside a partition folder's `text`, never written into
+    `text` itself — `text` is also reused verbatim as the navigational
+    crumb label (`file_grid.html`'s `data-label`, `tree_nodes.html`'s
+    `crumbs_json`) that this same module's `disk_label_for_partition_
+    listing`/`resolve_original_directory` parse as a partition number;
+    corrupting it would silently break original-location restore for
+    anything browsed through an annotated folder.
 
     **Real-world finding (2026-09-25): broke on its own first real use,
     fixed same day.** `guest_original_location.py` was written against
