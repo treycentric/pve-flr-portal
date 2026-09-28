@@ -282,12 +282,18 @@ async def _windows_disk_number_by_bus(
         return None  # virtio (virtio-blk) - never tested, always falls back
 
     script = (
-        "$phys = @{}; Get-PhysicalDisk | ForEach-Object { $phys[$_.DeviceId] = $_.BusType }; "
+        # Get-PhysicalDisk's DeviceId is a *string* ("0", "1", ...) while
+        # Win32_DiskDrive.Index is numeric - an un-cast hashtable lookup
+        # here silently misses every entry (confirmed live: every row
+        # came back BusType=$null), so both sides are cast to [string]
+        # to guarantee a matching key type regardless of the underlying
+        # CIM property type.
+        "$phys = @{}; Get-PhysicalDisk | ForEach-Object { $phys[[string]$_.DeviceId] = $_.BusType }; "
         "@(Get-CimInstance Win32_DiskDrive | ForEach-Object { "
         "$loc = $null; "
         "try { $loc = (Get-PnpDeviceProperty -InstanceId $_.PNPDeviceID "
         "-KeyName DEVPKEY_Device_LocationInfo -ErrorAction Stop).Data } catch {}; "
-        "[pscustomobject]@{DiskNumber=$_.Index; BusType=$phys[$_.Index]; SCSIBus=$_.SCSIBus; Location=$loc} "
+        "[pscustomobject]@{DiskNumber=$_.Index; BusType=$phys[[string]$_.Index]; SCSIBus=$_.SCSIBus; Location=$loc} "
         "}) | ConvertTo-Json -Compress"
     )
     try:

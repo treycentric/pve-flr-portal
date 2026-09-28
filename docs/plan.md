@@ -1141,6 +1141,27 @@ entry points at. Two reasons this matters, both raised in review:
       `BusType` (which correctly separated `ATA`/`SATA`/`SAS`). Anyone
       reaching for `Win32_DiskDrive` again for this should reach for
       `BusType` from `Get-PhysicalDisk` instead, or alongside it.
+    - **Real-world finding (2026-09-28): a `[string]`/numeric type
+      mismatch silently broke the match on first real deployment.**
+      `Get-PhysicalDisk`'s `DeviceId` is a *string* (`"0"`, `"1"`, ...)
+      while `Win32_DiskDrive.Index` is numeric - the original script
+      built a hashtable keyed by the former and looked it up by the
+      latter with no cast, so every `BusType` silently came back
+      `$null` and every match failed, falling through to the (wrong)
+      ordinal guess every time - live-reported as original-location
+      restore resolving to a disk with no drive letter and the
+      browse-tree annotation showing nothing at all, both looking like
+      unrelated failures until the logging added to debug it showed
+      identical `BusType: None` rows for every disk. Fixed by casting
+      both sides to `[string]` explicitly. **Not caught by this
+      project's own test suite** - every test here mocks
+      `run_guest_exec`'s JSON *output* directly rather than executing
+      real PowerShell, so a bug living entirely in the script's own
+      text (a type-coercion issue only PowerShell's actual runtime
+      would surface) is invisible to unit tests by construction; only
+      a live guest-exec run exposes this class of bug. Worth a
+      specific eye on any future PowerShell script added to this
+      module for the same reason.
     - **Separately confirmed, and not yet fixed anywhere:** the disk-
       level entry returned by `file-restore/list` (e.g.
       `drive-ide0.img.fidx`) reports `size: 0` even for a real 8GB disk
