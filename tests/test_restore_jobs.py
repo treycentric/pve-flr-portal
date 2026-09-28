@@ -233,6 +233,13 @@ def test_restore_metadata_and_verify_are_independent_opt_ins(manager, session_da
     assert job.verify is False
 
 
+def test_restore_ownership_is_its_own_independent_opt_in(manager, session_data):
+    job = _make(manager, session_data, restore_metadata=False, verify=False, restore_ownership=True)
+    assert job.restore_ownership is True
+    assert job.restore_metadata is False
+    assert job.verify is False
+
+
 async def test_submitted_job_actually_runs(manager, session_data):
     job = _make(manager, session_data)
     ran = asyncio.Event()

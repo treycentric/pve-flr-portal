@@ -24,8 +24,10 @@ reaching the Direct Network Transfer eligibility check).
 """
 import asyncio
 import hashlib
+import io
 import ntpath
 import posixpath
+import tarfile
 import time
 from pathlib import Path
 
@@ -647,6 +649,67 @@ async def _restore_mtime(job: RestoreJob, guest_os_family: str | None) -> None:
         raise RuntimeError(f"Could not restore the original modified time: {err.strip() or out.strip()}")
 
 
+async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | None:
+    """Issue #20: confirmed live 2026-09-28 (docs/plan.md §7.5) - PVE's
+    file-restore/download with tar=1 wraps even a single file's content
+    in a real tar archive whose header carries the original uid/gid/
+    mode, unlike file-restore/list's JSON (mtime/size only, on any PVE
+    version). Reads only a bounded prefix of that stream (tar headers,
+    including any GNU/PAX long-name extension blocks, are small - 16KB
+    is generous headroom) to parse just the first entry's header, never
+    downloading the file's full content a second time, then closes the
+    connection immediately.
+
+    Returns None (never raises) on any failure to determine ownership -
+    the caller treats that as "nothing to restore, skip it", the same
+    posture _restore_mtime's own `source_mtime is None` case already
+    has, not a failed job. Once real values ARE in hand, a failure to
+    *apply* them (_restore_ownership below) is a real restore failure,
+    same as a failed mtime restore - this function is only the "did we
+    even get the data" half."""
+    try:
+        client, response = await pve_client.open_download(
+            job.session, job.source_volume, job.source_filepath, tar=True
+        )
+    except httpx.HTTPStatusError:
+        return None
+    try:
+        buf = b""
+        async for piece in response.aiter_bytes(chunk_size=4096):
+            buf += piece
+            if len(buf) >= 16384:
+                break
+        try:
+            with tarfile.open(fileobj=io.BytesIO(buf)) as tf:
+                info = tf.next()
+        except tarfile.TarError:
+            return None
+        if info is None:
+            return None
+        return info.uid, info.gid, info.mode & 0o7777
+    finally:
+        await response.aclose()
+        await client.aclose()
+
+
+async def _restore_ownership(job: RestoreJob, uid: int, gid: int, mode: int) -> None:
+    """Applies uid/gid/mode already fetched by _fetch_source_ownership -
+    Linux/BSD only, since the caller only ever reaches this when
+    job.restore_ownership is set, which main.py's /api/restore already
+    forces False for a Windows guest at job-creation time (NTFS has no
+    uid/gid/mode concept; ACL restore is a separate, confirmed-
+    infeasible-via-this-API problem - docs/plan.md §7.5). Raises on a
+    guest-exec failure, same as _restore_mtime: once real data is in
+    hand, a failure to apply it is a real restore failure, not a soft
+    skip."""
+    exitcode, out, err = await _exec(job, ["chown", f"{uid}:{gid}", job.destination])
+    if exitcode != 0:
+        raise RuntimeError(f"Could not restore ownership: {err.strip() or out.strip()}")
+    exitcode, out, err = await _exec(job, ["chmod", format(mode, "o"), job.destination])
+    if exitcode != 0:
+        raise RuntimeError(f"Could not restore permissions: {err.strip() or out.strip()}")
+
+
 def _parse_certutil_hash(out: str) -> str:
     # certutil -hashfile prints: a header line, the hash as
     # space-separated hex byte pairs on its own line, then a trailer -
@@ -980,8 +1043,13 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
 
             if not has_more:
                 job.log(f"Downloaded {len(first_piece)} byte(s) from the backup.")
-                needs_exec = job.restore_metadata or job.verify
-                job.progress_total = 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                needs_exec = job.restore_metadata or job.verify or job.restore_ownership
+                job.progress_total = (
+                    1
+                    + (1 if job.restore_metadata else 0)
+                    + (1 if job.verify else 0)
+                    + (1 if job.restore_ownership else 0)
+                )
 
                 # Issue #72: capabilities are now checked even when
                 # nothing else needs guest-exec, purely so a ReadOnly/
@@ -1067,7 +1135,11 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                 # growing placeholder (streamed, not pre-downloaded - see
                 # above) that RestoreJob.progress_percent clamps to <100
                 # until the count is actually known.
-                extra_units = (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                extra_units = (
+                    (1 if job.restore_metadata else 0)
+                    + (1 if job.verify else 0)
+                    + (1 if job.restore_ownership else 0)
+                )
                 if size_hint is not None:
                     job.progress_total = chunk_count(size_hint, DEFAULT_CHUNK_SIZE_BYTES) + 1 + extra_units
                 else:
@@ -1083,7 +1155,12 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     # this process. Counts as one progress unit.
                     total_bytes = await _drain_and_hash(pieces, hasher)
                     job.log(f"Downloaded {total_bytes} byte(s) from the backup.")
-                    job.progress_total = 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                    job.progress_total = (
+                    1
+                    + (1 if job.restore_metadata else 0)
+                    + (1 if job.verify else 0)
+                    + (1 if job.restore_ownership else 0)
+                )
                     job.progress_current = 1
                 else:
                     scratch_dir = scratch_dir_path(guest_os_family, job.id)
@@ -1097,7 +1174,11 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                         jobs.mark_cancelled(job.id)
                         return
                     job.progress_total = (
-                        len(chunk_paths) + 1 + (1 if job.restore_metadata else 0) + (1 if job.verify else 0)
+                        len(chunk_paths)
+                        + 1
+                        + (1 if job.restore_metadata else 0)
+                        + (1 if job.verify else 0)
+                        + (1 if job.restore_ownership else 0)
                     )
                     job.log(f"Wrote all {len(chunk_paths)} chunk(s) to scratch; concatenating into the destination.")
                     await _clear_readonly_if_present(job, guest_os_family)
@@ -1120,6 +1201,20 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                 job.log("Restoring the original modified time.")
                 await _restore_mtime(job, guest_os_family)
                 job.log("Modified time restored.")
+            job.progress_current += 1
+
+        if job.restore_ownership:
+            ownership = await _fetch_source_ownership(job)
+            if ownership is None:
+                job.log(
+                    "Restore ownership/permissions was requested, but the source's original "
+                    "ownership could not be determined - skipped."
+                )
+            else:
+                uid, gid, mode = ownership
+                job.log(f"Restoring original ownership ({uid}:{gid}) and permissions ({format(mode, 'o')}).")
+                await _restore_ownership(job, uid, gid, mode)
+                job.log("Ownership/permissions restored.")
             job.progress_current += 1
 
         if job.verify:

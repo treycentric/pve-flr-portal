@@ -83,6 +83,13 @@ class RestoreJob:
     # support it (docs/plan.md §7.5).
     restore_metadata: bool = False
     verify: bool = False
+    # Issue #20: original uid/gid/mode, fetched from a second file-
+    # restore/download(tar=1) call at restore time (docs/plan.md §7.5's
+    # 2026-09-28 finding - PVE's tar output carries this, the JSON
+    # file-restore/list API never has). Linux/BSD only - a no-op when
+    # guest_os_family == "windows" (NTFS has no uid/gid/mode concept;
+    # ACL restore is a separate, harder, not-yet-solved problem).
+    restore_ownership: bool = False
     # The source file's original mtime (from file-restore/list, which is
     # the only piece of metadata that API actually exposes - no uid/gid/
     # mode field exists on any PVE version, docs/plan.md §7.5). Only
@@ -189,6 +196,7 @@ class RestoreJobManager:
         items: list[BundleItem] | None = None,
         restore_metadata: bool = False,
         verify: bool = False,
+        restore_ownership: bool = False,
         source_mtime: int | None = None,
         source_size: int | None = None,
     ) -> RestoreJob:
@@ -213,6 +221,7 @@ class RestoreJobManager:
             destination=destination,
             restore_metadata=restore_metadata,
             verify=verify,
+            restore_ownership=restore_ownership,
             source_mtime=source_mtime,
             source_size=source_size,
         )

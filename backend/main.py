@@ -751,6 +751,7 @@ async def restore(
     overwrite: bool = Form(False),
     restore_metadata: bool = Form(False),
     verify: bool = Form(False),
+    restore_ownership: bool = Form(False),
     source_mtime: int | None = Form(None),
     source_size: int | None = Form(None),
     session: SessionData = Depends(auth.get_session),
@@ -833,7 +834,7 @@ async def restore(
             raise HTTPException(
                 status_code=403, detail=caps.design_a.reason or "Restore is not available for this guest"
             )
-        if (restore_metadata or verify) and not caps.design_b.available:
+        if (restore_metadata or verify or restore_ownership) and not caps.design_b.available:
             raise HTTPException(
                 status_code=403,
                 detail=caps.design_b.reason or "Restoring metadata/verifying needs VM.GuestAgent.Unrestricted",
@@ -856,6 +857,7 @@ async def restore(
             destination=destination,
             restore_metadata=restore_metadata,
             verify=verify,
+            restore_ownership=restore_ownership and caps.guest_os_family != "windows",
             source_mtime=source_mtime,
             source_size=source_size if source_size and source_size >= 0 else None,
         )

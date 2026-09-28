@@ -978,6 +978,64 @@ def test_restore_passes_metadata_verify_and_mtime_through_to_the_job(client, mon
     assert job.source_mtime == 1700000000
 
 
+def test_restore_blocked_when_ownership_requested_without_design_b(client, monkeypatch):
+    from backend import guest_agent
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(design_a=guest_agent.PathAvailability(True))
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    resp = client.post("/api/restore", data=_restore_form(restore_ownership="true"))
+    assert resp.status_code == 403
+
+
+def test_restore_passes_ownership_through_to_the_job_for_a_linux_guest(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(
+            guest_os_family="linux",
+            design_a=guest_agent.PathAvailability(True),
+            design_b=guest_agent.PathAvailability(True),
+        )
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    resp = client.post("/api/restore", data=_restore_form(restore_ownership="true"))
+    assert resp.status_code == 200
+    job = restore_jobs.manager.get(resp.json()["id"])
+    assert job.restore_ownership is True
+
+
+def test_restore_ownership_forced_false_for_a_windows_guest_regardless_of_request(client, monkeypatch):
+    """Issue #20: NTFS has no uid/gid/mode concept, and ACL restore is a
+    separate, confirmed-infeasible-via-this-API problem - the server
+    never trusts the frontend's checkbox state for this, even though
+    the checkbox is also disabled client-side for a Windows guest."""
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        # guest_os_family defaults to "windows" in _available_caps()
+        return _available_caps(
+            design_a=guest_agent.PathAvailability(True), design_b=guest_agent.PathAvailability(True)
+        )
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    resp = client.post("/api/restore", data=_restore_form(restore_ownership="true"))
+    assert resp.status_code == 200
+    job = restore_jobs.manager.get(resp.json()["id"])
+    assert job.restore_ownership is False
+
+
 def test_restore_requires_auth():
     with TestClient(main.app) as c:
         resp = c.post("/api/restore", data=_restore_form(), follow_redirects=False)

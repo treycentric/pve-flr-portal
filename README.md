@@ -54,10 +54,13 @@ See "Provisioning access" below for how to grant a user access.
    below); the confirmation dialog picks the destination directory -
    "Original location" (resolved automatically from the item's own path
    in the backup, when the app can confidently determine it), Browse, or
-   type one manually - and, where available, offers "restore metadata" /
-   "verify". Large
-   transfers use a Direct Network Transfer path automatically when a
-   data NIC is configured.
+   type one manually - and, where available, offers "restore metadata"
+   (modified time), "verify" (checksum), and "restore original owner/
+   permissions" (Linux/BSD guests only - greyed out for Windows, since
+   NTFS ACLs can't be recovered through any file-restore API Proxmox
+   currently exposes; see "Restore-to-guest" below). Large transfers
+   use a Direct Network Transfer path automatically when a data NIC is
+   configured.
 7. **About** (user menu, top right) shows the running version and a
    link back to this repo.
 
@@ -176,6 +179,21 @@ pveum acl modify /vms/<vmid> --users <user>@<realm> --roles FileRestoreOperator
 The portal detects per-guest which of these the calling user actually
 holds (plus what the guest agent itself allows) and only offers the
 restore options that check out — see `docs/plan.md` §7.5.
+
+**Windows ACLs can't be restored through this app.** The NTFS Security
+Descriptor survives fine *inside* a PBS backup (PBS backs up a VM as a
+raw block image, filesystem-agnostic — nothing about the guest's own
+metadata is discarded at backup time). It's specifically *file-level*
+restore that loses it: Proxmox's `file-restore` API only ever hands
+back individual files as a `tar`/`zip`, and neither archive format has
+a field capable of representing a Windows Security Descriptor — so
+it's dropped in that one extraction step, a confirmed upstream Proxmox
+limitation (see `docs/plan.md` §7.5), not something this app can work
+around. A full VM/disk restore doesn't go through that lossy step at
+all and preserves ACLs completely — if you need exact ACL fidelity,
+that's the path, not this app's file-level browser. Linux/BSD
+ownership and permissions don't have this problem and restore
+correctly (see "restore original owner/permissions" above).
 
 ### SSO / OpenID Connect login
 

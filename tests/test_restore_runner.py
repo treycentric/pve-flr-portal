@@ -613,6 +613,153 @@ async def test_restore_metadata_without_mtime_is_a_no_op(manager, session_data, 
     assert not any(c[0] == "touch" for c in exec_calls)
 
 
+def _make_tar_bytes(name: str, uid: int, gid: int, mode: int, content: bytes = b"data") -> bytes:
+    import io as _io
+    import tarfile as _tarfile
+
+    buf = _io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode="w") as tf:
+        info = _tarfile.TarInfo(name=name)
+        info.size = len(content)
+        info.uid = uid
+        info.gid = gid
+        info.mode = mode
+        tf.addfile(info, _io.BytesIO(content))
+    return buf.getvalue()
+
+
+def _patch_download_with_tar(monkeypatch, content: bytes, tar_content: bytes):
+    """Like _patch_download, but the tar=True call (Issue #20's
+    ownership-fetch probe) gets its own distinct payload - a real tar
+    archive, rather than the same plain content."""
+
+    async def fake_open_download(session, volume, filepath, tar=False):
+        blob = tar_content if tar else content
+        return FakeDownloadClient(), FakeDownloadResponse(blob)
+
+    monkeypatch.setattr(pve_client, "open_download", fake_open_download)
+
+
+async def test_restore_ownership_runs_chown_and_chmod_on_linux(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts", restore_ownership=True)
+    tar_bytes = _make_tar_bytes("hosts", uid=1000, gid=1000, mode=0o100644)
+    _patch_download_with_tar(monkeypatch, b"small", tar_bytes)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    exec_calls = []
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_calls.append(argv)
+        return 0, "", ""
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    chown_call = next(c for c in exec_calls if c[0] == "chown")
+    assert chown_call == ["chown", "1000:1000", "/etc/hosts"]
+    # _clear_readonly_if_present (#72) also issues its own unrelated
+    # "chmod u+w" before the write - filter to the numeric-mode chmod
+    # this step itself issues, not that earlier one.
+    chmod_call = next(c for c in exec_calls if c[0] == "chmod" and c[1].isdigit())
+    assert chmod_call == ["chmod", "644", "/etc/hosts"]
+    assert any("Restoring original ownership" in line for line in job.log_lines)
+
+
+async def test_restore_ownership_undetermined_is_skipped_not_failed(manager, session_data, monkeypatch):
+    """A malformed/unparseable tar (or any other fetch failure) must
+    degrade to "skip this cosmetic step", not fail an otherwise-
+    successful restore - same posture as restore_metadata's own
+    no-mtime-to-apply case."""
+    job = _make_job(manager, session_data, destination="/etc/hosts", restore_ownership=True)
+    _patch_download_with_tar(monkeypatch, b"small", tar_content=b"not a tar file at all")
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    exec_calls = []
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_calls.append(argv)
+        return 0, "", ""
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    # _clear_readonly_if_present (#72) issues its own unrelated
+    # "chmod u+w" before the write - only chown, and a numeric-mode
+    # chmod (this step's own), must be absent.
+    assert not any(c[0] == "chown" for c in exec_calls)
+    assert not any(c[0] == "chmod" and c[1].isdigit() for c in exec_calls)
+    assert any("could not be determined - skipped" in line for line in job.log_lines)
+
+
+async def test_restore_ownership_chown_failure_fails_the_job(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts", restore_ownership=True)
+    tar_bytes = _make_tar_bytes("hosts", uid=1000, gid=1000, mode=0o100644)
+    _patch_download_with_tar(monkeypatch, b"small", tar_bytes)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if argv[0] == "chown":
+            return 1, "", "Operation not permitted"
+        return 0, "", ""
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.FAILED
+    assert "Could not restore ownership" in job.error
+
+
+async def test_progress_total_includes_ownership_unit(manager, session_data, monkeypatch):
+    job = _make_job(manager, session_data, destination="/etc/hosts", restore_ownership=True)
+    tar_bytes = _make_tar_bytes("hosts", uid=1000, gid=1000, mode=0o100644)
+    _patch_download_with_tar(monkeypatch, b"small", tar_bytes)
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux")
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        return 0, "", ""
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+
+    await run_restore(job, manager)
+
+    assert job.status == RestoreStatus.DONE
+    # 1 write unit + 1 ownership unit
+    assert (job.progress_total, job.progress_current) == (2, 2)
+
+
 async def test_verify_success_linux_marks_done(manager, session_data, monkeypatch):
     import hashlib
 

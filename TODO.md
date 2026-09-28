@@ -34,11 +34,22 @@ commit.
   small LXC container) turned out to matter in practice, but Direct
   Network Transfer already fixed the bigger practical problem (upload
   speed) independently.
-- #26 — restore original owner/group/permissions (not just mtime) for
-  a multi-file/directory restore, via a companion manifest file
-  alongside the checksum one.
-- #20 — same ownership/permissions gap for the single-file restore
-  path.
+- #20 — **SHIPPED** for Linux/BSD: single-file restore now has its own
+  "Restore original owner/permissions" checkbox, sourced from a second
+  `file-restore/download?tar=1` call (confirmed live 2026-09-28 that
+  PVE's tar output carries real uid/gid/mode, unlike the JSON listing
+  API — docs/plan.md §7.5). **Windows ACLs confirmed infeasible** via
+  any Proxmox-exposed API (investigated 2026-09-28, docs/plan.md §7.5)
+  — neither tar nor zip has a field for an NTFS Security Descriptor,
+  and no other Proxmox API surfaces it either; the checkbox is disabled
+  for a Windows guest for exactly this reason. A real upstream Proxmox
+  gap, not something fixable from this app.
+- #26 — same ownership/permissions restore, for a multi-file/directory
+  restore - still open. The same tar-header approach is confirmed to
+  work for directories too (same 2026-09-28 live test), so this is a
+  matter of applying it in `restore_bundle.py`'s bundle builder, not
+  further investigation. Windows ACLs are equally infeasible here, same
+  reason as #20.
 - #7 — `/api/download-bundle` (the plain browser download feature,
   separate from restore-to-guest) still buffers the whole archive in
   RAM; the streaming techniques #24 built are directly reusable there

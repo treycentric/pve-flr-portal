@@ -164,14 +164,29 @@
                 <input type="checkbox" x-model="restoreVerify">
                 Verify with checksum after restore
               </label>
+              <label
+                class="restore-checkbox"
+                :title="restoreCaps.guest_os_family === 'windows' ? 'Not available for Windows guests - NTFS ACLs can\'t be read out of a PBS backup via any file-restore API Proxmox exposes today' : ''">
+                <input type="checkbox" x-model="restoreOwnership" :disabled="restoreCaps.guest_os_family === 'windows'">
+                Restore original owner/permissions
+              </label>
             </div>
           </template>
 
           <template x-if="isSingleFile">
-            <p class="restore-warning" x-show="!restoreMetadata">The restored file lands owned by root/SYSTEM with a fresh modified time - existing permissions and timestamps aren't preserved by this quick restore.</p>
+            <p class="restore-warning" x-show="!restoreMetadata && !restoreOwnership">The restored file lands owned by root/SYSTEM with a fresh modified time and default permissions - nothing is preserved by this quick restore.</p>
           </template>
           <template x-if="isSingleFile">
-            <p class="restore-warning" x-show="restoreMetadata">The restored file lands owned by root/SYSTEM - only the original modified time is restored (ownership &amp; permissions aren't, since this API doesn't expose that data).</p>
+            <p class="restore-warning" x-show="restoreMetadata && !restoreOwnership">The restored file lands owned by root/SYSTEM with default permissions - only the original modified time is restored.</p>
+          </template>
+          <template x-if="isSingleFile">
+            <p class="restore-warning" x-show="!restoreMetadata && restoreOwnership">The restored file lands with a fresh modified time - only the original owner/permissions are restored.</p>
+          </template>
+          <template x-if="isSingleFile">
+            <p class="restore-warning" x-show="restoreMetadata && restoreOwnership">The restored file's modified time, owner, and permissions are all restored to match the original.</p>
+          </template>
+          <template x-if="isSingleFile">
+            <p class="restore-warning" x-show="restoreCaps.guest_os_family === 'windows'">Windows NTFS ACLs can't be restored - PBS's file-restore API has no way to expose them (a Proxmox limitation, not something this app can work around).</p>
           </template>
           <template x-if="!isSingleFile">
             <p class="restore-warning">Every file lands owned by root/SYSTEM. Original modified times are preserved automatically; every restored file is checksum-verified against the backup as part of the restore - not optional for a multi-file/folder restore.</p>

@@ -896,10 +896,14 @@ confirmation offers two independent checkboxes, both defaulting **off**:
 - **Restore metadata** — corrected scope, confirmed against the actual
   API: `file-restore/list`'s response only ever includes `mtime` and
   `size` (docs/plan.md §3's documented schema — no `uid`/`gid`/`mode`
-  field exists anywhere in it), so this can only restore the original
-  **modified time**, not ownership or permissions as first sketched —
-  that data simply isn't exposed through this API at all, on any PVE
-  version. A follow-up `guest-exec` (`touch -d @<unix-ts>` on
+  field exists anywhere in it), so this checkbox can only restore the
+  original **modified time**, not ownership or permissions as first
+  sketched — that data isn't exposed through the *listing* API, on any
+  PVE version. (Ownership/permissions turned out to be recoverable a
+  different way — a second `file-restore/download?tar=1` call, not the
+  JSON listing API — see issue #20's real-world finding below, which is
+  its own separate "Restore original owner/permissions" checkbox, not
+  folded into this one.) A follow-up `guest-exec` (`touch -d @<unix-ts>` on
   Linux/BSD; PowerShell `(Get-Item).LastWriteTime = ...` on Windows,
   since `cmd` has no built-in for this) applies the `mtime` the
   file-restore listing already returned. Still answers "doesn't the
@@ -1094,10 +1098,14 @@ entry points at. Two reasons this matters, both raised in review:
     warning, "lands as root:root 0644" notice — no metadata/verify
     checkboxes shown at all, since there's no exec to run them with.
   - **`Unrestricted` also available:** same modal additionally shows
-    "Restore metadata" and "Verify" checkboxes (both off by default) —
-    checking either (or the content simply being too large for one
-    call) is what pulls this particular restore onto the exec-based
-    path; the user never has to know that distinction exists. The
+    "Restore metadata", "Verify", and "Restore original owner/
+    permissions" checkboxes (all off by default) — checking any of
+    them (or the content simply being too large for one call) is what
+    pulls this particular restore onto the exec-based path; the user
+    never has to know that distinction exists. "Restore original
+    owner/permissions" (issue #20) is disabled with an explanatory
+    tooltip for a Windows guest — see the real-world finding below for
+    why. The
     destination field is replaced by a small in-modal directory
     browser (`GET /api/restore-browse`, `backend/guest_browse.py`) —
     Up/Drives navigation, click a folder to descend, destination
@@ -1107,6 +1115,65 @@ entry points at. Two reasons this matters, both raised in review:
     itself needs the same `Unrestricted` grant (no dedicated QGA
     listing command), so it's simply absent, not merely disabled, when
     only `FileWrite` is held.
+
+    **Restore original owner/permissions, Linux/BSD (issue #20).
+    Real-world finding (2026-09-28): confirmed live against a real
+    Turnkey Linux guest that `file-restore/list`'s JSON is not the only
+    metadata source available — `file-restore/download?tar=1` wraps
+    even a single file's content in a real tar archive whose header
+    carries the actual original `uid`/`gid`/`mode`, for both a single
+    file and a directory (verified with a non-default owner: uid=1000/
+    gid=1000 came back correctly, matching a real non-root account, not
+    a tarfile-library default of 0/0).** `restore_runner.py`'s
+    `_fetch_source_ownership` opens a *second*, `tar=1` download of the
+    same `source_filepath` (the main content write still uses the
+    existing raw `tar=0` stream, unchanged) and reads only a bounded
+    16KB prefix — tar headers, including any GNU/PAX long-name
+    extension blocks, are small — to parse the first entry's header via
+    stdlib `tarfile`, never re-downloading the file's full content.
+    `_restore_ownership` then applies it via `chown`/`chmod` guest-exec
+    calls, the same `VM.GuestAgent.Unrestricted`-gated path
+    `_restore_mtime` already uses. A fetch/parse failure degrades to
+    "skip this cosmetic step" (logged, not a failed job) — same posture
+    as `_restore_mtime`'s own "no mtime to apply" case; once real values
+    ARE in hand, a `chown`/`chmod` failure raises and fails the job,
+    same as a failed mtime restore.
+
+    **Windows ACLs: confirmed infeasible via any Proxmox-exposed API
+    today, not just untested (investigated 2026-09-28).** The NTFS
+    Security Descriptor survives intact inside a PBS backup (PBS backs
+    up VMs as a raw block image, not filesystem-aware, so nothing about
+    the guest's own metadata is discarded at backup time) — the loss
+    happens entirely in Proxmox's own file-restore helper, which only
+    ever emits `tar`/`zip`, and **neither archive format has a field
+    capable of representing a Windows Security Descriptor** (tar only
+    has Unix uid/gid/mode; zip's Unix extension only has DOS/Unix mode
+    bits). No other Proxmox-exposed API surfaces it either:
+    `file-restore/list`'s schema has no ACL field (§3), and
+    `qemu-guest-agent` only ever talks to a *live* running guest, never
+    a backup snapshot, so it can't be a channel for backup-sourced ACL
+    data. A Proxmox forum thread
+    ("PBS file backup and Windows ACL") shows a maintainer confirming
+    this is a known, bugzilla-tracked, unresolved gap in Proxmox's own
+    ecosystem broadly — not something specific to this app's restricted
+    API surface. The only two ways this could ever change: Proxmox adds
+    SD-awareness to the file-restore daemon itself (a genuine upstream
+    feature request, not patchable from outside — same category as
+    issue #79's Windows-RAID gap), or this app gains direct PBS/block-
+    image access, which would break the "never talks to PBS directly"
+    hard constraint and isn't worth it for this one feature. The
+    "Restore original owner/permissions" checkbox is disabled for a
+    Windows guest in the UI for exactly this reason, not merely
+    unimplemented.
+
+    Multi-file/directory restore (issue #26) is a distinct, still-open
+    follow-on — `restore_bundle.py`'s bundle builder doesn't yet read
+    real uid/gid/mode from PVE's own archive output the way the
+    single-file path now does, though the same tar-header approach
+    confirmed here applies directly (this same 2026-09-28 live test
+    also confirmed real uid/gid/mode survive for a *directory*
+    download, both via `tar=1`'s headers and via the default zip's
+    `external_attr` mode bits).
 
     **"Original location" destination (issue #68).** A third segmented
     option alongside Browse/Manual entry, VM guests only (LXC never
