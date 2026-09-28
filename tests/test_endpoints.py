@@ -343,6 +343,9 @@ def test_browse_annotates_windows_drive_letter_on_partition_folder(client, monke
     assert resp.status_code == 200
     assert "1 (C:)" in resp.text
     assert 'data-label="1"' in resp.text
+    # Carried separately for the breadcrumb bar to render "1 (C:)" once
+    # this folder is entered - never folded into data-label itself.
+    assert 'data-drive-letter="C:"' in resp.text
 
 
 def test_tree_annotates_windows_drive_letter_on_partition_folder(client, monkeypatch):
@@ -372,6 +375,9 @@ def test_tree_annotates_windows_drive_letter_on_partition_folder(client, monkeyp
     assert resp.status_code == 200
     assert "1 (C:)" in resp.text
     assert "&#34;label&#34;: &#34;1&#34;" in resp.text
+    # Carried as a separate crumbs_json field for the breadcrumb bar -
+    # never folded into "label" itself.
+    assert "&#34;driveLetter&#34;: &#34;C:&#34;" in resp.text
 
 
 def test_browse_skips_drive_letter_annotation_for_containers(client, monkeypatch):

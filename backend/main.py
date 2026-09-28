@@ -527,12 +527,22 @@ async def tree(
     nodes = []
     for entry in entries:
         text = entry.get("text", "")
-        child_crumbs = [*parent_crumbs, {"label": text, "filepath": entry["filepath"]}]
+        drive_letter = entry.get("drive_letter")
+        child_crumb = {"label": text, "filepath": entry["filepath"]}
+        if drive_letter:
+            # Display-only, same as file_grid.html's data-drive-letter -
+            # never folded into `label` itself, which the backend's own
+            # crumb parsing (resolve_original_directory and friends)
+            # reads as the raw partition number/disk label. Harmless
+            # extra field otherwise: crumb parsing only ever reads
+            # `label`/`filepath`.
+            child_crumb["driveLetter"] = drive_letter
+        child_crumbs = [*parent_crumbs, child_crumb]
         nodes.append(
             {
                 "filepath": entry["filepath"],
                 "text": text,
-                "drive_letter": entry.get("drive_letter"),
+                "drive_letter": drive_letter,
                 "type_label": "LVM Volume" if text in lvm_names else _type_label(entry, at_root),
                 "crumbs_json": json.dumps(child_crumbs),
             }

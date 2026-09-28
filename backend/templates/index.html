@@ -198,7 +198,7 @@
       <nav class="breadcrumb">
         <template x-for="(crumb, idx) in crumbs" :key="idx">
           <span>
-            <button type="button" class="crumb-btn" @click="goTo(idx)" :disabled="loading" x-text="crumb.label"></button>
+            <button type="button" class="crumb-btn" @click="goTo(idx)" :disabled="loading" x-text="crumb.label + (crumb.driveLetter ? ' (' + crumb.driveLetter + ')' : '')"></button>
             <span class="crumb-sep" x-show="idx < crumbs.length - 1">&rsaquo;</span>
           </span>
         </template>

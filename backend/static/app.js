@@ -1445,9 +1445,15 @@ function portalApp(rawSnapshots, guest) {
 
     // --- folder browsing (drives the file grid via htmx) ---
     loading: false,
-    goInto(filepath, label) {
+    goInto(filepath, label, driveLetter) {
       if (this.loading) return;
-      this.crumbs.push({ label, filepath });
+      // driveLetter is display-only (rendered in the breadcrumb next to
+      // the partition number) - label itself must stay the raw PVE
+      // text, since it's what the backend parses as a partition number/
+      // disk label (resolve_original_directory and friends). Extra
+      // fields on a crumb are harmless to send along - the backend's
+      // crumb parsing only ever reads `label`/`filepath`.
+      this.crumbs.push(driveLetter ? { label, filepath, driveLetter } : { label, filepath });
       this._pushHistory();
       this.load();
     },
