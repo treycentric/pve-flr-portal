@@ -2812,9 +2812,9 @@ options given the hard PVE dependency. Considered:
   for a companion app that doesn't need to run *on* the hypervisor.
 - **VM / OVA.** Correct but heaviest option for what is a single tiny
   stateless Python process (no DB) — full guest-OS overhead, a slower
-  build/update pipeline (rebuild an image vs. `git pull && restart`),
-  and "runs on any hypervisor" isn't a real benefit here since the
-  target audience is, by definition, already running Proxmox.
+  build/update pipeline (rebuild an image vs. a git-based update), and
+  "runs on any hypervisor" isn't a real benefit here since the target
+  audience is, by definition, already running Proxmox.
 - **LXC container (chosen, primary path).** PVE-native, minimal
   overhead, matches how the Proxmox homelab community already ships
   companion tools (the common `pct create` + install-script pattern,
@@ -2828,6 +2828,40 @@ options given the hard PVE dependency. Considered:
   Docker host) rather than wanting another PVE guest, and doubles as
   the fastest local dev/test loop. See `Dockerfile` /
   `docker-compose.yml` at the repo root.
+- **`.deb` package / apt repo.** Investigated and rejected (issue #89
+  background research, 2026-09-29): Debian bookworm's packaged
+  fastapi/uvicorn/cryptography are too stale to depend on directly, the
+  only sound vendoring route (`dh-virtualenv`) is itself orphaned in
+  Debian, and a real `.deb` would need a maintained signed apt repo —
+  exactly the "extra service" this project's philosophy avoids. The
+  LXC container already serves as the disposable, isolated install
+  unit a `.deb` would otherwise buy.
+
+### Installing and updating a specific version (issue #89)
+
+`deploy/lxc-create.sh` (fresh installs) and `deploy/update.sh` (existing
+installs) both target the project's existing release channel — SemVer
+git tags (`vX.Y.Z`) + GitHub Releases, cut by `scripts/release.py`
+per `docs/dev/versioning.md` — instead of floating on whatever commit
+happens to be on `main`:
+
+- A fresh `lxc-create.sh` run clones the full repo (not `--depth 1`, so
+  tag history is present) and checks out the latest `vX.Y.Z` tag before
+  running `install.sh`, rather than leaving the checkout on `main` HEAD.
+- `deploy/update.sh <version>` moves an existing install to a specific
+  tagged release (`v1.4.0` or `1.4.0`), to `latest`, or to `main` for
+  bleeding-edge/unreleased work — `git fetch --tags`, checkout,
+  reinstall `requirements.txt`, re-chown, restart the systemd unit.
+  Refuses if the app directory has local/uncommitted changes rather
+  than silently discarding them.
+
+This replaces the old undocumented `git pull && systemctl restart`
+update path (still what `update.sh` does under the hood for `main`,
+just now a supported, named command instead of an ad hoc incantation)
+with something that can pin to, or roll back to, a version that
+actually shipped and passed CI — while adding no new service, no
+packaging step, and no dependency beyond git, which install already
+requires.
 
 ### Persistence, and backing up the portal itself
 
