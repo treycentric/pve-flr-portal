@@ -94,7 +94,7 @@ what's on the roadmap.
 9. **About** (user menu, top right) shows the running version and a
    link back to this repo.
 
-## Running it Locally
+## Running It Locally
 
 ```
 git clone https://github.com/treycentric/pve-flr-portal.git
@@ -116,19 +116,23 @@ The app serves HTTPS by default on port **8008** (a self-signed cert is
 generated automatically on first run at `certs/portal.crt`/`portal.key`
 if you haven't dropped in your own). Open **https://127.0.0.1:8008/** —
 your browser will warn about the self-signed cert the first time; that's
-expected for a homelab self-signed setup. Drop a CA-issued cert/key at
+expected for a developer self-signed setup. Drop a CA-issued cert/key at
 the same paths to replace it.
 
 See "Provisioning access" below for how to grant a user the
 `FileRestoreReader` role needed to browse and download (restore-to-guest
 needs a separate grant, also covered there).
 
-## Provisioning access
+## Provisioning Access
 
 The portal never gets its own PVE credentials — every user logs in
 with their own PVE username/password, and PVE's own permission system
 decides what they can see. Onboarding a user is two ACL grants against
 their existing account; no tokens or secrets to generate or hand off.
+
+### Browse Backup Snapshots and Download Contents
+
+Browsing and downloading only needs `FileRestoreReader` (created here).
 
 **1. Create the role** (once, on the PVE node — skip if it already
 exists):
@@ -139,9 +143,9 @@ pveum role add FileRestoreReader -privs "Datastore.AllocateSpace,VM.Backup,VM.Au
 
 `Datastore.AllocateSpace` + `VM.Backup` are what PVE's file-restore API
 actually requires to read a backup volume (`Datastore.Audit` alone is
-not enough); `VM.Audit` lets the portal resolve guest names for
-display. See `docs/plan.md` §3 if you want the full "why" behind that
-specific privilege set.
+not enough); `VM.Audit` lets the portal resolve guest names for display.
+See `docs/plan.md` §3 if you want the full "why" behind that specific
+privilege set.
 
 **2. Grant it to each user:**
 
@@ -171,9 +175,8 @@ a storage a user has no access to is simply skipped, not an error.
 4. **Add → User Permission** (again) — Path: `/vms` (or a specific
    `/vms/<vmid>`), same User/Role, Propagate: checked.
 
-### Restore-to-guest
+### Restore to Guest
 
-Browsing and downloading only needs `FileRestoreReader` above.
 Restoring a file directly back into a *running* guest via
 `qemu-guest-agent` (see `docs/plan.md` §7.5–§7.7) is a **separate,
 deliberate** grant — a user who can browse a backup should not
@@ -185,9 +188,11 @@ PVE 8 only has the coarse, all-or-nothing `VM.Monitor` and can't scope
 this feature tightly, so it stays unavailable on PVE 8 regardless of
 any role/ACL setup.
 
+**1. Create the role** (once, on the PVE node — skip if it already
+exists):
+
 ```
 pveum role add FileRestoreOperator -privs "VM.GuestAgent.Audit,VM.GuestAgent.FileWrite"
-pveum acl modify /vms/<vmid> --users <user>@<realm> --roles FileRestoreOperator
 ```
 
 - `VM.GuestAgent.Audit` lets the portal ask the guest agent what it
@@ -198,13 +203,35 @@ pveum acl modify /vms/<vmid> --users <user>@<realm> --roles FileRestoreOperator
   `0644`, fresh mtime — no further guest access needed.
 - `VM.GuestAgent.Unrestricted` enables **full restore**: larger files,
   directories, and the optional "restore metadata" / "verify"
-  upgrades. This is a much larger grant — Proxmox doesn't expose a
+  upgrades. This is a much larger grant — Proxmox doesn't expAlsoose a
   narrower privilege for `guest-exec`, so anything that needs to run a
   command inside the guest needs this one. Add it only for guests
   where that broader access is acceptable:
   ```
   pveum role modify FileRestoreOperator -privs "VM.GuestAgent.Audit,VM.GuestAgent.FileWrite,VM.GuestAgent.Unrestricted"
   ```
+
+**2. Grant it to each user:**
+
+At global (root) scope:
+
+```
+pveum acl modify / --users <user>@<realm> --roles FileRestoreOperator
+```
+
+
+For all VMs:
+
+```
+pveum acl modify /vms --users <user>@<realm> --roles FileRestoreOperator
+```
+
+
+For a specific VM:
+
+```
+pveum acl modify /vms/<vmid> --users <user>@<realm> --roles FileRestoreOperator
+```
 
 The portal detects per-guest which of these the calling user actually
 holds (plus what the guest agent itself allows) and only offers the
@@ -236,7 +263,7 @@ asking for a password.
 
 **One extra step beyond the PVE-side realm setup**, and the one that's
 easy to miss: the portal redirects through your identity provider using
-its *own* callback URL —
+its *own* callback/redirect URL —
 
 ```
 https://<portal-host>:<port>/login/oidc/callback
