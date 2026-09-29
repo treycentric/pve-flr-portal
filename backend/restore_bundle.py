@@ -53,9 +53,11 @@ import hashlib
 import io
 import tarfile
 import tempfile
+import time
 import uuid
 import zipfile
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -216,30 +218,29 @@ class _HashingReader:
 ItemProgressFn = Callable[[BundleItem, int, int | None], None]  # (item, bytes so far, total bytes or None)
 
 
-async def _download_item_to_temp_file(
+# (uid, gid, mode, mtime) - see pve_client.fetch_source_metadata. Only
+# ever populated for a leaf item; a directory item's metadata is
+# per-member, read later while its contents are added to the bundle
+# (_add_directory_entries_to_tar/_zip), not one value for the whole item.
+ItemMetadata = tuple[int, int, int, int] | None
+
+
+async def _stream_download_to_file(
     session: SessionData,
     volume: str,
+    filepath: str,
+    tar: bool,
+    dest: Path,
     item: BundleItem,
-    tmp_dir: Path,
-    on_progress: ItemProgressFn | None = None,
-) -> Path:
-    """Streams one selected item to its own local temp file, one
-    DEFAULT_CHUNK_SIZE_BYTES piece at a time - never the whole item in
-    memory (the same discipline restore_runner.py's memory fix, §7.6,
-    established for a single file, extended here to each item in a
-    multi-select bundle). A directory item lands as PVE's own default
-    zip encoding of everything under it - no `tar=1` needed; see this
-    module's docstring correction in docs/plan.md §7.7.
-
-    `on_progress`, when given, is called after every chunk with (item,
-    bytes downloaded so far, total bytes if PVE sent a Content-Length
-    header else None) - unthrottled, so the caller decides how often to
-    actually act on it (confirmed live 2026-09-02: this whole download
-    step had no progress signal at all, a large single-directory
-    selection looked indistinguishable from a hang for several
-    minutes)."""
-    dest = tmp_dir / f"item-{uuid.uuid4().hex}"
-    client, response = await pve_client.open_download(session, volume, item.filepath, tar=False)
+    on_progress: ItemProgressFn | None,
+) -> None:
+    """The actual streamed download, one DEFAULT_CHUNK_SIZE_BYTES piece
+    at a time - never the whole item in memory (the same discipline
+    restore_runner.py's memory fix, §7.6, established for a single
+    file, extended here to each item in a multi-select bundle). Shared
+    by both branches of _download_item_to_temp_file below, which only
+    differ in `tar` and what (if anything) they fetch afterward."""
+    client, response = await pve_client.open_download(session, volume, filepath, tar=tar)
     try:
         content_length_header = response.headers.get("content-length")
         total = int(content_length_header) if content_length_header is not None else None
@@ -253,65 +254,205 @@ async def _download_item_to_temp_file(
     finally:
         await response.aclose()
         await client.aclose()
-    return dest
 
 
-def _add_leaf_to_tar(tf: tarfile.TarFile, arcname: str, local_path: Path, manifest: ManifestBuilder) -> None:
+async def _download_item_to_temp_file(
+    session: SessionData,
+    volume: str,
+    item: BundleItem,
+    tmp_dir: Path,
+    guest_os_family: str | None,
+    on_progress: ItemProgressFn | None = None,
+) -> tuple[Path, ItemMetadata]:
+    """Streams one selected item to its own local temp file - see
+    _stream_download_to_file for the streaming discipline itself.
+
+    A **leaf** item downloads its raw content unchanged (`tar=0`), then
+    makes a second, small `fetch_source_metadata` call for its real
+    mtime/uid/gid/mode (issue #26 - `file-restore/list`'s JSON never
+    has uid/gid/mode, docs/plan.md §7.5/§7.7) - returned alongside the
+    path.
+
+    A **directory** item's local temp file format now depends on the
+    guest: Windows keeps PVE's default zip (`tar=0`) - zip's own
+    per-member `date_time` already gives a real mtime with no format
+    switch needed, and Windows never needs uid/gid/mode (NTFS has no
+    such concept - issue #20's confirmed-infeasible-via-any-Proxmox-API
+    ACL finding applies here too). Every other guest now uses `tar=1`
+    instead of the previous always-zip default - confirmed live
+    2026-09-28 to carry real per-member uid/gid/mode *and* mtime
+    (docs/plan.md §7.7), needed uniformly regardless of whether
+    ownership restore was requested, since mtime restoration is
+    unconditional. Metadata for a directory item is per-member, read
+    later while its contents are added to the bundle - `None` here.
+
+    `on_progress`, when given, is called after every chunk with (item,
+    bytes downloaded so far, total bytes if PVE sent a Content-Length
+    header else None) - unthrottled, so the caller decides how often to
+    actually act on it (confirmed live 2026-09-02: this whole download
+    step had no progress signal at all, a large single-directory
+    selection looked indistinguishable from a hang for several
+    minutes)."""
+    dest = tmp_dir / f"item-{uuid.uuid4().hex}"
+    if item.leaf:
+        await _stream_download_to_file(session, volume, item.filepath, False, dest, item, on_progress)
+        metadata = await pve_client.fetch_source_metadata(session, volume, item.filepath)
+        return dest, metadata
+    use_tar = guest_os_family != "windows"
+    await _stream_download_to_file(session, volume, item.filepath, use_tar, dest, item, on_progress)
+    return dest, None
+
+
+def _safe_zip_date_time(mtime: int) -> tuple[int, int, int, int, int, int] | None:
+    """Zip's date_time field can't represent anything before 1980 (no
+    timezone either, 2-second granularity) - returns None for an mtime
+    that predates that, so the caller falls back to the pre-existing
+    "now" behavior instead of a hard ValueError from zipfile itself."""
+    dt = time.localtime(mtime)
+    if dt.tm_year < 1980:
+        return None
+    return dt[:6]
+
+
+def _add_leaf_to_tar(
+    tf: tarfile.TarFile,
+    arcname: str,
+    local_path: Path,
+    manifest: ManifestBuilder,
+    metadata: ItemMetadata,
+    apply_ownership: bool,
+) -> None:
+    """Issue #26: `metadata` (from `pve_client.fetch_source_metadata`)
+    carries the item's real mtime, applied unconditionally when known -
+    and real uid/gid/mode, applied only when `apply_ownership` is set
+    (the "Restore original owner/permissions" checkbox - Linux/BSD
+    only, same as the single-file case, #20). `metadata` being None
+    (the fetch itself failed) or `apply_ownership` being False just
+    leaves tarfile's own defaults (mtime 0, uid/gid 0, mode 0o644) -
+    same behavior as before this existed."""
     hasher = hashlib.sha256()
     info = tarfile.TarInfo(name=arcname)
     info.size = local_path.stat().st_size
+    if metadata is not None:
+        uid, gid, mode, mtime = metadata
+        info.mtime = mtime
+        if apply_ownership:
+            info.uid = uid
+            info.gid = gid
+            info.mode = mode
     with local_path.open("rb") as f:
         tf.addfile(info, _HashingReader(f, hasher))
     manifest.add(arcname, hasher.hexdigest())
 
 
-def _add_leaf_to_zip(zf: zipfile.ZipFile, arcname: str, local_path: Path, manifest: ManifestBuilder) -> None:
+def _add_leaf_to_zip(
+    zf: zipfile.ZipFile, arcname: str, local_path: Path, manifest: ManifestBuilder, metadata: ItemMetadata
+) -> None:
+    """Issue #26: `metadata`'s mtime, when known, becomes the zip
+    entry's real `date_time` - previously always "now" (zipfile's own
+    default when given a bare name instead of a ZipInfo). Uid/gid/mode
+    are moot here: zip output only ever happens for a Windows guest
+    (select_bundle_format), which has no Unix ownership concept at
+    all - see _add_leaf_to_tar for the Linux/BSD ownership case."""
     hasher = hashlib.sha256()
-    with local_path.open("rb") as src, zf.open(arcname, "w") as dst:
+    info: zipfile.ZipInfo | str = arcname
+    if metadata is not None:
+        date_time = _safe_zip_date_time(metadata[3])
+        if date_time is not None:
+            info = zipfile.ZipInfo(arcname, date_time=date_time)
+            info.compress_type = zipfile.ZIP_DEFLATED
+    with local_path.open("rb") as src, zf.open(info, "w") as dst:
         while piece := src.read(DEFAULT_CHUNK_SIZE_BYTES):
             hasher.update(piece)
             dst.write(piece)
     manifest.add(arcname, hasher.hexdigest())
 
 
-def _add_directory_entries_to_tar(tf: tarfile.TarFile, local_zip_path: Path, manifest: ManifestBuilder) -> None:
-    """A directory item's local temp file is PVE's own zip encoding of
-    everything under it - this re-expands each member into the outer
-    tar, matching main.py's download_bundle()'s existing re-expansion
-    logic (just targeting a different output format and also building
-    the manifest). One member at a time, streamed through - never a
-    whole member's content in memory.
+@contextmanager
+def _open_local_tar(path: Path):
+    """Issue #26: a non-Windows directory item's local temp file is
+    PVE's own `tar=1` encoding (_download_item_to_temp_file) - possibly
+    zstd-framed, possibly a genuine plain tar (confirmed live
+    inconsistent for the same endpoint/parameter, issue #20/#26,
+    docs/plan.md §7.5/§7.7), so detect via the magic number rather than
+    assume either. Unlike `pve_client.fetch_source_metadata`'s bounded-
+    prefix read (only needs the first header), every member has to be
+    read here, so this decompresses the whole file via a streaming
+    reader rather than a bounded chunk."""
+    raw = path.open("rb")
+    try:
+        magic = raw.read(4)
+        raw.seek(0)
+        if magic == pve_client.ZSTD_MAGIC:
+            tf = tarfile.open(fileobj=zstandard.ZstdDecompressor().stream_reader(raw), mode="r|")
+        else:
+            tf = tarfile.open(fileobj=raw, mode="r")
+        try:
+            yield tf
+        finally:
+            tf.close()
+    finally:
+        raw.close()
 
-    Each member's `info.filename` is used as the arcname as-is, not
-    prefixed with the item's own name - PVE's own zip for a directory
-    already roots every entry under the directory's own name (e.g.
-    `Downloads/file.txt` for a `Downloads` selection), confirmed live
-    2026-09-02 by a real restore landing files under a doubled
+
+def _add_directory_entries_to_tar(
+    tf: tarfile.TarFile, local_tar_path: Path, manifest: ManifestBuilder, apply_ownership: bool
+) -> None:
+    """A directory item's local temp file is now PVE's own `tar=1`
+    encoding (issue #26 - previously always a zip, re-expanded here;
+    switched so real per-member uid/gid/mode/mtime - confirmed live
+    2026-09-28 to survive PVE's file-restore path, docs/plan.md §7.7 -
+    can be copied onto the outgoing entry instead of tarfile's bare
+    defaults). Re-expands each member into the outer tar - one member
+    at a time, streamed through, never a whole member's content in
+    memory. mtime is applied unconditionally when known; uid/gid/mode
+    only when `apply_ownership` is set (the "Restore original owner/
+    permissions" checkbox, Linux/BSD only - this function is never
+    reached for a Windows guest at all, since Windows directories still
+    download as zip - see _add_directory_entries_to_zip).
+
+    Each member's own `.name` is used as the arcname as-is, not
+    prefixed with the item's own name - PVE's own archive for a
+    directory already roots every entry under the directory's own name
+    (e.g. `Downloads/file.txt` for a `Downloads` selection), confirmed
+    live 2026-09-02 by a real restore landing files under a doubled
     `Downloads/Downloads/` because this used to re-prefix on top of
-    that."""
-    with zipfile.ZipFile(local_zip_path) as sub:
-        for info in sub.infolist():
-            if info.is_dir():
+    that (issue #66/#26)."""
+    with _open_local_tar(local_tar_path) as sub:
+        for member in sub:
+            if not member.isfile():
                 continue
-            arcname = info.filename
+            arcname = member.name
             hasher = hashlib.sha256()
             tinfo = tarfile.TarInfo(name=arcname)
-            tinfo.size = info.file_size
-            with sub.open(info.filename) as member:
-                tf.addfile(tinfo, _HashingReader(member, hasher))
+            tinfo.size = member.size
+            tinfo.mtime = member.mtime
+            if apply_ownership:
+                tinfo.uid = member.uid
+                tinfo.gid = member.gid
+                tinfo.mode = member.mode & 0o7777
+            src = sub.extractfile(member)
+            tf.addfile(tinfo, _HashingReader(src, hasher))
             manifest.add(arcname, hasher.hexdigest())
 
 
 def _add_directory_entries_to_zip(zf: zipfile.ZipFile, local_zip_path: Path, manifest: ManifestBuilder) -> None:
-    """See `_add_directory_entries_to_tar()`'s docstring - same
-    no-re-prefixing rationale, just for the zip output format."""
+    """Windows-only path (non-Windows directories now source from a tar
+    instead - see _add_directory_entries_to_tar): copies each member's
+    real `date_time` from PVE's own zip, previously discarded (issue
+    #26's folded-in mtime fix - same no-re-prefixing rationale as the
+    tar case above). Ownership/mode is moot here: NTFS has no such
+    concept, and this path is never reached for a Linux/BSD guest
+    (select_bundle_format only ever picks ZIP for Windows)."""
     with zipfile.ZipFile(local_zip_path) as sub:
         for info in sub.infolist():
             if info.is_dir():
                 continue
             arcname = info.filename
             hasher = hashlib.sha256()
-            with sub.open(info.filename) as src, zf.open(arcname, "w") as dst:
+            out_info = zipfile.ZipInfo(arcname, date_time=info.date_time)
+            out_info.compress_type = zipfile.ZIP_DEFLATED
+            with sub.open(info.filename) as src, zf.open(out_info, "w") as dst:
                 while piece := src.read(DEFAULT_CHUNK_SIZE_BYTES):
                     hasher.update(piece)
                     dst.write(piece)
@@ -358,7 +499,12 @@ def _open_bundle_writer(output_path: Path, fmt: BundleFormat) -> _BundleWriter:
 
 
 def _add_item_to_bundle_writer(
-    writer: _BundleWriter, item: BundleItem, local_path: Path, manifest: ManifestBuilder
+    writer: _BundleWriter,
+    item: BundleItem,
+    local_path: Path,
+    manifest: ManifestBuilder,
+    metadata: ItemMetadata,
+    apply_ownership: bool,
 ) -> None:
     """Adds one already-downloaded item's local file to the still-open
     bundle - the caller deletes `local_path` immediately after this
@@ -369,17 +515,22 @@ def _add_item_to_bundle_writer(
     ran a real LXC container's rootfs out of space
     (`OSError: [Errno 28] No space left on device`) on a multi-item
     selection - see docs/plan.md §7.7's finding for the fuller
-    zero-buffer alternative (issue #25) this stops short of."""
+    zero-buffer alternative (issue #25) this stops short of.
+
+    `metadata`/`apply_ownership` (issue #26) only apply to a leaf item
+    and the tar-output directory case - see _add_leaf_to_tar/_zip and
+    _add_directory_entries_to_tar for what each actually does with
+    them."""
     if writer.fmt == BundleFormat.ZIP:
         if item.leaf:
-            _add_leaf_to_zip(writer.zf, item.name, local_path, manifest)
+            _add_leaf_to_zip(writer.zf, item.name, local_path, manifest, metadata)
         else:
             _add_directory_entries_to_zip(writer.zf, local_path, manifest)
     else:
         if item.leaf:
-            _add_leaf_to_tar(writer.tf, item.name, local_path, manifest)
+            _add_leaf_to_tar(writer.tf, item.name, local_path, manifest, metadata, apply_ownership)
         else:
-            _add_directory_entries_to_tar(writer.tf, local_path, manifest)
+            _add_directory_entries_to_tar(writer.tf, local_path, manifest, apply_ownership)
 
 
 def _finish_bundle_writer(writer: _BundleWriter, manifest: ManifestBuilder) -> None:
@@ -415,6 +566,7 @@ async def build_bundle(
     guest_os_family: str | None,
     zst_capable: bool,
     on_item_progress: ItemProgressFn | None = None,
+    restore_ownership: bool = False,
 ) -> tuple[Path, BundleFormat, ManifestBuilder, tempfile.TemporaryDirectory]:
     """Downloads each selected item (streamed, one piece at a time) to
     its own local temp file and adds it to the output bundle - format
@@ -437,7 +589,17 @@ async def build_bundle(
     added because this whole build phase (download + add-to-bundle) had
     no progress signal at all, confirmed live 2026-09-02 to look
     indistinguishable from a hang on a large single-directory
-    selection."""
+    selection.
+
+    `restore_ownership` (issue #26) - re-derived into `apply_ownership`
+    here rather than trusted as-is, the same defense-in-depth already
+    applied at /api/restore's job-creation time (#20): NTFS has no
+    uid/gid/mode concept, so this is forced off for a Windows guest
+    regardless of what's passed in. Original mtime is restored
+    unconditionally whenever it's known, independent of this flag -
+    that part was always claimed by the restore modal's own copy, just
+    never actually implemented (issue #26's folded-in bug fix)."""
+    apply_ownership = restore_ownership and guest_os_family != "windows"
     fmt = select_bundle_format(guest_os_family, zst_capable)
     tmp_dir_ctx = tempfile.TemporaryDirectory(prefix="pve-flr-portal-bundle-")
     tmp_dir = Path(tmp_dir_ctx.name)
@@ -448,9 +610,13 @@ async def build_bundle(
     writer = await asyncio.to_thread(_open_bundle_writer, output_path, fmt)
     try:
         for item in items:
-            local_path = await _download_item_to_temp_file(session, volume, item, tmp_dir, on_item_progress)
+            local_path, metadata = await _download_item_to_temp_file(
+                session, volume, item, tmp_dir, guest_os_family, on_item_progress
+            )
             try:
-                await asyncio.to_thread(_add_item_to_bundle_writer, writer, item, local_path, manifest)
+                await asyncio.to_thread(
+                    _add_item_to_bundle_writer, writer, item, local_path, manifest, metadata, apply_ownership
+                )
             finally:
                 local_path.unlink(missing_ok=True)
         await asyncio.to_thread(_finish_bundle_writer, writer, manifest)

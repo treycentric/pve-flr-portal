@@ -55,12 +55,14 @@ See "Provisioning access" below for how to grant a user access.
    "Original location" (resolved automatically from the item's own path
    in the backup, when the app can confidently determine it), Browse, or
    type one manually - and, where available, offers "restore metadata"
-   (modified time), "verify" (checksum), and "restore original owner/
-   permissions" (Linux/BSD guests only - greyed out for Windows, since
-   NTFS ACLs can't be recovered through any file-restore API Proxmox
-   currently exposes; see "Restore-to-guest" below). Large transfers
-   use a Direct Network Transfer path automatically when a data NIC is
-   configured.
+   (modified time) and "verify" (checksum) for a single file - a
+   multi-file/directory restore already does both of those
+   automatically, not optional there. "Restore original owner/
+   permissions" is offered either way (Linux/BSD guests only - greyed
+   out for Windows, since NTFS ACLs can't be recovered through any
+   file-restore API Proxmox currently exposes; see "Restore-to-guest"
+   below). Large transfers use a Direct Network Transfer path
+   automatically when a data NIC is configured.
 7. **About** (user menu, top right) shows the running version and a
    link back to this repo.
 

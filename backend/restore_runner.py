@@ -834,7 +834,13 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
                     job.log(f"Downloading {item.name!r}: {downloaded} bytes so far...")
 
         output_path, fmt, manifest, tmp_dir_ctx = await restore_bundle.build_bundle(
-            job.session, job.source_volume, job.items, guest_os_family, zst_capable, _on_item_progress
+            job.session,
+            job.source_volume,
+            job.items,
+            guest_os_family,
+            zst_capable,
+            _on_item_progress,
+            restore_ownership=job.restore_ownership,
         )
         bundle_size_bytes = output_path.stat().st_size
         expected_chunks = chunk_count(bundle_size_bytes, DEFAULT_CHUNK_SIZE_BYTES)
@@ -842,7 +848,11 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         # Transfer is tried next and, when eligible, skips the chunked
         # write entirely; the log line below that actually says "N
         # chunk(s)" only fires on the path that's really taking them.
-        job.log(f"Bundle built ({fmt.value}, {len(manifest)} file(s), {bundle_size_bytes} bytes).")
+        ownership_note = " and ownership/permissions" if job.restore_ownership else ""
+        job.log(
+            f"Bundle built ({fmt.value}, {len(manifest)} file(s), {bundle_size_bytes} bytes) - "
+            f"original modified times{ownership_note} preserved where PVE's own backup metadata had them."
+        )
 
         # Already known exactly - the bundle is fully materialized on
         # local disk at this point, unlike the single-file path's

@@ -830,6 +830,51 @@ def test_restore_bundle_submits_a_queued_job(client, monkeypatch):
     assert job.items[1].leaf is True
 
 
+def test_restore_bundle_passes_ownership_through_for_a_linux_guest(client, monkeypatch):
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family="linux", design_b=guest_agent.PathAvailability(True))
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    form = _restore_form(filepath=None, name=None, dest_dir="/home/user/restore", restore_ownership="true")
+    form["item"] = ['{"filepath": "L2V0Yw==", "name": "etc", "leaf": false}']
+    resp = client.post("/api/restore", data=form)
+
+    assert resp.status_code == 200
+    job = restore_jobs.manager.get(resp.json()["id"])
+    assert job.restore_ownership is True
+
+
+def test_restore_bundle_ownership_forced_false_for_a_windows_guest(client, monkeypatch):
+    """Issue #26: same defense-in-depth as the single-file case (#20) -
+    the server never trusts the frontend's checkbox state alone."""
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        # guest_os_family defaults to "windows" in _available_caps()
+        return _available_caps(design_b=guest_agent.PathAvailability(True))
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+
+    form = _restore_form(filepath=None, name=None, dest_dir="C:\\restore", restore_ownership="true")
+    form["item"] = ['{"filepath": "L2V0Yw==", "name": "etc", "leaf": false}']
+    resp = client.post("/api/restore", data=form)
+
+    assert resp.status_code == 200
+    job = restore_jobs.manager.get(resp.json()["id"])
+    assert job.restore_ownership is False
+
+
 def test_restore_bundle_tolerates_extra_fields_in_item_json(client, monkeypatch):
     # Confirmed live 2026-09-01: the checkbox value each `item` entry
     # comes from (main.py's own item_json, browse()) always includes

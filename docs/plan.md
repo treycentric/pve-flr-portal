@@ -1203,14 +1203,53 @@ entry points at. Two reasons this matters, both raised in review:
     Windows guest in the UI for exactly this reason, not merely
     unimplemented.
 
-    Multi-file/directory restore (issue #26) is a distinct, still-open
-    follow-on — `restore_bundle.py`'s bundle builder doesn't yet read
-    real uid/gid/mode from PVE's own archive output the way the
-    single-file path now does, though the same tar-header approach
-    confirmed here applies directly (this same 2026-09-28 live test
-    also confirmed real uid/gid/mode survive for a *directory*
-    download, both via `tar=1`'s headers and via the default zip's
-    `external_attr` mode bits).
+    **Multi-file/directory restore (issue #26) — shipped 2026-09-29,
+    same checkbox as #20.** `restore_bundle.py`'s bundle builder now
+    sources a directory item via `tar=1` instead of the old default zip
+    for any guest except Windows (Windows keeps zip — never needs
+    uid/gid/mode, and zip's own per-entry timestamp already covers
+    mtime with no format switch needed) and copies the real per-member
+    uid/gid/mode/mtime read from that tar onto the outgoing archive's
+    entries directly — no companion manifest file needed at all, unlike
+    the original design sketch; PVE's own archive metadata is the
+    manifest. A leaf item inside a bundle makes the same second
+    `fetch_source_metadata` call #20's single-file path does. mtime is
+    applied unconditionally whenever known; uid/gid/mode only when the
+    checkbox is checked (re-derived from `guest_os_family` inside
+    `build_bundle()` itself, not trusted from the caller alone — same
+    defense-in-depth as #20's job-creation-time gate).
+
+    **Real-world finding, folded into the same change: multi-file/
+    directory restore never actually preserved original modified
+    times, despite the restore modal's own copy claiming it did
+    ("Original modified times are preserved automatically").**
+    `_add_leaf_to_tar`/`_add_directory_entries_to_tar`/their zip
+    equivalents never set `TarInfo.mtime`/`ZipInfo.date_time` from the
+    source at all — every entry silently landed at `tarfile`'s bare
+    default (Unix epoch, 1970) or zipfile's default ("now", when a bare
+    name is given instead of a `ZipInfo`). No guest-exec step
+    compensated the way `_restore_mtime` does for single-file restore.
+    Found while reading this code to plan #26's implementation, not by
+    a live report — fixed in the same change since the same per-entry
+    metadata now being read for ownership purposes carries mtime nearly
+    for free. No extraction-side change was needed to *apply* it: GNU
+    `tar -xf` running as root (guest-exec's own qemu-guest-agent
+    process is already root-privileged on Linux — independently
+    confirmed by #20's `chown` calls working with no extra privilege
+    escalation) restores an archive's own mtime/uid/gid/mode
+    automatically on extraction, once the archive entries actually
+    carry them; likewise `Expand-Archive` on Windows restores a zip
+    entry's own `LastWriteTime`. Only the *build* side needed fixing.
+
+    **Second real-world finding, same investigation: a directory item's
+    `tar=1` download inherits the same zstd-inconsistency #20 already
+    found for a single file** — confirmed live that it can come back
+    either as a genuine plain tar or zstd-framed, for the same
+    endpoint/parameter. `restore_bundle.py`'s `_open_local_tar` detects
+    via the zstd magic number the same way `pve_client.
+    decompress_zstd_prefix` does for #20's bounded-prefix case, but
+    uses a full-file streaming reader instead, since every member has
+    to be read here, not just the first header.
 
     **"Original location" destination (issue #68).** A third segmented
     option alongside Browse/Manual entry, VM guests only (LXC never

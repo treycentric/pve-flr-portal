@@ -44,12 +44,20 @@ commit.
   and no other Proxmox API surfaces it either; the checkbox is disabled
   for a Windows guest for exactly this reason. A real upstream Proxmox
   gap, not something fixable from this app.
-- #26 — same ownership/permissions restore, for a multi-file/directory
-  restore - still open. The same tar-header approach is confirmed to
-  work for directories too (same 2026-09-28 live test), so this is a
-  matter of applying it in `restore_bundle.py`'s bundle builder, not
-  further investigation. Windows ACLs are equally infeasible here, same
-  reason as #20.
+- #26 — **SHIPPED** for Linux/BSD: same "Restore original owner/
+  permissions" checkbox now works for multi-file/directory restore too.
+  `restore_bundle.py`'s bundle builder now sources directory items via
+  `tar=1` instead of the old default zip (Windows guests still use zip
+  - Windows never needs uid/gid/mode, and zip's own per-entry timestamp
+  already covers mtime with no format switch needed) and copies real
+  uid/gid/mode/mtime onto each outgoing entry - no companion manifest
+  needed, PVE's own archive metadata carries it directly. **Also fixed
+  a separate, previously-unnoticed bug found while building this**:
+  multi-file/directory restore never actually preserved original
+  modified times despite the UI claiming it did (`TarInfo`/`ZipInfo`
+  defaulted to epoch/"now" - fixed unconditionally, independent of the
+  ownership checkbox). Windows ACLs remain infeasible, same reason as
+  #20.
 - #7 — `/api/download-bundle` (the plain browser download feature,
   separate from restore-to-guest) still buffers the whole archive in
   RAM; the streaming techniques #24 built are directly reusable there

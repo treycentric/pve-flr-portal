@@ -511,6 +511,10 @@ function fileGridState() {
         body.set('snapshot_time', this._snapshotTime);
         body.set('dest_dir', this.restoreDestDir);
         body.set('overwrite', this.restoreOverwrite ? 'true' : 'false');
+        // Applies to both single-file and bundle restore (issue #26 -
+        // Linux/BSD only; the server independently forces this off for
+        // a Windows guest regardless of what's sent here).
+        body.set('restore_ownership', this.restoreOwnership ? 'true' : 'false');
         if (this.isSingleFile) {
           // Single-leaf-file restore - unchanged from before multi-file
           // restore existed (docs/plan.md §7.7, issue #24).
@@ -518,7 +522,6 @@ function fileGridState() {
           body.set('name', sel[0].name);
           body.set('restore_metadata', this.restoreMetadata ? 'true' : 'false');
           body.set('verify', this.restoreVerify ? 'true' : 'false');
-          body.set('restore_ownership', this.restoreOwnership ? 'true' : 'false');
           if (sel[0].mtime !== null && sel[0].mtime !== undefined) {
             body.set('source_mtime', String(sel[0].mtime));
           }

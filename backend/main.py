@@ -828,6 +828,7 @@ async def restore(
             source=f"{len(items)} item(s)",
             destination=destination,
             items=items,
+            restore_ownership=restore_ownership and caps.guest_os_family != "windows",
         )
     else:
         if not caps.design_a.available:

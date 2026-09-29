@@ -1585,7 +1585,9 @@ def _patch_build_bundle(monkeypatch, tmp_path, content: bytes, fmt=BundleFormat.
     for i in range(manifest_len):
         manifest.add(f"file{i}", "deadbeef")
 
-    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable, on_item_progress=None):
+    async def fake_build_bundle(
+        session, volume, items, guest_os_family, zst_capable, on_item_progress=None, restore_ownership=False
+    ):
         return bundle_path, fmt, manifest, _NoopTempDirCtx()
 
     monkeypatch.setattr(restore_bundle, "build_bundle", fake_build_bundle)
@@ -1796,7 +1798,9 @@ async def test_bundle_restore_logs_and_tracks_progress_during_build(manager, ses
 
     seen_progress = []
 
-    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable, on_item_progress=None):
+    async def fake_build_bundle(
+        session, volume, items, guest_os_family, zst_capable, on_item_progress=None, restore_ownership=False
+    ):
         if on_item_progress is not None:
             on_item_progress(item, 1000, 3000)
             seen_progress.append((job.progress_current, job.progress_total))
@@ -1861,7 +1865,9 @@ async def test_bundle_restore_progress_stays_none_without_content_length(manager
 
     seen_percent_during_download = []
 
-    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable, on_item_progress=None):
+    async def fake_build_bundle(
+        session, volume, items, guest_os_family, zst_capable, on_item_progress=None, restore_ownership=False
+    ):
         if on_item_progress is not None:
             on_item_progress(item, 1904640, None)  # no Content-Length, same as the live report
             seen_percent_during_download.append(job.progress_percent)
@@ -2079,7 +2085,9 @@ async def test_bundle_restore_cleans_up_scratch_and_temp_dir_on_failure(manager,
         def cleanup(self):
             cleanup_calls.append(1)
 
-    async def fake_build_bundle(session, volume, items, guest_os_family, zst_capable, on_item_progress=None):
+    async def fake_build_bundle(
+        session, volume, items, guest_os_family, zst_capable, on_item_progress=None, restore_ownership=False
+    ):
         return bundle_path, BundleFormat.TAR_GZ, manifest, _TrackedTempDirCtx()
 
     monkeypatch.setattr(restore_bundle, "build_bundle", fake_build_bundle)

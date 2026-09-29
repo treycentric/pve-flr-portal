@@ -218,11 +218,40 @@ def _fake_directory_zip(files: dict[str, bytes], prefix: str = "") -> bytes:
     return buf.getvalue()
 
 
-def _patch_bundle_download(monkeypatch, responses: dict[str, bytes]):
-    """responses maps filepath -> raw bytes PVE would return for it."""
+def _fake_directory_tar(
+    files: dict[str, bytes], prefix: str = "", uid: int = 0, gid: int = 0, mode: int = 0o644, mtime: int = 0
+) -> bytes:
+    """A real, valid tar - what a non-Windows guest's directory item now
+    downloads via `tar=1` instead of the old default zip (issue #26,
+    confirmed live 2026-09-28 - real per-member uid/gid/mode/mtime
+    survives this path). Same no-re-prefixing convention as
+    `_fake_directory_zip` - pass the item's own name as `prefix` for a
+    directory selection."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name, content in files.items():
+            info = tarfile.TarInfo(name=f"{prefix}{name}" if prefix else name)
+            info.size = len(content)
+            info.uid = uid
+            info.gid = gid
+            info.mode = mode
+            info.mtime = mtime
+            tf.addfile(info, io.BytesIO(content))
+    return buf.getvalue()
+
+
+def _patch_bundle_download(monkeypatch, responses: dict):
+    """responses maps filepath -> raw bytes PVE would return for it,
+    used regardless of `tar` - or filepath -> {True: ..., False: ...}
+    when a test needs to distinguish (issue #26: a leaf item's metadata
+    probe always requests `tar=1` separately from its `tar=0` content
+    download; a non-Windows directory item's content download IS
+    `tar=1` now, not the old default `tar=0` zip)."""
 
     async def fake_open_download(session, volume, filepath, tar=False):
-        return _FakeBundleClient(), _FakeBundleResponse(responses[filepath])
+        entry = responses[filepath]
+        content = entry[tar] if isinstance(entry, dict) else entry
+        return _FakeBundleClient(), _FakeBundleResponse(content)
 
     monkeypatch.setattr(pve_client, "open_download", fake_open_download)
 
@@ -235,7 +264,7 @@ async def test_build_bundle_zip_contains_every_item_plus_manifest(session_data, 
         monkeypatch,
         {
             "L2V0Yy9ob3N0cw==": hosts,
-            "ZXRj": _fake_directory_zip({"passwd": passwd, "shadow": shadow}, prefix="etc/"),
+            "ZXRj": _fake_directory_tar({"passwd": passwd, "shadow": shadow}, prefix="etc/"),
         },
     )
     items = [
@@ -339,8 +368,8 @@ async def test_build_bundle_directory_entries_are_not_double_prefixed(session_da
     # directory's own name, and this code used to prepend item.name on
     # top of that again. Locks in that info.filename is trusted as-is.
     content = b"family photo bytes"
-    dir_zip = _fake_directory_zip({"photo.jpg": content}, prefix="Downloads/")
-    _patch_bundle_download(monkeypatch, {"ZG93bmxvYWRz==": dir_zip})
+    dir_tar = _fake_directory_tar({"photo.jpg": content}, prefix="Downloads/")
+    _patch_bundle_download(monkeypatch, {"ZG93bmxvYWRz==": dir_tar})
     items = [BundleItem(filepath="ZG93bmxvYWRz==", name="Downloads", leaf=False)]
 
     output_path, _fmt, manifest, tmp_dir_ctx = await build_bundle(
@@ -380,14 +409,14 @@ async def test_build_bundle_deletes_each_item_temp_file_as_it_is_consumed(sessio
 
     real_add = restore_bundle._add_item_to_bundle_writer
 
-    def _spying_add(writer, item, local_path, manifest):
+    def _spying_add(writer, item, local_path, manifest, metadata, apply_ownership):
         # Snapshot how many "item-*" temp files exist in the working
         # directory at the moment each item is actually being added -
         # should never be more than the one currently being processed.
         tmp_dir_holder["dir"] = local_path.parent
         count = sum(1 for p in local_path.parent.iterdir() if p.name.startswith("item-"))
         seen_item_file_counts.append(count)
-        return real_add(writer, item, local_path, manifest)
+        return real_add(writer, item, local_path, manifest, metadata, apply_ownership)
 
     monkeypatch.setattr(restore_bundle, "_add_item_to_bundle_writer", _spying_add)
 
@@ -445,15 +474,18 @@ async def test_build_bundle_tarzst_when_capable(session_data, monkeypatch, tmp_p
         tmp_dir_ctx.cleanup()
 
 
-async def test_build_bundle_manifest_omits_directory_entries_from_source_zip(session_data, monkeypatch, tmp_path):
-    # A real zip from a nested directory selection often includes
-    # explicit directory-marker entries (names ending in "/", zero
-    # size) - these shouldn't end up as bogus manifest lines with no
-    # real file behind them.
+async def test_build_bundle_manifest_omits_directory_entries_from_source_tar(session_data, monkeypatch, tmp_path):
+    # A real tar from a nested directory selection often includes
+    # explicit directory-marker entries - these shouldn't end up as
+    # bogus manifest lines with no real file behind them.
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w") as zf:
-        zf.writestr("mydir/sub/", b"")  # directory marker entry
-        zf.writestr("mydir/sub/file.txt", b"hello")
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        dir_info = tarfile.TarInfo(name="mydir/sub")
+        dir_info.type = tarfile.DIRTYPE
+        tf.addfile(dir_info)
+        file_info = tarfile.TarInfo(name="mydir/sub/file.txt")
+        file_info.size = len(b"hello")
+        tf.addfile(file_info, io.BytesIO(b"hello"))
     _patch_bundle_download(monkeypatch, {"dir==": buf.getvalue()})
     items = [BundleItem(filepath="dir==", name="mydir", leaf=False)]
 
@@ -466,5 +498,158 @@ async def test_build_bundle_manifest_omits_directory_entries_from_source_zip(ses
         # structure inside it is preserved correctly.
         assert len(manifest) == 1
         assert manifest.render() == f"{hashlib.sha256(b'hello').hexdigest()}  mydir/sub/file.txt\n"
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+# --- issue #26: mtime always-on, ownership opt-in ---------------------
+
+
+async def test_build_bundle_leaf_item_gets_real_mtime_unconditionally(session_data, monkeypatch, tmp_path):
+    """The folded-in mtime bug fix: previously every entry landed with
+    tarfile's bare default (epoch 0), regardless of the restore_
+    ownership flag - mtime restoration was always meant to be
+    unconditional (the modal's own copy already claimed it happened)."""
+    content = b"hello"
+    metadata_tar = _fake_directory_tar({"hosts": b"unused"}, mtime=1700000000)  # only the header's mtime matters
+    _patch_bundle_download(monkeypatch, {"abc==": {False: content, True: metadata_tar}})
+    items = [BundleItem(filepath="abc==", name="hosts", leaf=True)]
+
+    output_path, _fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/133/2026-09-01", items, guest_os_family="linux", zst_capable=False
+    )
+    try:
+        with tarfile.open(output_path, mode="r:gz") as tf:
+            info = tf.getmember("hosts")
+            assert info.mtime == 1700000000
+            assert (info.uid, info.gid, info.mode & 0o7777) == (0, 0, 0o644)  # not requested - stays default
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_leaf_item_ownership_applied_only_when_requested(session_data, monkeypatch, tmp_path):
+    content = b"hello"
+    metadata_tar = _fake_directory_tar({"hosts": b"unused"}, uid=1000, gid=1000, mode=0o600, mtime=1700000000)
+    _patch_bundle_download(monkeypatch, {"abc==": {False: content, True: metadata_tar}})
+    items = [BundleItem(filepath="abc==", name="hosts", leaf=True)]
+
+    output_path, _fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data,
+        "pbs:backup/vm/133/2026-09-01",
+        items,
+        guest_os_family="linux",
+        zst_capable=False,
+        restore_ownership=True,
+    )
+    try:
+        with tarfile.open(output_path, mode="r:gz") as tf:
+            info = tf.getmember("hosts")
+            assert (info.uid, info.gid, info.mode & 0o7777) == (1000, 1000, 0o600)
+            assert info.mtime == 1700000000
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_directory_ownership_applied_only_when_requested(session_data, monkeypatch, tmp_path):
+    dir_tar = _fake_directory_tar({"passwd": b"x"}, prefix="etc/", uid=1000, gid=1000, mode=0o600, mtime=1700000000)
+    _patch_bundle_download(monkeypatch, {"etc==": dir_tar})
+    items = [BundleItem(filepath="etc==", name="etc", leaf=False)]
+
+    # Without restore_ownership: mtime is still real, but owner/mode stay tarfile defaults.
+    output_path, _fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/133/2026-09-01", items, guest_os_family="linux", zst_capable=False
+    )
+    try:
+        with tarfile.open(output_path, mode="r:gz") as tf:
+            info = tf.getmember("etc/passwd")
+            assert info.mtime == 1700000000
+            assert (info.uid, info.gid, info.mode & 0o7777) == (0, 0, 0o644)
+    finally:
+        tmp_dir_ctx.cleanup()
+
+    # With restore_ownership: real uid/gid/mode too.
+    output_path, _fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data,
+        "pbs:backup/vm/133/2026-09-01",
+        items,
+        guest_os_family="linux",
+        zst_capable=False,
+        restore_ownership=True,
+    )
+    try:
+        with tarfile.open(output_path, mode="r:gz") as tf:
+            info = tf.getmember("etc/passwd")
+            assert (info.uid, info.gid, info.mode & 0o7777) == (1000, 1000, 0o600)
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_restore_ownership_is_forced_off_for_windows(session_data, monkeypatch, tmp_path):
+    """Defense-in-depth, same pattern as /api/restore's job-creation
+    time for single-file restore (#20): NTFS has no uid/gid/mode
+    concept, so this must never do anything for a Windows guest even if
+    restore_ownership=True is passed in - the caller isn't trusted
+    alone."""
+    content = b"some content"
+    _patch_bundle_download(monkeypatch, {"abc==": content})
+    items = [BundleItem(filepath="abc==", name="notes.txt", leaf=True)]
+
+    output_path, fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data,
+        "pbs:backup/vm/202/2026-09-01",
+        items,
+        guest_os_family="windows",
+        zst_capable=False,
+        restore_ownership=True,
+    )
+    try:
+        assert fmt == BundleFormat.ZIP
+        with zipfile.ZipFile(output_path) as zf:
+            assert zf.read("notes.txt") == content  # just confirms it didn't blow up
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_windows_directory_gets_real_mtime_from_zip(session_data, monkeypatch, tmp_path):
+    """The folded-in mtime bug fix, zip/Windows side: a Windows
+    directory item still downloads as PVE's default zip (tar=0), and
+    its own real per-entry date_time - previously discarded - is now
+    copied onto the outgoing zip entry."""
+    real_date_time = (2023, 11, 14, 22, 13, 20)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        info = zipfile.ZipInfo("Downloads/photo.jpg", date_time=real_date_time)
+        zf.writestr(info, b"photo bytes")
+    _patch_bundle_download(monkeypatch, {"dl==": buf.getvalue()})
+    items = [BundleItem(filepath="dl==", name="Downloads", leaf=False)]
+
+    output_path, fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/202/2026-09-01", items, guest_os_family="windows", zst_capable=False
+    )
+    try:
+        assert fmt == BundleFormat.ZIP
+        with zipfile.ZipFile(output_path) as zf:
+            assert zf.getinfo("Downloads/photo.jpg").date_time == real_date_time
+    finally:
+        tmp_dir_ctx.cleanup()
+
+
+async def test_build_bundle_directory_handles_zstd_framed_tar_too(session_data, monkeypatch, tmp_path):
+    """Regression, directory side of the same live-reported bug #20's
+    single-file fix addressed: PVE's tar=1 output is confirmed
+    inconsistently formatted - sometimes plain tar, sometimes zstd-
+    framed - for a directory item too, not just a single file."""
+    dir_tar = _fake_directory_tar({"passwd": b"x"}, prefix="etc/", mtime=1700000000)
+    compressed = zstandard.ZstdCompressor().compress(dir_tar)
+    _patch_bundle_download(monkeypatch, {"etc==": compressed})
+    items = [BundleItem(filepath="etc==", name="etc", leaf=False)]
+
+    output_path, _fmt, _manifest, tmp_dir_ctx = await build_bundle(
+        session_data, "pbs:backup/vm/133/2026-09-01", items, guest_os_family="linux", zst_capable=False
+    )
+    try:
+        with tarfile.open(output_path, mode="r:gz") as tf:
+            info = tf.getmember("etc/passwd")
+            assert info.mtime == 1700000000
     finally:
         tmp_dir_ctx.cleanup()
