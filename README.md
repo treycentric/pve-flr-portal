@@ -242,16 +242,26 @@ needed on the portal's own side).
 bash deploy/lxc-create.sh
 ```
 
-Creates an unprivileged Debian 12 container, installs the app, and
-starts it as a systemd service (`pve-flr-portal`). Override
-`CTID`/`STORAGE`/`BRIDGE`/`MEMORY_MB`/etc. via environment variables -
-see the top of the script. Already have a container? Run
-`deploy/install.sh` inside it instead. Rationale for LXC over a Debian
-package on the host or a full VM/OVA is in docs/plan.md §10.
+Creates an unprivileged Debian 12 container, checks out the latest
+tagged release, installs the app, and starts it as a systemd service
+(`pve-flr-portal`). Override `CTID`/`STORAGE`/`BRIDGE`/`MEMORY_MB`/etc.
+via environment variables - see the top of the script. Already have a
+container? Run `deploy/install.sh` inside it instead. Rationale for LXC
+over a Debian package on the host or a full VM/OVA is in docs/plan.md
+§10.
+
+**Updating.** Run `bash deploy/update.sh` inside the container/host to
+update to the latest release, `bash deploy/update.sh v1.4.0` (or
+`1.4.0`) to pin to a specific one, or `bash deploy/update.sh main` for
+unreleased/bleeding-edge work. Reinstalls dependencies if
+`requirements.txt` changed and restarts the service; refuses to run if
+the install directory has local/uncommitted changes rather than
+discarding them. See docs/plan.md §10 for how this maps onto the
+project's SemVer-tagged release channel.
 
 The systemd unit's `StateDirectory=` puts the app-state dir
 (`PFR_DATA_DIR`) at `/var/lib/pve-flr-portal`, created and owned by the
-service user. It survives `git pull` redeploys and container reboots,
+service user. It survives `update.sh` redeploys and container reboots,
 but not a container recreate - see docs/plan.md §10 for what to
 preserve when moving/rebuilding the container.
 
