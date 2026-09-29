@@ -239,19 +239,42 @@ needed on the portal's own side).
 **LXC on your PVE host (recommended).** Run on the PVE host itself:
 
 ```
-bash deploy/lxc-create.sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/lxc-create.sh)"
 ```
 
-Creates an unprivileged Debian 12 container, installs the app, and
-starts it as a systemd service (`pve-flr-portal`). Override
-`CTID`/`STORAGE`/`BRIDGE`/`MEMORY_MB`/etc. via environment variables -
-see the top of the script. Already have a container? Run
-`deploy/install.sh` inside it instead. Rationale for LXC over a Debian
-package on the host or a full VM/OVA is in docs/plan.md §10.
+Guided setup at a real terminal (issue #91) - asks for the container ID,
+hostname, network, and which PBS storage to browse, with sensible
+defaults for everything else; answer yes to "configure advanced
+options" for resource sizing, Direct Network Transfer, its TLS policy,
+and setting up a Let's Encrypt certificate on the spot. Creates an
+unprivileged Debian 12 container, checks out the latest tagged release,
+installs the app, writes your answers straight into the container's
+`.env`, and starts it as a systemd service (`pve-flr-portal`).
+
+Every question can also be answered up front via an environment
+variable (`CTID`/`STORAGE`/`BRIDGE`/`PVE_HOST`/etc. - see the top of the
+script for the full list), which skips that question entirely - so a
+scripted/unattended run (e.g. `STORAGE=local-zfs BRIDGE=vmbr1 bash
+deploy/lxc-create.sh`) works exactly as before, and a piped run with no
+terminal attached silently takes defaults for anything not pre-set
+instead of hanging on a prompt nobody can answer.
+
+Already have a container? Run `deploy/install.sh` inside it instead
+(non-interactive - edit `.env` by hand). Rationale for LXC over a
+Debian package on the host or a full VM/OVA is in docs/plan.md §10.
+
+**Updating.** Run `bash deploy/update.sh` inside the container/host to
+update to the latest release, `bash deploy/update.sh v1.4.0` (or
+`1.4.0`) to pin to a specific one, or `bash deploy/update.sh main` for
+unreleased/bleeding-edge work. Reinstalls dependencies if
+`requirements.txt` changed and restarts the service; refuses to run if
+the install directory has local/uncommitted changes rather than
+discarding them. See docs/plan.md §10 for how this maps onto the
+project's SemVer-tagged release channel.
 
 The systemd unit's `StateDirectory=` puts the app-state dir
 (`PFR_DATA_DIR`) at `/var/lib/pve-flr-portal`, created and owned by the
-service user. It survives `git pull` redeploys and container reboots,
+service user. It survives `update.sh` redeploys and container reboots,
 but not a container recreate - see docs/plan.md §10 for what to
 preserve when moving/rebuilding the container.
 
