@@ -24,16 +24,13 @@ reaching the Direct Network Transfer eligibility check).
 """
 import asyncio
 import hashlib
-import io
 import logging
 import ntpath
 import posixpath
-import tarfile
 import time
 from pathlib import Path
 
 import httpx
-import zstandard
 
 from . import guest_agent, guest_ca, pve_client, restore_bundle, restore_download, restore_network_pull
 from .auth import ensure_fresh_ticket
@@ -653,42 +650,13 @@ async def _restore_mtime(job: RestoreJob, guest_os_family: str | None) -> None:
         raise RuntimeError(f"Could not restore the original modified time: {err.strip() or out.strip()}")
 
 
-_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
-
-
-def _decompress_prefix(buf: bytes) -> bytes:
-    """Issue #20: confirmed live 2026-09-28 - PVE's `tar=1` output is
-    NOT consistently one format or the other. A single-file download
-    came back as a genuine plain tar in one live test, and zstd-framed
-    (the documented `.tar.zst` behavior) in another, same endpoint/
-    parameter - so detect via the zstd magic number rather than
-    assuming either way. Uses a streaming reader, not a single-shot
-    `decompress()`, since `buf` is a deliberately bounded prefix, not a
-    complete frame - a single-shot call needs either a known content
-    size or a whole frame, neither guaranteed by a truncated read.
-    Returns `buf` unchanged (never raises) if it isn't zstd-framed at
-    all, or if streaming decompression of the truncated prefix fails -
-    the caller's own tarfile parse is what actually decides success."""
-    if not buf.startswith(_ZSTD_MAGIC):
-        return buf
-    try:
-        reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(buf))
-        return reader.read(65536)
-    except zstandard.ZstdError:
-        return buf
-
-
 async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | None:
-    """Issue #20: confirmed live 2026-09-28 (docs/plan.md §7.5) - PVE's
-    file-restore/download with tar=1 wraps even a single file's content
-    in a real tar archive whose header carries the original uid/gid/
-    mode, unlike file-restore/list's JSON (mtime/size only, on any PVE
-    version). Reads only a bounded prefix of that stream (tar headers,
-    including any GNU/PAX long-name extension blocks, are small - 16KB
-    is generous headroom) to parse just the first entry's header, never
-    downloading the file's full content a second time, then closes the
-    connection immediately. See _decompress_prefix for why that prefix
-    is checked for zstd-framing first, not assumed to be a plain tar.
+    """Issue #20/#26: thin, job-specific wrapper over
+    pve_client.fetch_source_metadata (the shared implementation - also
+    used by restore_bundle.py for the multi-file/directory case, #26).
+    Single-file restore already has its own real mtime from file-
+    restore/list's JSON (job.source_mtime), so only uid/gid/mode are
+    used here - the shared function's mtime is discarded.
 
     Returns None (never raises) on any failure to determine ownership -
     the caller treats that as "nothing to restore, skip it", the same
@@ -697,41 +665,13 @@ async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | Non
     *apply* them (_restore_ownership below) is a real restore failure,
     same as a failed mtime restore - this function is only the "did we
     even get the data" half."""
-    try:
-        client, response = await pve_client.open_download(
-            job.session, job.source_volume, job.source_filepath, tar=True
-        )
-    except httpx.HTTPStatusError as exc:
-        _log.warning("ownership fetch: open_download(tar=1) failed for job %s: %s", job.id, exc)
+    result = await pve_client.fetch_source_metadata(job.session, job.source_volume, job.source_filepath)
+    if result is None:
+        _log.warning("ownership fetch: could not determine ownership for job %s", job.id)
         return None
-    try:
-        buf = b""
-        async for piece in response.aiter_bytes(chunk_size=4096):
-            buf += piece
-            if len(buf) >= 16384:
-                break
-        buf = _decompress_prefix(buf)
-        try:
-            with tarfile.open(fileobj=io.BytesIO(buf)) as tf:
-                info = tf.next()
-        except tarfile.TarError as exc:
-            _log.warning(
-                "ownership fetch: not a valid tar for job %s (%d bytes read): %s - first 64 bytes: %r",
-                job.id, len(buf), exc, buf[:64],
-            )
-            return None
-        if info is None:
-            _log.warning(
-                "ownership fetch: tar had no entries for job %s (%d bytes read): %r", job.id, len(buf), buf[:64]
-            )
-            return None
-        _log.warning(
-            "ownership fetch: job %s -> name=%r uid=%s gid=%s mode=%s", job.id, info.name, info.uid, info.gid, info.mode
-        )
-        return info.uid, info.gid, info.mode & 0o7777
-    finally:
-        await response.aclose()
-        await client.aclose()
+    uid, gid, mode, _mtime = result
+    _log.warning("ownership fetch: job %s -> uid=%s gid=%s mode=%s", job.id, uid, gid, mode)
+    return uid, gid, mode
 
 
 async def _restore_ownership(job: RestoreJob, uid: int, gid: int, mode: int) -> None:

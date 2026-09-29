@@ -20,15 +20,25 @@ as an opaque token from the API rather than re-deriving it from a
 display path.
 """
 import asyncio
+import io
 import logging
 import re
+import tarfile
 from dataclasses import dataclass, field
 
 import httpx
+import zstandard
 
 from .auth import SessionData, pve_headers
 from .config import settings
 from .guest_agent_lock import call_with_retries, guest_agent_command
+
+# Issue #20/#26: the zstd frame magic number - PVE's file-restore/
+# download?tar=1 output is confirmed live (docs/plan.md §7.5/§7.7,
+# 2026-09-28) to be inconsistently formatted - sometimes a genuine
+# plain tar, sometimes zstd-framed (.tar.zst) - for the same endpoint/
+# parameter. Detect via this rather than assuming either way.
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 
@@ -436,3 +446,65 @@ async def open_download(
         await client.aclose()
         response.raise_for_status()
     return client, response
+
+
+def decompress_zstd_prefix(buf: bytes) -> bytes:
+    """Issue #20/#26: `buf` may or may not be zstd-framed (see
+    ZSTD_MAGIC's docstring above) - detect and decompress if so, pass
+    through unchanged otherwise. Uses a *streaming* reader, not a
+    single-shot `decompress()`, since callers typically pass a
+    deliberately bounded/truncated prefix, not a complete frame - a
+    single-shot call needs either a known content size or a whole
+    frame, neither guaranteed by a truncated read. Never raises: a
+    failure to decompress (e.g. the prefix cut off mid-frame) returns
+    `buf` unchanged: it's up to the caller's own parsing of the result
+    to decide whether that succeeded."""
+    if not buf.startswith(ZSTD_MAGIC):
+        return buf
+    try:
+        reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(buf))
+        return reader.read(65536)
+    except zstandard.ZstdError:
+        return buf
+
+
+async def fetch_source_metadata(session: SessionData, volume: str, filepath: str) -> tuple[int, int, int, int] | None:
+    """Issue #20/#26: `file-restore/list`'s JSON never exposes uid/gid/
+    mode (only mtime/size, docs/plan.md §7.5) - but `file-restore/
+    download?tar=1` wraps even a single file's content in a real tar
+    archive whose header carries the original uid/gid/mode *and* mtime,
+    confirmed live 2026-09-28 against a real Turnkey Linux guest
+    (non-default uid=1000/gid=1000 came back correctly, not a
+    tarfile-library default of 0/0).
+
+    Reads only a bounded prefix of that stream (tar headers, including
+    any GNU/PAX long-name extension blocks, are small - 16KB is
+    generous headroom) to parse just the first entry's header, never
+    downloading the item's full content a second time, then closes the
+    connection immediately.
+
+    Returns `(uid, gid, mode, mtime)`, or None (never raises) on any
+    failure to determine it - callers treat that as "nothing to
+    restore here, skip it", not a failed job."""
+    try:
+        client, response = await open_download(session, volume, filepath, tar=True)
+    except httpx.HTTPStatusError:
+        return None
+    try:
+        buf = b""
+        async for piece in response.aiter_bytes(chunk_size=4096):
+            buf += piece
+            if len(buf) >= 16384:
+                break
+        buf = decompress_zstd_prefix(buf)
+        try:
+            with tarfile.open(fileobj=io.BytesIO(buf)) as tf:
+                info = tf.next()
+        except tarfile.TarError:
+            return None
+        if info is None:
+            return None
+        return info.uid, info.gid, info.mode & 0o7777, info.mtime
+    finally:
+        await response.aclose()
+        await client.aclose()

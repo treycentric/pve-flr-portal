@@ -407,3 +407,76 @@ async def test_open_download_error_response_is_raised_and_cleaned_up(session_dat
     respx.get(f"{base('vol')}/download").mock(return_value=httpx.Response(404, text="missing"))
     with pytest.raises(httpx.HTTPStatusError):
         await pve_client.open_download(session_data, "vol", "bad", tar=False)
+
+
+def _make_tar_bytes(name: str, uid: int, gid: int, mode: int, mtime: int, content: bytes = b"data") -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        info = tarfile.TarInfo(name=name)
+        info.size = len(content)
+        info.uid = uid
+        info.gid = gid
+        info.mode = mode
+        info.mtime = mtime
+        tf.addfile(info, io.BytesIO(content))
+    return buf.getvalue()
+
+
+def test_decompress_zstd_prefix_detects_and_decompresses_zstd():
+    """Direct unit test of the decompression logic, not just the end-
+    to-end flow: Python 3.14's tarfile.open() auto-detects zstd
+    natively (stdlib gained zstd support that release), which would
+    silently mask a missing decompress_zstd_prefix call in a dev
+    environment running 3.14 - the actual Docker deployment target is
+    Python 3.11 (README's own testing note), which has no such native
+    support. This test exists so the logic is verified regardless of
+    which Python runs the suite."""
+    import zstandard
+
+    plain = b"some tar-shaped bytes - doesn't need to be a real tar for this check"
+    compressed = zstandard.ZstdCompressor().compress(plain)
+    assert pve_client.decompress_zstd_prefix(compressed) == plain
+
+
+def test_decompress_zstd_prefix_leaves_non_zstd_bytes_untouched():
+    plain = b"ustar\x00not zstd-framed at all - must pass through unchanged"
+    assert pve_client.decompress_zstd_prefix(plain) == plain
+
+
+@respx.mock
+async def test_fetch_source_metadata_parses_a_plain_tar_header(session_data):
+    tar_bytes = _make_tar_bytes("hosts", uid=1000, gid=1000, mode=0o100644, mtime=1700000000)
+    respx.get(f"{base('vol')}/download").mock(return_value=httpx.Response(200, content=tar_bytes))
+    result = await pve_client.fetch_source_metadata(session_data, "vol", "Zm9v")
+    assert result == (1000, 1000, 0o644, 1700000000)
+
+
+@respx.mock
+async def test_fetch_source_metadata_parses_a_zstd_framed_tar_header(session_data):
+    """Regression: PVE's tar=1 output is confirmed live to be
+    inconsistently formatted - sometimes plain tar, sometimes
+    zstd-framed - for the same endpoint/parameter."""
+    import zstandard
+
+    tar_bytes = _make_tar_bytes("hosts", uid=1000, gid=1000, mode=0o100644, mtime=1700000000)
+    compressed = zstandard.ZstdCompressor().compress(tar_bytes)
+    respx.get(f"{base('vol')}/download").mock(return_value=httpx.Response(200, content=compressed))
+    result = await pve_client.fetch_source_metadata(session_data, "vol", "Zm9v")
+    assert result == (1000, 1000, 0o644, 1700000000)
+
+
+@respx.mock
+async def test_fetch_source_metadata_returns_none_on_malformed_tar(session_data):
+    respx.get(f"{base('vol')}/download").mock(return_value=httpx.Response(200, content=b"not a tar at all"))
+    result = await pve_client.fetch_source_metadata(session_data, "vol", "Zm9v")
+    assert result is None
+
+
+@respx.mock
+async def test_fetch_source_metadata_returns_none_on_http_error(session_data):
+    respx.get(f"{base('vol')}/download").mock(return_value=httpx.Response(404, text="missing"))
+    result = await pve_client.fetch_source_metadata(session_data, "vol", "Zm9v")
+    assert result is None
