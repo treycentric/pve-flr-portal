@@ -84,7 +84,23 @@ done
 
 echo "==> Installing pve-flr-portal inside container $CTID"
 pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null"
-pct exec "$CTID" -- bash -c "git clone --depth 1 '${REPO_URL}' /opt/pve-flr-portal"
+# Full clone (not --depth 1) so the tag lookup below has the full tag
+# history to search - depth-1 clones don't fetch tags at all. Then pin
+# to the latest tagged GitHub Release (docs/dev/versioning.md) rather
+# than leaving the checkout on whatever unreleased commit happens to be
+# on main - issue #89. `deploy/update.sh` (also cloned in) is the
+# supported way to move to a different/later release afterwards.
+pct exec "$CTID" -- bash -c "git clone '${REPO_URL}' /opt/pve-flr-portal"
+pct exec "$CTID" -- bash -c "
+  cd /opt/pve-flr-portal
+  TAG=\$(git tag -l 'v*.*.*' --sort=-v:refname | head -1)
+  if [ -n \"\$TAG\" ]; then
+    echo \"    Checking out latest release: \$TAG\"
+    git checkout --quiet \"\$TAG\"
+  else
+    echo '    No release tags found yet - staying on main'
+  fi
+"
 # install.sh already exists at this path from the clone above - no need
 # to push a local copy over. That push used to assume "$0" (this
 # script's own path) points at a real file on disk, which is only true
@@ -101,3 +117,4 @@ echo "==> Done. pve-flr-portal is running in CT $CTID."
 echo "    https://${CT_IP}:8008/"
 echo "    Edit /opt/pve-flr-portal/.env inside the container for PVE_HOST/PVE_STORAGE,"
 echo "    then: pct exec $CTID -- systemctl restart pve-flr-portal"
+echo "    To update later: pct exec $CTID -- bash /opt/pve-flr-portal/deploy/update.sh"
