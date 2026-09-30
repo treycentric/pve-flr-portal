@@ -497,12 +497,32 @@ would be a real access-control bypass. `dir_cache` reuses the same
 threat model. Caught before implementation, not after — see issue
 #109's discussion.
 
-Invalidation is trivial in practice: a backup snapshot is immutable, so
+**Content invalidation** is trivial: a backup snapshot is immutable, so
 a `(username, volume, path)` listing never changes once cached.
 `fetched_at` is kept for a possible future "evict entries older than N
 days" sweep to cap the file size — not built; the file has stayed small
 in practice (one row per distinct listing a user has ever viewed, no
 background growth).
+
+**Existence invalidation is a different problem "immutable content"
+doesn't solve** — the snapshot itself can still disappear (PBS
+retention pruning, a manual delete) or the user's own access to it can
+be revoked, and nothing about `dir_cache` would notice either on its
+own. `evict_missing()` (called from `main.py`'s `index()`, right after
+its own `list_backup_archives()` call — no separate sweep or background
+job) reconciles a user's cached volumes against that same request's
+live, permission-filtered list and drops anything not in it. This isn't
+just tidiness: `get()` never re-checks permission on a hit, so without
+this, a user whose access to a guest was revoked could otherwise keep
+reading out everything they'd cached from it before, indefinitely — a
+real access-control gap the reconciliation closes as a side effect.
+Skipped entirely when `listing.errors` is non-empty (any configured
+storage failed to answer) — a transient PVE hiccup must never look
+like "nothing exists anymore" and wipe good entries from the storages
+that did answer; better to leave possibly-stale rows a little longer
+than to wrongly nuke everything on a blip. Scoped per-user throughout:
+one user's reconciliation never touches another user's own rows for
+the exact same volume.
 
 Reused for what it actually turned out to fix: originally scoped as
 "optional, perf only" (§4), then re-scoped after issue #109 (a real

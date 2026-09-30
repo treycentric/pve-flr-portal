@@ -10,9 +10,20 @@ let a second user see data PVE never actually authorized for them
 (different users can hold different ACL grants on different
 storages/VMs). Caching only ever saves a user their *own* repeat calls.
 
-Backups are immutable once taken, so a cached listing never goes
-stale - no invalidation beyond an optional future "evict old entries"
-sweep (not built; `fetched_at` is kept for that).
+Backups are immutable once taken, so a cached listing never goes stale
+on its own - but the snapshot it was cached from can still disappear
+out from under it (PBS retention pruning, or a manual delete), and a
+user's own access to it can be revoked after the fact. Nothing about
+"immutable content" implies "safe to keep forever": `evict_missing()`
+is the actual invalidation path, reconciling a user's cached volumes
+against the live, permission-filtered list `pve_client.list_backup_archives()`
+already fetches on every page load - no separate sweep/background job
+needed, and it doubles as a fix for a real gap a cache hit would
+otherwise have: `get()` never re-checks permission on its own (it just
+trusts the row), so without this, a user whose access to a guest was
+revoked could still read out everything they cached from it before,
+forever. `fetched_at` is kept in case a future purely-time-based sweep
+is ever wanted too, but isn't used for that today.
 
 Single SQLite file under PFR_DATA_DIR (issue #30), no background job,
 per CLAUDE.md's "no extra services" constraint. Uses stdlib `sqlite3`
@@ -91,6 +102,33 @@ async def get(username: str, volume: str, path: str) -> list[dict] | None:
 
 async def set(username: str, volume: str, path: str, listing: list[dict]) -> None:
     await asyncio.to_thread(_set_sync, username, volume, path, listing)
+
+
+def _evict_missing_sync(username: str, existing_volumes: frozenset[str]) -> None:
+    with _lock:
+        conn = _get_conn()
+        if not existing_volumes:
+            # NOT IN () with no values is invalid SQL - and correct
+            # anyway: no visible archives at all means nothing of this
+            # user's should stay cached.
+            conn.execute("DELETE FROM dir_cache WHERE username = ?", (username,))
+        else:
+            placeholders = ",".join("?" * len(existing_volumes))
+            conn.execute(
+                f"DELETE FROM dir_cache WHERE username = ? AND volume NOT IN ({placeholders})",
+                (username, *existing_volumes),
+            )
+        conn.commit()
+
+
+async def evict_missing(username: str, existing_volumes: frozenset[str]) -> None:
+    """Drops every cached row for `username` whose volume isn't in
+    `existing_volumes` - the caller's own current, permission-filtered
+    view of what actually exists (main.py's `index()`, right after its
+    own `list_backup_archives()` call). Deliberately scoped to just this
+    one user's rows: a different user's own cache reflects their own
+    visibility and access, and must never be touched by this one."""
+    await asyncio.to_thread(_evict_missing_sync, username, existing_volumes)
 
 
 def clear() -> None:

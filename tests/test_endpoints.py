@@ -18,7 +18,7 @@ import pytest
 main = pytest.importorskip("backend.main", reason="backend.main needs FastAPI")
 from fastapi.testclient import TestClient
 
-from backend import auth, pve_client
+from backend import auth, dir_cache, pve_client
 
 ARCHIVES = [
     {"volid": "pbs:backup/vm/133/2026-08-30T02:03:57Z", "ctime": 200, "size": 10, "verification": {"state": "ok"}},
@@ -137,6 +137,51 @@ def test_index_shows_a_banner_and_still_renders_when_a_storage_is_inaccessible(s
     assert resp.status_code == 200
     assert "pbs-tier1-external" in resp.text
     assert "could not be read" in resp.text
+
+
+def test_index_evicts_dir_cache_entries_for_volumes_no_longer_listed(client, session_data):
+    """Issue #109 follow-up: a snapshot pruned by PBS retention, or a
+    user's revoked access to one, must not leave its dir_cache rows
+    behind forever - reconciled against this same request's own live
+    archive list on every normal page load."""
+    asyncio.run(dir_cache.set(session_data.username, "pbs:backup/vm/999/2020-01-01T00:00:00Z", "/", [{"text": "x"}]))
+    asyncio.run(
+        dir_cache.set(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/", [{"text": "kept"}])
+    )
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert asyncio.run(dir_cache.get(session_data.username, "pbs:backup/vm/999/2020-01-01T00:00:00Z", "/")) is None
+    assert asyncio.run(
+        dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")
+    ) == [{"text": "kept"}]
+
+
+def test_index_skips_dir_cache_eviction_when_a_storage_errored(session_data, monkeypatch):
+    """A transient PVE hiccup on one storage must never look like
+    "nothing exists anymore" and wipe good cache entries from the
+    storages that did answer."""
+    asyncio.run(dir_cache.set(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/", [{"text": "x"}]))
+
+    async def fake_archives(session):
+        return pve_client.BackupListing(
+            archives=[], errors=[pve_client.StorageError("pbs-tier1-external", "permission denied")]
+        )
+
+    async def fake_names(session):
+        return {}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    try:
+        with TestClient(main.app) as c:
+            resp = c.get("/")
+    finally:
+        main.app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert asyncio.run(
+        dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")
+    ) == [{"text": "x"}]
 
 
 def test_index_requires_auth():
