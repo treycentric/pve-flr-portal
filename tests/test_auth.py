@@ -89,6 +89,65 @@ async def test_login_bad_credentials_raises_401():
 
 
 @respx.mock
+async def test_login_with_2fa_raises_tfa_required(monkeypatch):
+    """Issue #15: PVE's own AccessControl.pm returns NeedTFA plus an
+    opaque intermediate ticket (never a real session) rather than a
+    401/200 login - confirmed against PVE's own source, not guessed."""
+    respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "!tfa!opaque-challenge-blob",
+                    "CSRFPreventionToken": "csrf-1",
+                    "NeedTFA": 1,
+                }
+            },
+        )
+    )
+    with pytest.raises(auth.TFARequired) as exc:
+        await auth.login("alice@pam", "hunter2")
+    assert exc.value.username == "alice@pam"
+    assert exc.value.challenge == "!tfa!opaque-challenge-blob"
+    assert auth._sessions == {}
+
+
+@respx.mock
+async def test_finish_tfa_login_success_stores_session():
+    route = respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "PVE:alice@pam:REALTICKET",
+                    "CSRFPreventionToken": "csrf-2",
+                }
+            },
+        )
+    )
+    session_id = await auth.finish_tfa_login("alice@pam", "123456", "!tfa!opaque-challenge-blob")
+    assert session_id in auth._sessions
+    assert auth._sessions[session_id].ticket == "PVE:alice@pam:REALTICKET"
+    sent = route.calls.last.request.read().decode()
+    # The code goes in `password`, never `otp` - PVE's own source rejects
+    # mixing the two when tfa-challenge is set.
+    assert "password=123456" in sent
+    assert "tfa-challenge=" in sent
+    assert "otp=" not in sent
+
+
+@respx.mock
+async def test_finish_tfa_login_bad_code_raises_401():
+    respx.post(f"{API}/access/ticket").mock(return_value=httpx.Response(401, json={"data": None}))
+    with pytest.raises(HTTPException) as exc:
+        await auth.finish_tfa_login("alice@pam", "000000", "!tfa!opaque-challenge-blob")
+    assert exc.value.status_code == 401
+    assert auth._sessions == {}
+
+
+@respx.mock
 async def test_oidc_auth_url_returns_the_identity_provider_url():
     route = respx.post(f"{API}/access/openid/auth-url").mock(
         return_value=httpx.Response(200, json={"data": "https://idp.example.com/authorize?state=abc"})

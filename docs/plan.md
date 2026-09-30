@@ -555,7 +555,7 @@ inline on any request once it's more than 90 minutes old. Same effect
 as a timer (tickets never hit their ~2h expiry for an active user),
 simpler code — no timer bookkeeping to leak or clean up.
 
-PVE 2FA/TOTP is **not** handled — see `TODO.md`.
+PVE 2FA/TOTP (TOTP and recovery keys) is handled — issue #15, see below.
 
 ### 7.1 PVE-only auth, no separate PBS token
 
@@ -610,10 +610,34 @@ comes back in the same shape PBS's admin API gives, since the UI's
 - `pve_client.py`'s functions need a `session` argument instead of
   reading the module-level static token; `_headers()` becomes
   `_headers(session)`.
-- 2FA/TOTP: if any target user has a second factor enabled on their PVE
-  account, `/access/ticket` requires an extra round-trip. Confirm
-  whether that applies here before committing to a single-step login
-  form.
+- **2FA/TOTP — shipped (issue #15).** A second factor on the account
+  does require an extra round-trip, confirmed against PVE's own source
+  (`pve-access-control`'s `PVE/API2/AccessControl.pm`, `create_ticket`)
+  rather than guessed: the first `/access/ticket` response carries
+  `NeedTFA: 1` plus an opaque, signed intermediate value in `ticket` -
+  not a real session ticket yet, but not something the client needs to
+  interpret either, just echo back. The second POST sends `username`,
+  the entered code in `password` (never `otp` - PVE's own code
+  explicitly rejects mixing the two when `tfa-challenge` is set), and
+  that intermediate value in `tfa-challenge`. The original password
+  isn't needed again: the intermediate value is itself PVE's normal
+  ticket-signing applied to a `!tfa!`-prefixed payload, so it already
+  encodes that the first factor checked out.
+
+  `auth.py`: `login()` raises `TFARequired(challenge, username)` instead
+  of returning when `NeedTFA` is set; `finish_tfa_login(username, code,
+  challenge)` does the second call. `login.html` reveals a code-entry
+  step in place (same POST route, `tfa_challenge` present or not is
+  what distinguishes the two steps) with username/realm/challenge
+  carried as hidden fields - no server-side "pending login" state
+  needed, matching this project's stateless-login design.
+
+  Covers TOTP and recovery keys - PVE's second call doesn't distinguish
+  which the entered string represents, so the same plain-text code
+  field accepts either. WebAuthn is explicitly out of scope: it needs
+  real browser credential-API JavaScript (`navigator.credentials.get()`
+  against a challenge), not just a text field posted through the same
+  two-step ticket exchange.
 
 **What this simplifies vs. today:** no more `pbs_client.py`, no more
 `PBS_HOST`/`PBS_DATASTORE`/`PBS_TOKEN_*`/`PBS_VERIFY_SSL` in `.env` —

@@ -101,18 +101,67 @@ async def login_page(request: Request, reason: str | None = Query(None)):
 
 @app.post("/login")
 async def login_submit(
-    request: Request, username: str = Form(...), realm: str = Form(...), password: str = Form(...)
+    request: Request,
+    username: str = Form(...),
+    realm: str = Form(...),
+    password: str = Form(""),
+    tfa_challenge: str = Form(""),
 ):
+    """Issue #15: a second POST here - distinguished by `tfa_challenge`
+    being set - is the second step of a 2FA login. `password` doubles
+    as "the account password" (first step) or "the TOTP/recovery code"
+    (second step), same as PVE's own /access/ticket contract does;
+    `username`/`realm` are carried through as hidden fields on the
+    code-entry form so this route never needs server-side state for a
+    login that's still in progress."""
     full_username = username if "@" in username else f"{username}@{realm}"
-    try:
-        session_id = await auth.login(full_username, password)
-    except HTTPException:
+
+    async def _login_error(error: str, status_code: int):
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": "Invalid username or password", "notice": None, "realms": await auth.list_realms()},
-            status_code=401,
+            {
+                "error": error,
+                "notice": None,
+                "realms": await auth.list_realms(),
+                "tfa_challenge": tfa_challenge,
+                "tfa_username": username,
+                "tfa_realm": realm,
+            },
+            status_code=status_code,
         )
+
+    try:
+        if tfa_challenge:
+            session_id = await auth.finish_tfa_login(full_username, password, tfa_challenge)
+        else:
+            session_id = await auth.login(full_username, password)
+    except auth.TFARequired as tfa:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "error": None,
+                "notice": None,
+                "realms": await auth.list_realms(),
+                "tfa_challenge": tfa.challenge,
+                "tfa_username": username,
+                "tfa_realm": realm,
+            },
+        )
+    except HTTPException:
+        return await _login_error(
+            "Invalid authentication code" if tfa_challenge else "Invalid username or password", 401
+        )
+    except httpx.HTTPError as exc:
+        # A transport-level failure (PVE unreachable, TLS verification
+        # failure against its cert, DNS) isn't an HTTPException - issue
+        # #98, confirmed live as an unhandled 500 with zero indication
+        # of the real cause. Logged here since the login page's own
+        # message is deliberately generic (no PVE_HOST/internals in a
+        # page anyone can reach pre-auth).
+        _log.warning("Login failed - could not reach PVE: %s", exc)
+        return await _login_error("Could not reach PVE - see the server log for details.", 502)
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         "session_id",

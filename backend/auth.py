@@ -109,8 +109,27 @@ def _store_ticket(data: dict) -> str:
     return session_id
 
 
+class TFARequired(Exception):
+    """Issue #15: raised by login() when the account has a second factor
+    (TOTP or a recovery key - PVE's own second /access/ticket call
+    doesn't distinguish which) configured. `challenge` is PVE's own
+    signed, opaque intermediate value - not a real session ticket yet -
+    that finish_tfa_login() must echo back verbatim as `tfa-challenge`.
+    It encodes the already-verified username/password itself (confirmed
+    against PVE's own source, PVE/API2/AccessControl.pm's create_ticket:
+    the intermediate ticket is `assemble_ticket("!tfa!$tfa_info")`,
+    PVE's normal ticket-signing applied to a TFA-prefixed payload), so
+    the original password is never needed again on the second call."""
+
+    def __init__(self, challenge: str, username: str):
+        self.challenge = challenge
+        self.username = username
+
+
 async def login(username: str, password: str) -> str:
-    """Authenticate against PVE's ticket endpoint; returns our opaque session id."""
+    """Authenticate against PVE's ticket endpoint; returns our opaque
+    session id, or raises TFARequired if a second factor is needed -
+    call finish_tfa_login() next with the code the user enters."""
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         resp = await client.post(
             f"{_API_ROOT}/access/ticket",
@@ -118,6 +137,25 @@ async def login(username: str, password: str) -> str:
         )
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    data = resp.json()["data"]
+    if data.get("NeedTFA"):
+        raise TFARequired(challenge=data["ticket"], username=data["username"])
+    return _store_ticket(data)
+
+
+async def finish_tfa_login(username: str, code: str, challenge: str) -> str:
+    """Issue #15, second factor: `code` is whatever the user entered - a
+    TOTP code or a one-time recovery key, PVE accepts either the same
+    way here. Goes in `password` on this call, per PVE's own source -
+    mixing it with the unrelated `otp` param is explicitly rejected
+    there ("TFA response should be in 'password', not 'otp'")."""
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        resp = await client.post(
+            f"{_API_ROOT}/access/ticket",
+            data={"username": username, "password": code, "tfa-challenge": challenge},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid authentication code")
     return _store_ticket(resp.json()["data"])
 
 

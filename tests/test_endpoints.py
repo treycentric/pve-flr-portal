@@ -1604,6 +1604,76 @@ def test_login_submit_success_sets_cookie(monkeypatch):
     assert "session_id=session-abc" in resp.headers["set-cookie"]
 
 
+def test_login_submit_shows_code_entry_step_when_2fa_required(monkeypatch):
+    """Issue #15, step 1: a NeedTFA account gets the code-entry form back,
+    not an error - and the response must carry the challenge/username/
+    realm forward as hidden fields, since this route keeps no
+    server-side state for a login still in progress."""
+
+    async def needs_tfa(username, password):
+        raise auth.TFARequired(challenge="!tfa!blob", username="x@pam")
+
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "login", needs_tfa)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.post("/login", data={"username": "x", "realm": "pam", "password": "y"})
+    assert resp.status_code == 200
+    assert "Two-factor authentication" in resp.text
+    assert 'value="!tfa!blob"' in resp.text
+    assert 'name="username" value="x"' in resp.text
+    assert 'name="realm" value="pam"' in resp.text
+
+
+def test_login_submit_completes_2fa_and_sets_cookie(monkeypatch):
+    """Issue #15, step 2: the code-entry form's own POST is distinguished
+    by tfa_challenge being present, and completes the login via
+    finish_tfa_login - the original password is never sent again."""
+
+    async def finish(username, code, challenge):
+        assert username == "x@pam"
+        assert code == "123456"
+        assert challenge == "!tfa!blob"
+        return "session-2fa"
+
+    monkeypatch.setattr(auth, "finish_tfa_login", finish)
+    with TestClient(main.app) as c:
+        resp = c.post(
+            "/login",
+            data={"username": "x", "realm": "pam", "password": "123456", "tfa_challenge": "!tfa!blob"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+    assert "session_id=session-2fa" in resp.headers["set-cookie"]
+
+
+def test_login_submit_bad_2fa_code_stays_on_code_entry_step(monkeypatch):
+    from fastapi import HTTPException
+
+    async def bad_code(username, code, challenge):
+        raise HTTPException(status_code=401, detail="Invalid authentication code")
+
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "finish_tfa_login", bad_code)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.post(
+            "/login",
+            data={"username": "x", "realm": "pam", "password": "000000", "tfa_challenge": "!tfa!blob"},
+        )
+    assert resp.status_code == 401
+    assert "Invalid authentication code" in resp.text
+    # Stays on the code-entry step rather than bouncing back to
+    # username/password - the challenge is still valid, only the code was wrong.
+    assert "Two-factor authentication" in resp.text
+    assert 'value="!tfa!blob"' in resp.text
+
+
 def test_login_oidc_start_redirects_to_the_returned_auth_url(monkeypatch):
     captured = {}
 

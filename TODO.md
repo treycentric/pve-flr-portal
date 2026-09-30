@@ -177,7 +177,13 @@ wasn't built for.
   moved to disk to lift — PH.6 (#109) already added the SQLite
   infrastructure this could reuse, but sessions themselves aren't
   persisted there; that's still open, separate work.
-- [ ] **PVE 2FA/TOTP not handled** — if a target user has a second
-  factor on their PVE account, `/access/ticket` needs an extra
-  round-trip the login flow doesn't do yet (`backend/auth.py`).
-  Revisit if/when actually needed by a real user.
+- [x] **PVE 2FA/TOTP** — SHIPPED (issue #15). `auth.login()` raises
+  `TFARequired` when PVE's `/access/ticket` response carries `NeedTFA`;
+  `auth.finish_tfa_login()` does the second round-trip (the code goes
+  in `password`, the intermediate ticket in `tfa-challenge`, per PVE's
+  own source - confirmed against `PVE/API2/AccessControl.pm`, not
+  guessed). `login.html` reveals a code-entry step in place, carrying
+  username/realm/challenge as hidden fields - no server-side pending-
+  login state needed. Covers TOTP and recovery keys (PVE accepts either
+  the same way here); WebAuthn is out of scope (needs browser
+  credential-API JS, real additional work). See `docs/plan.md` §7.1.
