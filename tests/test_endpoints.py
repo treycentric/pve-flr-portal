@@ -1587,6 +1587,30 @@ def test_login_submit_invalid_credentials(monkeypatch):
     assert "Invalid username or password" in resp.text
 
 
+def test_login_submit_fails_cleanly_when_pve_is_unreachable(monkeypatch):
+    """Issue #98/#99: a transport-level failure (PVE unreachable, TLS
+    verification failure, DNS) isn't an HTTPException and used to
+    propagate as an unhandled 500 with zero indication of the real
+    cause. login_submit was rewritten from scratch by #15's 2FA work
+    before #99 merged, which carried the fix itself forward but dropped
+    this regression test along the way - added back here directly
+    against current main rather than resolving #99's now-conflicting
+    diff, since the code it tests is already shipped."""
+
+    async def unreachable_login(username, password):
+        raise httpx.ConnectError("Connection refused")
+
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "login", unreachable_login)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.post("/login", data={"username": "x", "realm": "pam", "password": "y"})
+    assert resp.status_code == 502
+    assert "Could not reach PVE" in resp.text
+
+
 def test_login_submit_success_sets_cookie(monkeypatch):
     async def ok_login(username, password):
         assert username == "x@pam"
