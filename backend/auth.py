@@ -13,6 +13,7 @@ logging everyone out is an acceptable tradeoff.
 """
 import asyncio
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -143,16 +144,32 @@ async def login(username: str, password: str) -> str:
     return _store_ticket(data)
 
 
+_TOTP_CODE_RE = re.compile(r"^\d{6,8}$")
+
+
 async def finish_tfa_login(username: str, code: str, challenge: str) -> str:
     """Issue #15, second factor: `code` is whatever the user entered - a
     TOTP code or a one-time recovery key, PVE accepts either the same
-    way here. Goes in `password` on this call, per PVE's own source -
-    mixing it with the unrelated `otp` param is explicitly rejected
-    there ("TFA response should be in 'password', not 'otp'")."""
+    way here, in `password` (mixing it with the unrelated `otp` param is
+    explicitly rejected server-side: "TFA response should be in
+    'password', not 'otp'"). **The value must be prefixed with which
+    method it's for** - `totp:123456` or `recovery:<key>` - confirmed
+    against PVE's own web UI (proxmox-widget-toolkit's TfaWindow.js,
+    `finishChallenge('totp:' + code)` / `finishChallenge('recovery:' +
+    key)`); a bare code is silently rejected regardless of whether it's
+    actually correct. This was a real, live-reported bug - the Perl
+    API2 schema alone doesn't document the prefix requirement, only
+    PVE's own client does.
+
+    A recovery key is always four hyphen-separated groups of 4 hex
+    digits (`^[0-9a-f]{4}(-[0-9a-f]{4}){3}$`, per the same widget's own
+    input validation) and never looks like a bare 6-8 digit number, so
+    which prefix to use is unambiguous without a second input field."""
+    method = "totp" if _TOTP_CODE_RE.match(code) else "recovery"
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         resp = await client.post(
             f"{_API_ROOT}/access/ticket",
-            data={"username": username, "password": code, "tfa-challenge": challenge},
+            data={"username": username, "password": f"{method}:{code}", "tfa-challenge": challenge},
         )
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid authentication code")

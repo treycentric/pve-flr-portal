@@ -664,6 +664,25 @@ comes back in the same shape PBS's admin API gives, since the UI's
   `<a href="/login">` link, not a form action, so it abandons the
   in-progress challenge rather than trying to resubmit it.
 
+  **Second real bug, same live test, after the username fix above still
+  didn't get a correct code accepted:** the `password` value on the
+  second call needs a **type prefix** - `totp:123456` or
+  `recovery:<key>` - not a bare code. Confirmed against PVE's real web
+  UI client (`proxmox-widget-toolkit`'s `TfaWindow.js`:
+  `finishChallenge('totp:' + code)` / `finishChallenge('recovery:' +
+  key)`), not documented anywhere in the API2 schema itself - the Perl
+  endpoint's own parameter description for `password` ("The secret
+  password. This can also be a valid ticket.") gives no hint that a TFA
+  response additionally needs this prefix. Without it, PVE silently
+  rejects the response regardless of whether the code is actually
+  correct - confirmed live against a real account that could log into
+  the Proxmox web UI with the same OTP. Fixed by prefixing based on
+  shape: a recovery key is always four hyphenated groups of 4 hex
+  digits (`^[0-9a-f]{4}(-[0-9a-f]{4}){3}$`, per that same widget's own
+  input validation) and never looks like a bare 6-8-digit number, so
+  which prefix to use is unambiguous without a second input field the
+  way PVE's own multi-tab widget has.
+
 **What this simplifies vs. today:** no more `pbs_client.py`, no more
 `PBS_HOST`/`PBS_DATASTORE`/`PBS_TOKEN_*`/`PBS_VERIFY_SSL` in `.env` —
 one fewer credential to provision, scope, and eventually tear down.

@@ -114,7 +114,7 @@ async def test_login_with_2fa_raises_tfa_required(monkeypatch):
 
 
 @respx.mock
-async def test_finish_tfa_login_success_stores_session():
+async def test_finish_tfa_login_totp_success_stores_session():
     route = respx.post(f"{API}/access/ticket").mock(
         return_value=httpx.Response(
             200,
@@ -131,11 +131,35 @@ async def test_finish_tfa_login_success_stores_session():
     assert session_id in auth._sessions
     assert auth._sessions[session_id].ticket == "PVE:alice@pam:REALTICKET"
     sent = route.calls.last.request.read().decode()
-    # The code goes in `password`, never `otp` - PVE's own source rejects
-    # mixing the two when tfa-challenge is set.
-    assert "password=123456" in sent
+    # A live-reported real bug (2026-09-30): PVE's own web UI
+    # (proxmox-widget-toolkit's TfaWindow.js) prefixes the response with
+    # which method it's for - a bare code is rejected outright,
+    # regardless of correctness. The colon is form-urlencoded as %3A.
+    assert "password=totp%3A123456" in sent
     assert "tfa-challenge=" in sent
     assert "otp=" not in sent
+
+
+@respx.mock
+async def test_finish_tfa_login_recovery_key_success_stores_session():
+    """A recovery key (xxxx-xxxx-xxxx-xxxx hex groups, never a bare
+    6-8 digit number - per the same widget's own input validation) gets
+    the 'recovery:' prefix instead of 'totp:'."""
+    route = respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "PVE:alice@pam:REALTICKET",
+                    "CSRFPreventionToken": "csrf-2",
+                }
+            },
+        )
+    )
+    await auth.finish_tfa_login("alice@pam", "a1b2-c3d4-e5f6-0789", "!tfa!opaque-challenge-blob")
+    sent = route.calls.last.request.read().decode()
+    assert "password=recovery%3Aa1b2-c3d4-e5f6-0789" in sent
 
 
 @respx.mock
