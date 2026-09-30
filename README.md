@@ -219,13 +219,11 @@ At global (root) scope:
 pveum acl modify / --users <user>@<realm> --roles FileRestoreOperator
 ```
 
-
 For all VMs:
 
 ```
 pveum acl modify /vms --users <user>@<realm> --roles FileRestoreOperator
 ```
-
 
 For a specific VM:
 
@@ -293,6 +291,8 @@ needed on the portal's own side).
 
 ### LXC on your PVE host (Recommended)
 
+**Installation**:
+
 Run on the PVE host itself:
 
 ```
@@ -307,7 +307,9 @@ container? Run `deploy/install.sh` inside it instead. Rationale for LXC
 over a Debian package on the host or a full VM/OVA is in docs/plan.md
 §10.
 
-**Updating.** Run `bash deploy/update.sh` inside the container/host to
+**Updating**:
+
+Run `bash deploy/update.sh` inside the container/host to
 update to the latest release, `bash deploy/update.sh v1.4.0` (or
 `1.4.0`) to pin to a specific one, or `bash deploy/update.sh main` for
 unreleased/bleeding-edge work. Reinstalls dependencies if
@@ -322,7 +324,28 @@ service user. It survives `update.sh` redeploys and container reboots,
 but not a container recreate - see docs/plan.md §10 for what to
 preserve when moving/rebuilding the container.
 
-### Docker, mainly for local dev/testing
+### Docker Image for Deployment
+
+Each release is published to GitHub Container Registry as
+`ghcr.io/treycentric/pve-flr-portal:<version>` (also
+`<major>.<minor>` and `latest`), for amd64 and arm64, by
+`.github/workflows/image.yml` once the test suite passes. It
+runs as an unprivileged user (uid 10001) with auto-reload off,
+and has a healthcheck. Configure it with the same variables as
+`.env.example`, passed as environment variables. Everything else
+in the image can be read-only: the app writes only `/app/certs`
+(its self-signed cert, unless you mount your own there),
+`/app/data`, and the temp directory while it builds a download
+bundle.
+
+```
+docker run -d -p 8008:8008 \
+  -e PVE_HOST=pve.example.com -e PVE_STORAGE=pbs -e PVE_VERIFY_SSL=true \
+  -v pve-flr-certs:/app/certs -v pve-flr-data:/app/data \
+  ghcr.io/treycentric/pve-flr-portal:latest
+```
+
+### Docker for Local Devevelopment/Testing
 
 ```
 docker compose up --build
@@ -344,7 +367,7 @@ gives the container the host's real interfaces directly (on Windows/Mac
 this needs Docker Desktop's "Enable host networking" setting on first):
 `docker compose --profile hostnet up --build pve-flr-portal-hostnet`.
 
-**Data-plane TLS (issue #47, docs/plan.md §7.6.1).** Once
+**Data-plane TLS (docs/plan.md §7.6.1).** Once
 `RESTORE_DATA_NICS` is set, the download route is served over **HTTPS**,
 and `RESTORE_DATA_NIC_TLS_PREFERRED` defaults to **`verify`** (the guest
 validates the cert). A self-signed data-plane cert with the right IP
@@ -395,5 +418,4 @@ Licensed under the [GNU Affero General Public License v3.0](LICENSE)
 who runs a modified version of this app as a network service must also
 make that modified source available to its users.
 
-Third-party attribution (the app icon is derived from a WordPress
-Dashicons glyph via SVG Repo) is in [`NOTICE`](NOTICE).
+Third-party attribution is in [`NOTICE`](NOTICE).
