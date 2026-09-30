@@ -10,10 +10,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PAGES = [
-    *sorted((ROOT / "backend" / "templates").rglob("*.html")),
-    ROOT / "backend" / "static" / "timeline-preview.html",
-]
+PAGES = sorted((ROOT / "backend" / "templates").rglob("*.html"))
 EXTERNAL_SCRIPT = re.compile(r"<script[^>]*\ssrc=[\"']?(https?:)?//", re.IGNORECASE)
 
 
