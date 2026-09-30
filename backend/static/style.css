@@ -929,6 +929,18 @@ body {
   height: 36px;
 }
 
+/* Issue #15's code-entry step: a plain GET back to /login, not a form
+   action - resets to a clean username/password/realm form rather than
+   resubmitting anything, and abandons the (still technically valid
+   until it expires) TFA challenge rather than trying to reuse it. */
+.login-back-link {
+  display: block;
+  margin-top: 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 select.login-input {
   background: var(--input-bg);
   color: var(--text);

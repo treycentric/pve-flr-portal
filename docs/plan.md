@@ -639,6 +639,31 @@ comes back in the same shape PBS's admin API gives, since the UI's
   against a challenge), not just a text field posted through the same
   two-step ticket exchange.
 
+  **Real bug, caught live against an actual 2FA account (2026-09-30):**
+  the second call kept failing with a correct code. Cause: the
+  code-entry form's hidden `username` field was echoing back the raw,
+  client-typed username (e.g. `alice`) reconstructed with the realm
+  (`alice@pam`), instead of the exact string PVE itself returned as
+  `data["username"]` in the first response. That distinction matters
+  because PVE's challenge ticket is cryptographically bound to it: the
+  intermediate ticket is `assemble_ticket($ticket_data, $aad)` with
+  `$aad = $username` - the *normalized* username, after PVE's own
+  `lookup_username` - not whatever a client-side `f"{username}@{realm}"`
+  string happens to produce. Any mismatch fails the second call's
+  verification outright, independent of whether the code itself is
+  right. Fixed by carrying `TFARequired.username` (PVE's own returned
+  value) through the hidden field verbatim instead of reconstructing
+  it - `login_submit` no longer touches the username at all on the
+  second step. A real-world illustration of why "obviously equivalent"
+  strings (`alice@pam` built two different ways) aren't safe to
+  interchange across a cryptographic boundary designed around one
+  specific, authoritative source of that string.
+
+  **UX addition, same live test:** the code-entry step needed a way
+  back to the username/password form without a page reload - a plain
+  `<a href="/login">` link, not a form action, so it abandons the
+  in-progress challenge rather than trying to resubmit it.
+
 **What this simplifies vs. today:** no more `pbs_client.py`, no more
 `PBS_HOST`/`PBS_DATASTORE`/`PBS_TOKEN_*`/`PBS_VERIFY_SSL` in `.env` —
 one fewer credential to provision, scope, and eventually tear down.

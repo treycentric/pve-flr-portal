@@ -1606,9 +1606,15 @@ def test_login_submit_success_sets_cookie(monkeypatch):
 
 def test_login_submit_shows_code_entry_step_when_2fa_required(monkeypatch):
     """Issue #15, step 1: a NeedTFA account gets the code-entry form back,
-    not an error - and the response must carry the challenge/username/
-    realm forward as hidden fields, since this route keeps no
-    server-side state for a login still in progress."""
+    not an error - and the response must carry the challenge forward,
+    since this route keeps no server-side state for a login still in
+    progress. Critically, the hidden username field must be PVE's own
+    fully-qualified username from the TFARequired exception ("x@pam"),
+    not the raw typed username ("x") - PVE's challenge ticket is
+    cryptographically bound to the exact string it returned (AAD in its
+    own assemble_ticket call), so resending anything else fails the
+    second call even with the right code. A real live-reported bug: this
+    field used to echo back the raw form value instead."""
 
     async def needs_tfa(username, password):
         raise auth.TFARequired(challenge="!tfa!blob", username="x@pam")
@@ -1623,7 +1629,7 @@ def test_login_submit_shows_code_entry_step_when_2fa_required(monkeypatch):
     assert resp.status_code == 200
     assert "Two-factor authentication" in resp.text
     assert 'value="!tfa!blob"' in resp.text
-    assert 'name="username" value="x"' in resp.text
+    assert 'name="username" value="x@pam"' in resp.text
     assert 'name="realm" value="pam"' in resp.text
 
 
@@ -1642,7 +1648,10 @@ def test_login_submit_completes_2fa_and_sets_cookie(monkeypatch):
     with TestClient(main.app) as c:
         resp = c.post(
             "/login",
-            data={"username": "x", "realm": "pam", "password": "123456", "tfa_challenge": "!tfa!blob"},
+            # "x@pam" simulates the hidden field as the template actually
+            # renders it (PVE's own fully-qualified username, not a raw
+            # "x" reconstructed with realm) - see login_submit's docstring.
+            data={"username": "x@pam", "realm": "pam", "password": "123456", "tfa_challenge": "!tfa!blob"},
             follow_redirects=False,
         )
     assert resp.status_code == 303
@@ -1664,7 +1673,7 @@ def test_login_submit_bad_2fa_code_stays_on_code_entry_step(monkeypatch):
     with TestClient(main.app) as c:
         resp = c.post(
             "/login",
-            data={"username": "x", "realm": "pam", "password": "000000", "tfa_challenge": "!tfa!blob"},
+            data={"username": "x@pam", "realm": "pam", "password": "000000", "tfa_challenge": "!tfa!blob"},
         )
     assert resp.status_code == 401
     assert "Invalid authentication code" in resp.text

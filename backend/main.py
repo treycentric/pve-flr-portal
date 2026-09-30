@@ -110,11 +110,20 @@ async def login_submit(
     """Issue #15: a second POST here - distinguished by `tfa_challenge`
     being set - is the second step of a 2FA login. `password` doubles
     as "the account password" (first step) or "the TOTP/recovery code"
-    (second step), same as PVE's own /access/ticket contract does;
-    `username`/`realm` are carried through as hidden fields on the
-    code-entry form so this route never needs server-side state for a
-    login that's still in progress."""
-    full_username = username if "@" in username else f"{username}@{realm}"
+    (second step), same as PVE's own /access/ticket contract does.
+
+    On the code-entry step, the `username` hidden field carries PVE's
+    own fully-qualified `data["username"]` from the first response
+    (TFARequired.username) verbatim - **not** a client-side
+    `f"{username}@{realm}"` reconstruction. PVE's challenge ticket is
+    cryptographically bound to that exact string as AAD
+    (`assemble_ticket($ticket_data, $aad)` in its own
+    PVE/API2/AccessControl.pm, `$aad = $username` after
+    `lookup_username` normalization) - resending anything other than
+    the exact string PVE itself returned makes the second call fail
+    verification, even with the right code. Confirmed live: this was
+    the actual bug behind an initial "the submitted code isn't
+    working" report."""
 
     async def _login_error(error: str, status_code: int):
         return templates.TemplateResponse(
@@ -133,8 +142,11 @@ async def login_submit(
 
     try:
         if tfa_challenge:
-            session_id = await auth.finish_tfa_login(full_username, password, tfa_challenge)
+            # `username` is already PVE's own fully-qualified string here -
+            # see the docstring above. Not reconstructed from realm.
+            session_id = await auth.finish_tfa_login(username, password, tfa_challenge)
         else:
+            full_username = username if "@" in username else f"{username}@{realm}"
             session_id = await auth.login(full_username, password)
     except auth.TFARequired as tfa:
         return templates.TemplateResponse(
@@ -145,7 +157,7 @@ async def login_submit(
                 "notice": None,
                 "realms": await auth.list_realms(),
                 "tfa_challenge": tfa.challenge,
-                "tfa_username": username,
+                "tfa_username": tfa.username,
                 "tfa_realm": realm,
             },
         )
