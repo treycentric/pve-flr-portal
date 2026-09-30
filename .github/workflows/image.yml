@@ -7,7 +7,9 @@ name: Image
 #   publishes <version> and <major>.<minor> for amd64 and arm64, after the
 #   full test suite and a smoke test of the built image pass. `latest` moves
 #   only on a release tag: metadata-action adds it for a semver tag and
-#   leaves a pre-release (v1.8.0-rc.1) with its version tag alone.
+#   leaves a pre-release (v1.8.0-rc.1) with its version tag alone. Every
+#   push is signed with cosign (keyless, via this job's own GitHub Actions
+#   OIDC identity - issue #111); see README for how to verify.
 # - A pull request that changes the image builds and smoke-tests it for
 #   amd64 without pushing. CI runs the tests.
 # - workflow_dispatch publishes one tag of your choosing from any branch,
@@ -65,6 +67,15 @@ jobs:
     if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Job-level permissions replace the workflow-level block above for
+    # this job, not merge with it - contents/packages are restated here.
+    # id-token is scoped to this job alone (not test, which doesn't need
+    # it): it's what lets cosign request a short-lived OIDC token from
+    # GitHub for keyless signing (issue #111) - no key to manage or leak.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     env:
       PUSH: ${{ github.event_name != 'pull_request' }}
     steps:
@@ -131,7 +142,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - name: Build and push
+      - id: push
+        name: Build and push
         if: env.PUSH == 'true'
         uses: docker/build-push-action@v7
         with:
@@ -142,3 +154,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - uses: sigstore/cosign-installer@v3
+        if: env.PUSH == 'true'
+
+      # Keyless signing (issue #111): cosign requests a short-lived cert
+      # from Sigstore's public Fulcio CA using this job's own GitHub
+      # Actions OIDC token, and records the signature in the public
+      # Rekor transparency log - no private key generated, stored, or
+      # rotated anywhere. Signs by digest, not tag: a digest is
+      # immutable and this is the exact manifest list build-push-action
+      # just pushed, so the one signature covers every tag
+      # (<version>/<major>.<minor>/latest) pointing at it.
+      - name: Sign the published image
+        if: env.PUSH == 'true'
+        run: cosign sign --yes "${IMAGE}@${{ steps.push.outputs.digest }}"

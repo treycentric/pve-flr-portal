@@ -283,6 +283,19 @@ docker run -d -p 8008:8008 \
   ghcr.io/treycentric/pve-flr-portal:latest
 ```
 
+**Image signing (issue #111).** Every published image is signed with
+[cosign](https://github.com/sigstore/cosign), keyless via the publishing
+workflow's own GitHub Actions OIDC identity - there's no key to manage,
+rotate, or leak. Verify an image actually came from this repo's own
+`image.yml` workflow, not just "someone with a key":
+
+```
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/treycentric/pve-flr-portal/\.github/workflows/image\.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/treycentric/pve-flr-portal:latest
+```
+
 **Docker, building from source for local dev/testing:**
 
 ```
