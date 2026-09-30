@@ -101,6 +101,22 @@ def test_index_escapes_guest_name_containing_script_close_tag(session_data, monk
     assert "\\u003c/script>\\u003cscript>fetch" in resp.text
 
 
+def test_index_reads_task_and_identity_from_dataset_not_inline_js(client):
+    """taskPicker(...) and userMenu(...) used to splice guest_type/guest_vmid
+    and the current PVE username directly into a single-quoted JS string
+    inside x-data (same escaping-context bug as tree_nodes.html's
+    trackTreeToggle - Jinja's HTML-attribute escaping doesn't protect an
+    attribute the browser HTML-decodes before Alpine evaluates it as JS).
+    Both must now read the value back out of the element's own dataset."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "taskPicker(JSON.parse(document.getElementById('groups-data').textContent), $el.dataset.task)" in body
+    assert "userMenu($el.dataset.identity)" in body
+    assert "taskPicker(JSON.parse(document.getElementById('groups-data').textContent), 'ct:104')" not in body
+    assert "userMenu('alice@pam')" not in body
+
+
 def test_index_shows_a_banner_and_still_renders_when_a_storage_is_inaccessible(session_data, monkeypatch):
     async def fake_archives(session):
         return pve_client.BackupListing(

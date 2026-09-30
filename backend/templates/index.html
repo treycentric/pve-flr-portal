@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block topbar_meta %}
 <script id="groups-data" type="application/json">{{ groups_json | safe }}</script>
-<div x-data="taskPicker(JSON.parse(document.getElementById('groups-data').textContent), '{{ guest_type }}:{{ guest_vmid }}')">
+<div
+  data-task="{{ guest_type }}:{{ guest_vmid }}"
+  x-data="taskPicker(JSON.parse(document.getElementById('groups-data').textContent), $el.dataset.task)">
   <button type="button" class="task-trigger" @click="open = true">
     <span class="task-trigger-text">
       <span class="status-title">Task</span>
@@ -121,7 +123,7 @@
   </div>
 </div>
 
-<div x-data="userMenu('{{ current_identity }}')">
+<div data-identity="{{ current_identity }}" x-data="userMenu($el.dataset.identity)">
   <button type="button" class="user-menu-trigger" @click.stop="open = !open">
     <svg class="user-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
   </button>
