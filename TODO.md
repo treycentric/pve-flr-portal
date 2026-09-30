@@ -75,7 +75,7 @@ commit.
 - #52 — bake certbot + a DNS-01 plugin into the LXC/Docker build, with a
   renewal deploy hook and a first-run helper. Design in the issue.
 
-## PH.6 — Directory-listing cache (optional, perf only)
+## PH.6 — Directory-listing cache (issue #109 re-scoped: stability, not just perf)
 
 A lazily-populated SQLite `dir_cache` keyed by `(volid, path)`, written
 on `/api/browse` cache-miss (schema already sketched in
@@ -84,6 +84,21 @@ helper-VM boot); scrubbing N snapshots in the same folder currently
 pays that N times. The app is correct without this — it's purely "stop
 paying the same 3s tax repeatedly." Single SQLite file, no background
 job, per CLAUDE.md's "no extra services" constraint. Est. 1-2 days.
+
+**No longer "optional, perf only" (2026-09-30):** issue #109 confirmed
+PVE's own privileged API worker pool is a small (default 3), shared,
+node-wide resource that this app's `file-restore/list` calls compete
+for against every other operation on the node — a real host-instability
+report traced back to it. `FILE_RESTORE_LIST_MAX_CONCURRENCY` (lowered
+to 2) caps how many calls this app makes *at once*, but doesn't reduce
+how *often* it needs to call PVE at all. Timeline scrubbing is
+disproportionately revisit-heavy — dragging back and forth over
+already-seen points is normal scrub UX — so a cache turns most of that
+traffic into free local hits instead of new calls competing for one of
+PVE's few shared worker slots. It does **not** fully replace the
+concurrency cap: a first-time visit to N distinct new snapshots still
+needs N live calls regardless of caching. Both mitigations matter
+together.
 
 **More motivated after #80:** hiding unmountable partitions/disks/LVM
 volumes (main.py's `_filter_unmountable_children`/
