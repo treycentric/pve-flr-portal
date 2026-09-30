@@ -370,21 +370,24 @@ reason for it:**
 So there is **nothing to implement here** — the scheduled poll is
 dropped from the plan, not outstanding work.
 
-### The directory-listing cache — real, still unbuilt, optional
+### The directory-listing cache — built (PH.6, issue #109)
 
-The part of the old "cache" idea that would still help is different and
-narrower: per §3, an uncached `file-restore/list` costs ~3s (cold, via
-the helper VM). Today `/api/browse` pays that **every** time — scrub
-across ten snapshots in the same folder and you wait ten times; revisit
-a folder and you wait again. A lazily-populated `dir_cache` keyed by
-(volid, path) holding the raw list response would make repeat
+The part of the old "cache" idea that helps is different and narrower:
+per §3, an uncached `file-restore/list` costs ~3s (cold, via the helper
+VM). Before this, `/api/browse` paid that **every** time — scrub across
+ten snapshots in the same folder and you wait ten times; revisit a
+folder and you wait again. A lazily-populated `dir_cache` keyed by
+(username, volid, path) holding the raw list response (§6) makes repeat
 navigation and cross-snapshot scrubbing in a known folder instant.
 
-This is a **performance optimization, not a correctness gap** — the app
-works without it. It's carved out as its own optional phase (see the
-roadmap). If built, it can stay a single SQLite file written on
-cache-miss from the request path — still no background job, no extra
-service.
+Originally scoped as a **performance optimization, not a correctness
+gap** — the app worked without it. Re-scoped after issue #109: PVE's
+own privileged API worker pool that `file-restore/list` competes for is
+small (default 3) and shared node-wide, so cutting how *often* this app
+calls PVE turned out to matter for host stability, not just responsiveness -
+see §9.1's "Helper-VM stampede" writeup. Stayed a single SQLite file
+written on cache-miss from the request path — no background job, no
+extra service, per CLAUDE.md.
 
 ## 5. UI mapping — ABB screenshot → this build
 
@@ -466,31 +469,46 @@ shadows were pulled out into `--surface-*`, `--row-hover`,
 
 ## 6. Data model
 
-**Not implemented. As of PH.4 the app has no database.** This section is
-kept as the design for the *directory-listing cache* if that optional
-phase is ever taken (see §4 and the roadmap).
-
-The original `snapshots` table is **dropped** — snapshot enumeration is
-a live PVE `storage/{id}/content` call and the timeline renders from
-JSON embedded in the page (§4). Only `dir_cache` remains as a candidate,
-and without a `snapshots` table it keys directly off the volid:
+**Implemented (PH.6, issue #109, 2026-09-30)** as `backend/dir_cache.py`
+— the app's first and, as of this writing, only piece of on-disk state
+beyond `PFR_DATA_DIR`'s bare existence (issue #30). The original
+`snapshots` table stays **dropped** — snapshot enumeration is a live PVE
+`storage/{id}/content` call and the timeline renders from JSON embedded
+in the page (§4). Only `dir_cache` was built:
 
 ```sql
--- CANDIDATE, not built. Written on cache-miss from the request path;
--- no background job populates it.
 CREATE TABLE dir_cache (
+  username      TEXT NOT NULL,        -- session_data.username, e.g. 'alice@pam'
   volume        TEXT NOT NULL,        -- full volid, e.g. 'pbs:backup/vm/132/2026-08-29T14:48:06Z'
   path          TEXT NOT NULL,        -- the opaque filepath token from file-restore/list ('/' for root)
   listing_json  TEXT NOT NULL,        -- verbatim file-restore/list response
   fetched_at    TEXT NOT NULL,
-  PRIMARY KEY (volume, path)
+  PRIMARY KEY (username, volume, path)
 );
 ```
 
+**Keyed by `username` too, correcting the original sketch above** (which
+only had `(volume, path)`). `pve_client.list_path()`'s in-flight-call
+coalescing (issue #60, §9.1) already had to solve this exact problem:
+file-restore access is permission-gated per PVE ticket, and different
+users can hold different ACL grants on different storages/VMs, so
+serving User B a listing that only ever proved User A's authorization
+would be a real access-control bypass. `dir_cache` reuses the same
+threat model. Caught before implementation, not after — see issue
+#109's discussion.
+
 Invalidation is trivial in practice: a backup snapshot is immutable, so
-a (volume, path) listing never changes once cached. `fetched_at` is
-only there for an optional "evict entries older than N days" sweep to
-cap the file size.
+a `(username, volume, path)` listing never changes once cached.
+`fetched_at` is kept for a possible future "evict entries older than N
+days" sweep to cap the file size — not built; the file has stayed small
+in practice (one row per distinct listing a user has ever viewed, no
+background growth).
+
+Reused for what it actually turned out to fix: originally scoped as
+"optional, perf only" (§4), then re-scoped after issue #109 (a real
+host-instability report) into a genuine stability mitigation — see
+§9.1's "Helper-VM stampede" writeup for why cutting how *often* this
+app calls PVE matters as much as capping how many calls run *at once*.
 
 ## 7. Auth & TLS — how the current system works
 
@@ -2667,12 +2685,11 @@ record):**
 - **Backend:** Python, FastAPI — one small process, typed surface for a
   handful of endpoints (list snapshots, list a path, download, later
   push-to-guest).
-- **Storage:** none currently — the app is stateless and reads
-  everything live from the PVE API each request. SQLite is held in
-  reserve for one optional thing only: a lazily-populated
-  directory-listing cache (§6, PH.6). If added it stays a single file
-  written from the request path — never a system of record, never a
-  background job.
+- **Storage:** the app is otherwise stateless and reads everything live
+  from the PVE API each request. The one exception (PH.6, issue #109):
+  a lazily-populated SQLite directory-listing cache (§6) — a single
+  file written from the request path, never a system of record, never
+  a background job.
 - **Frontend:** server-rendered HTML + htmx + Alpine.js — the timeline
   is a few dozen DOM nodes reacting to small JSON payloads; this needs
   no build pipeline, no `node_modules`, no bundler to keep patched.
@@ -2742,26 +2759,39 @@ recorded here so the ceiling is known before anyone leans on it.
   other request (auth included) until it finishes. Single-file
   `/api/download` is unaffected — it streams. *Fix: stream the archive
   as it's built; move compression to a thread (`run_in_executor`).*
-- **No directory-listing cache.** Every `/api/browse` / `/api/tree` is a
-  live `file-restore/list` = the ~3s cold helper-VM round trip (§3).
-  Scrubbing N snapshots in one folder pays it N times; revisiting pays
-  again. This is the main day-to-day limit. *Fix: PH.6.*
+- **Directory-listing cache — built (PH.6, issue #109).** Was the main
+  day-to-day limit: every `/api/browse` / `/api/tree` was a live
+  `file-restore/list` = the ~3s cold helper-VM round trip (§3), paid
+  again on every revisit. `dir_cache` (§6) makes repeat navigation
+  instant — see below for why this turned out to matter for stability,
+  not just responsiveness.
 - **Helper-VM stampede — mitigated (issue #60), tightened (issue #109).**
   Proxmox boots an ephemeral helper VM per cold snapshot browsed, and
   exposes no API to list or stop those VMs directly — they aren't
   visible as regular guests and self-terminate on PVE's own internal
   idle timeout, so this app has no way to tear one down early. The only
-  lever it has is limiting how many `file-restore/list` calls it makes:
-  `pve_client.list_path()` caps in-flight calls to PVE via a semaphore
-  (`FILE_RESTORE_LIST_MAX_CONCURRENCY`, default **2** — callers beyond
-  the cap queue rather than fail) and coalesces identical concurrent
-  requests, keyed by `(session.username, volume, filepath)` so one
-  user's in-flight call is never handed to a second user without PVE
-  re-checking that user's own permission. This caps the app's own
-  contribution to the stampede; it does not (and cannot) cap what PVE
-  itself decides to do with the calls that do go through. PH.6's
-  directory-listing cache would still reduce the underlying call volume
-  further — this is a ceiling, not a replacement for that.
+  levers it has: limiting how many `file-restore/list` calls it makes,
+  and limiting how *often* it needs to make one at all.
+  `pve_client.list_path()` (in this order):
+  1. Checks `dir_cache` first (PH.6) — a hit skips everything below.
+     Since a backup snapshot is immutable, this is a pure win for any
+     repeat visit, and timeline scrubbing is disproportionately
+     revisit-heavy (dragging back and forth over already-seen points is
+     normal scrub UX).
+  2. Coalesces identical concurrent requests, keyed by
+     `(session.username, volume, filepath)` so one user's in-flight
+     call is never handed to a second user without PVE re-checking
+     that user's own permission (`dir_cache` is keyed the same way, for
+     the same reason — see §6).
+  3. Caps in-flight calls to PVE via a semaphore
+     (`FILE_RESTORE_LIST_MAX_CONCURRENCY`, default **2** — callers
+     beyond the cap queue rather than fail).
+
+  This caps the app's own contribution to the stampede; it does not
+  (and cannot) cap what PVE itself decides to do with the calls that do
+  go through, and a first-time visit to N distinct new snapshots still
+  needs N live calls regardless of caching — PH.6 and the concurrency
+  cap are complementary, not substitutes for each other.
 
   **Why 2, not 4 (issue #109, 2026-09-30):** a user reported their PVE
   host effectively crashing (unresponsive, possibly HA-fenced) while
@@ -2779,6 +2809,58 @@ recorded here so the ceiling is known before anyone leans on it.
   node it can't reach via the API). 2 guarantees at least one of PVE's
   three shared slots stays free at all times, regardless of what this
   app is doing.
+
+  **Confirmed independently (issue #104, credit to reporter `scyto`):**
+  a second live report, with a precise root cause this project's own
+  research hadn't nailed down yet — `file-restore/list` is `protected =>
+  1` in Proxmox's `PVE::API2::Storage::FileRestore`, so `pveproxy`
+  *always* hands it to `pvedaemon` specifically (not a "probably one of
+  the two daemons" guess, as this doc originally hedged). Their
+  reproduction: with the old default of 4, all three of `pvedaemon`'s
+  workers went busy servicing file-restore listings, and `POST
+  /access/ticket` (an ordinary PVE login) then queued behind them —
+  reported as "Proxmox logins stopped working on the node set as
+  PVE_HOST until the portal was stopped," not a crash in the sense of a
+  panic/OOM, but effectively as disruptive. They now run with
+  `FILE_RESTORE_LIST_MAX_CONCURRENCY=1` in production and suggested "1,
+  or at most 2" as the new default — this project chose 2, the upper
+  end of that range.
+
+  **New fact from that report, not previously documented:** every
+  helper VM boots on **`PVE_HOST`'s node specifically**, regardless of
+  which node the actual guest/VM being browsed lives on. In a
+  multi-node cluster, this concentrates *all* file-restore traffic —
+  from every guest, on every node — onto one node's `pvedaemon` worker
+  pool. That node's API capacity is a single point of contention for
+  the whole cluster's file-restore experience, not just for guests
+  local to it.
+
+  **Raising PVE's own worker count is possible, and a legitimate lever
+  for an admin who has headroom to spare** — `MAX_WORKERS=<n>` in
+  `/etc/default/pvedaemon` on `PVE_HOST`'s node, then `systemctl restart
+  pvedaemon` to apply it. What this actually trades off, worth stating
+  plainly since it's easy to under- or over-estimate:
+  - `pvedaemon`'s worker pool isn't scoped to file-restore — it's
+    *every* protected/privileged PVE API call on that node (logins,
+    starting/stopping guests, most write operations). Raising
+    `MAX_WORKERS` gives more headroom to all of them at once, not just
+    to this app; it's a node-wide capacity change, not something scoped
+    to this app's traffic.
+  - Each worker is a forked `pvedaemon` process held open for the
+    duration of whatever it's servicing — for a file-restore listing,
+    that's the full ~3s+ cold helper-VM boot. More workers means more
+    of those held open concurrently, which costs memory and process
+    overhead proportional to the node's own normal API load, not
+    something this project has measured or can respec on the
+    reader's behalf. Treat it as "more concurrent capacity, at a
+    node-resource cost scaled to how busy that node's API already is,"
+    not a free unlock — raise it deliberately, on a node you've
+    confirmed has spare capacity, not as a default recommendation.
+  - This app's own `FILE_RESTORE_LIST_MAX_CONCURRENCY` should still
+    stay comfortably under whatever `MAX_WORKERS` ends up being (same
+    "always leave at least one slot free" reasoning as the default-2
+    choice above) — raising PVE's pool size doesn't remove the need for
+    this app's own cap, it just changes what a safe value for it is.
 - **No pagination.** A directory with tens of thousands of entries
   (Maildir, `node_modules`, WinSxS) returns the full list, renders every
   row into the HTML partial, and the client sorts/filters all of it in

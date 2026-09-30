@@ -10,8 +10,8 @@ Full rationale, architecture, and current-system reference (auth, TLS,
 data model, stack, risks/scaling, deployment) live in `docs/plan.md` —
 read it before writing code. It's the **living** doc; don't let it
 drift from reality. Three companion docs, kept separate on purpose:
-- **`TODO.md`** — open work (optional PH.6 cache, push-to-guest
-  follow-ons, known limitations/tech debt).
+- **`TODO.md`** — open work (push-to-guest follow-ons, known
+  limitations/tech debt).
 - **`CHANGELOG.md`** — what shipped, per release (Keep a Changelog +
   SemVer; see `docs/dev/versioning.md`).
 - **`docs/archive/plan-phases-0-4.md`** — frozen historical record of
@@ -29,17 +29,21 @@ storages/namespaces (#43), and **push-to-guest restore** — shipped in
 v1.1.0: single-file, Direct Network Transfer, and multi-file/directory
 bundles via `qemu-guest-agent` (PH.5, issues #5/#22/#24). See
 `CHANGELOG.md` for release-by-release detail and `TODO.md` for what's
-left — PH.6 (a directory-listing cache) is optional/perf-only and the
-only remaining phase; everything else open is follow-on refinements.
+left — every planned phase has shipped, including PH.6 (a
+directory-listing cache, issue #109); everything open in `TODO.md` is
+follow-on refinement.
 
-**No database.** The app is stateless — snapshot list and every
-directory listing are read live from the PVE API per request. See
-`docs/plan.md` §4 for why the originally-planned indexer/poll turned
-out unnecessary, and §6 for the one piece of persistence still on the
-table (deferred, optional PH.6). Issue #30 added a designated writable
-directory (`PFR_DATA_DIR`, provisioned by the systemd unit / a Docker
-volume) for future small state — nothing writes there yet, and it does
-not change the "no database, no extra service" rule.
+**No database, except one small cache.** The app is otherwise
+stateless — the snapshot list and any not-yet-cached directory listing
+are read live from the PVE API per request. See `docs/plan.md` §4 for
+why the originally-planned indexer/poll turned out unnecessary. The one
+exception is PH.6 (issue #109): a lazily-populated SQLite
+directory-listing cache under `PFR_DATA_DIR` (issue #30's designated
+writable directory, provisioned by the systemd unit / a Docker
+volume) — a single file written from the request path, never a system
+of record, never a background job. See `docs/plan.md` §6. This doesn't
+change the broader "no extra service" rule — it's a file, not a
+service.
 
 **PBS is required.** Everything hangs off Proxmox's File Restore
 feature, which per Proxmox is PBS-only — plain `vzdump` backups on
@@ -70,14 +74,15 @@ scope (`docs/plan.md` §2).
   no build pipeline, no SPA framework, no extra services beyond the one
   backend process. Durable state, when a feature genuinely needs it,
   goes in `PFR_DATA_DIR` (issue #30) as a single small file written from
-  the request path — never a background job, never a separate service,
-  and SQLite only if PH.6's directory-listing cache is taken.
+  the request path — never a background job, never a separate service.
+  SQLite is reserved for exactly this shape of need; PH.6's
+  directory-listing cache is the one feature that's taken it so far.
 
 ## Stack (decided, see `docs/plan.md` §8 for why)
 - Backend: Python, FastAPI
-- Storage: none written today (stateless). `PFR_DATA_DIR` (issue #30)
-  is the provisioned location for future small state — e.g. PH.6's
-  lazily-populated directory-listing cache (schema in `docs/plan.md` §6)
+- Storage: otherwise stateless. `PFR_DATA_DIR` (issue #30) holds PH.6's
+  lazily-populated directory-listing cache (schema in `docs/plan.md`
+  §6) and is the provisioned location for any future small state
 - Frontend: server-rendered HTML + htmx + Alpine.js
 - Timeline widget: hand-rolled inline SVG (no charting library — nothing
   off the shelf fits "date axis, one dot per discrete event, drag to

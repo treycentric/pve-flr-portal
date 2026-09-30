@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 import httpx
 import zstandard
 
+from . import dir_cache
 from .auth import SessionData, pve_headers
 from .config import settings
 from .guest_agent_lock import call_with_retries, guest_agent_command
@@ -260,6 +261,12 @@ async def list_path(session: SessionData, volume: str, filepath: str = "/") -> l
     helper VM on the PVE node, and PVE exposes no API to cap or tear
     those down directly (docs/plan.md §9.1 "Helper-VM stampede") - so
     this throttles/coalesces the calls this app makes instead:
+      - PH.6 (issue #109): a persistent `dir_cache` hit skips all of the
+        below entirely - a backup snapshot is immutable, so once this
+        user has seen a (volume, path) listing it never needs fetching
+        again. This is what actually reduces load on PVE's shared,
+        node-wide API worker pool during a scrub session (mostly
+        revisits) - the mechanisms below only bound the worst case.
       - `_list_semaphore` caps how many calls are in flight to PVE at
         once (FILE_RESTORE_LIST_MAX_CONCURRENCY); callers beyond the cap
         queue rather than fail, so a fast timeline drag-scrub gets
@@ -271,11 +278,16 @@ async def list_path(session: SessionData, volume: str, filepath: str = "/") -> l
         just `(volume, filepath)`: file-restore access is permission-
         gated per PVE ticket, so sharing a result across two different
         users' sessions would let a second user see data PVE never
-        actually authorized for them.
+        actually authorized for them. `dir_cache` is keyed the same way
+        for the identical reason - see its own module docstring.
     `asyncio.shield` keeps a caller's own cancellation (e.g. the browser
     request disconnecting) from cancelling the underlying task while
     other callers may still be waiting on it.
     """
+    cached = await dir_cache.get(session.username, volume, filepath)
+    if cached is not None:
+        return cached
+
     key = (session.username, volume, filepath)
     task = _inflight_list_calls.get(key)
     if task is None:
@@ -299,7 +311,12 @@ async def _fetch_list(session: SessionData, volume: str, filepath: str) -> list[
                 headers=pve_headers(session),
             )
             resp.raise_for_status()
-            return resp.json()["data"]
+            data = resp.json()["data"]
+    # Written once per unique (username, volume, filepath) - inside the
+    # semaphore's single owning task, not by every coalesced caller -
+    # and only ever from a genuinely fresh, successful PVE response.
+    await dir_cache.set(session.username, volume, filepath, data)
+    return data
 
 
 def clear_list_path_state() -> None:
