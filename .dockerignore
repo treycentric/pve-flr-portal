@@ -3,8 +3,16 @@ venv/
 __pycache__/
 *.pyc
 .git/
+.github/
 .env
 certs/
+data/
 node_modules/
 tests/
+docs/
+deploy/
+scripts/
+package.json
+package-lock.json
+run-tests.*
 *.log

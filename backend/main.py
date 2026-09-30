@@ -19,6 +19,7 @@ from starlette.exceptions import HTTPException
 
 from . import (
     auth,
+    dir_cache,
     guest_agent,
     guest_browse,
     guest_original_location,
@@ -227,6 +228,20 @@ def _parse_volid(volid: str) -> tuple[str, str, str]:
 async def index(request: Request, task: str | None = None, session: SessionData = Depends(auth.get_session)):
     listing = await pve_client.list_backup_archives(session)
     archives = listing.archives
+    if not listing.errors:
+        # PH.6 cache GC (issue #109 follow-up): a snapshot can disappear
+        # (PBS retention pruning) or this user's access to it can be
+        # revoked after it was cached - neither is detectable from
+        # dir_cache alone, so reconcile against this request's own
+        # live, permission-filtered archive list. Skipped entirely if
+        # any configured storage errored - a transient PVE hiccup must
+        # never look like "nothing exists anymore" and wipe good cache
+        # entries; better to leave possibly-stale rows a little longer
+        # than to wrongly nuke everything on a blip.
+        try:
+            await dir_cache.evict_missing(session.username, frozenset(a["volid"] for a in archives))
+        except Exception:
+            _log.exception("dir_cache eviction failed - leaving cached entries as-is")
     try:
         guest_names = await pve_client.list_guest_names(session)
     except httpx.HTTPStatusError:
@@ -287,18 +302,30 @@ async def index(request: Request, task: str | None = None, session: SessionData 
         "index.html",
         {
             "snapshots": snapshots,
-            "snapshots_json": json.dumps(snapshots),
+            "snapshots_json": _json_for_script(snapshots),
             "guest_vmid": guest_vmid,
             "guest_type": guest_type,
             "guest_label": guest_label,
-            "guest_json": json.dumps({"type": guest_type, "vmid": guest_vmid, "label": guest_label}),
-            "groups_json": json.dumps(groups),
+            "guest_json": _json_for_script({"type": guest_type, "vmid": guest_vmid, "label": guest_label}),
+            "groups_json": _json_for_script(groups),
             "current_identity": session.username,
             "storage_errors": [dataclasses.asdict(e) for e in listing.errors],
             "app_version": __version__,
             "repo_url": REPO_URL,
         },
     )
+
+
+def _json_for_script(data) -> str:
+    """json.dumps() for embedding inside a <script> block via the `|safe`
+    filter. json.dumps() doesn't escape "<", so a value containing the
+    literal text "</script>" - e.g. a PVE guest display name, which any
+    user able to rename a VM/CT controls, far below file-restore/PBS
+    privilege - would close the script element early and let the
+    attacker's own markup/script run in every other user's session
+    (stored XSS). Escaping "<" as its Unicode escape is the standard
+    mitigation and is a no-op for JSON parsing."""
+    return json.dumps(data).replace("<", "\\u003c")
 
 
 def _type_label(entry: dict, at_root: bool, filesystem_root: bool = False) -> str:

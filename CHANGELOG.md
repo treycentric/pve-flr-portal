@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See [`docs/dev/versioning.md`](docs/dev/versioning.md) for how entries
 here are generated from commit messages.
 
+## [1.7.0] - 2026-09-29
+
+### Added
+- distinct icon for partition/LVM-volume filesystem roots (#83) (592ce02)
+- **deploy:** pin install/update to tagged releases instead of main (#90) (f616e8e)
+
+### Fixed
+- escape guest-controlled filepaths/names to prevent stored XSS (#101) (de8380f)
+
 ## [1.6.0] - 2026-09-25
 
 ### Added

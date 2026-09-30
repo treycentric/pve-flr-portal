@@ -135,6 +135,11 @@ class Settings:
     port: int
     tls_cert_file: str
     tls_key_file: str
+    # Whether run.py serves with uvicorn's auto-reload (restart on a code
+    # change). On by default for a source checkout; the container image
+    # turns it off (PFR_RELOAD=false), since its code never changes under
+    # it and reload adds a file-watching supervisor process.
+    reload: bool
 
     # PH.5: minimum gap this app waits between the *end* of one
     # guest-agent command and the *start* of its own next one, on the
@@ -236,6 +241,16 @@ class Settings:
     # timeline drag-scrub gets serialized, not rejected. Paired with
     # in-flight request coalescing (pve_client.list_path) for the exact-
     # duplicate case (two scrubs landing on the same snapshot+path).
+    #
+    # Default lowered from 4 to 2 (issue #109) after a real host
+    # instability report during timeline scrubbing. PVE's own privileged
+    # API worker pool (pvedaemon/pveproxy, confirmed via
+    # PVE/Service/pvedaemon.pm and PVE/Service/pveproxy.pm: hardcoded
+    # `max_workers => 3`) is shared *node-wide* across every user and
+    # every operation - not scoped to this app or to file-restore alone.
+    # Setting this to 3 would still let this app claim every available
+    # slot during a fast scrub, starving all other node traffic for that
+    # window; 2 guarantees at least 1 slot stays free at all times.
     file_restore_list_max_concurrency: int
 
     # Issue #30: one writable directory for the app's own small, durable
@@ -288,8 +303,9 @@ settings = Settings(
     port=_int("PORT", 8008),
     tls_cert_file=_get("TLS_CERT_FILE", "certs/portal.crt"),
     tls_key_file=_get("TLS_KEY_FILE", "certs/portal.key"),
+    reload=_bool("PFR_RELOAD", True),
     guest_agent_min_command_gap_seconds=_float("GUEST_AGENT_MIN_COMMAND_GAP_SECONDS", 0.0),
-    file_restore_list_max_concurrency=_int("FILE_RESTORE_LIST_MAX_CONCURRENCY", 4),
+    file_restore_list_max_concurrency=_int("FILE_RESTORE_LIST_MAX_CONCURRENCY", 2),
     restore_data_nics_json=_get("RESTORE_DATA_NICS", "[]"),
     restore_download_token_ttl_seconds=_float("RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS", 120.0),
     restore_data_nic_port=_int("RESTORE_DATA_NIC_PORT", 0),

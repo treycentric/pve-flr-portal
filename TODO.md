@@ -75,15 +75,32 @@ commit.
 - #52 — bake certbot + a DNS-01 plugin into the LXC/Docker build, with a
   renewal deploy hook and a first-run helper. Design in the issue.
 
-## PH.6 — Directory-listing cache (optional, perf only)
+## PH.6 — Directory-listing cache — SHIPPED (issue #109)
 
-A lazily-populated SQLite `dir_cache` keyed by `(volid, path)`, written
-on `/api/browse` cache-miss (schema already sketched in
-`docs/plan.md` §6). Every uncached `file-restore/list` costs ~3s (cold
-helper-VM boot); scrubbing N snapshots in the same folder currently
-pays that N times. The app is correct without this — it's purely "stop
-paying the same 3s tax repeatedly." Single SQLite file, no background
-job, per CLAUDE.md's "no extra services" constraint. Est. 1-2 days.
+A lazily-populated SQLite `dir_cache`, written on `/api/browse`
+cache-miss (schema in `docs/plan.md` §6, `backend/dir_cache.py`). Keyed
+by `(username, volume, path)` — not just `(volid, path)` as originally
+sketched, matching `pve_client.list_path()`'s existing per-user
+authorization threat model (a cache shared across users would let one
+user see a listing PVE never actually authorized for them). Every
+uncached `file-restore/list` costs ~3s (cold helper-VM boot); scrubbing
+N snapshots in the same folder used to pay that N times. Single SQLite
+file, no background job, per CLAUDE.md's "no extra services" constraint.
+
+**No longer "optional, perf only" (2026-09-30):** issue #109 confirmed
+PVE's own privileged API worker pool is a small (default 3), shared,
+node-wide resource that this app's `file-restore/list` calls compete
+for against every other operation on the node — a real host-instability
+report traced back to it. `FILE_RESTORE_LIST_MAX_CONCURRENCY` (lowered
+to 2) caps how many calls this app makes *at once*, but doesn't reduce
+how *often* it needs to call PVE at all. Timeline scrubbing is
+disproportionately revisit-heavy — dragging back and forth over
+already-seen points is normal scrub UX — so a cache turns most of that
+traffic into free local hits instead of new calls competing for one of
+PVE's few shared worker slots. It does **not** fully replace the
+concurrency cap: a first-time visit to N distinct new snapshots still
+needs N live calls regardless of caching. Both mitigations matter
+together.
 
 **More motivated after #80:** hiding unmountable partitions/disks/LVM
 volumes (main.py's `_filter_unmountable_children`/
@@ -129,7 +146,9 @@ wasn't built for.
 - [x] **No request coalescing/throttle on `file-restore/list` calls** —
   fixed in #60: `pve_client.list_path()` caps in-flight calls
   (`FILE_RESTORE_LIST_MAX_CONCURRENCY`) and coalesces identical
-  concurrent requests per-user. (Mostly moot once PH.6's cache lands.)
+  concurrent requests per-user. Mostly moot on a cache hit now that
+  PH.6's cache has landed (#109) — this still matters for first-time
+  visits to new snapshots, which always need a live call regardless.
 - [ ] **No pagination on huge directories** (Maildir, `node_modules`,
   WinSxS-scale folders) — full listing renders into one HTML partial
   and gets sorted/filtered entirely in JS. Fix: paginate or virtualize
@@ -155,7 +174,9 @@ wasn't built for.
   can't run multiple uvicorn workers (each would have its own
   `_sessions` dict) or scale horizontally; a backend restart logs
   everyone out. Accepted tradeoff for now; would need session storage
-  moved to disk (SQLite, if PH.6 lands) to lift.
+  moved to disk to lift — PH.6 (#109) already added the SQLite
+  infrastructure this could reuse, but sessions themselves aren't
+  persisted there; that's still open, separate work.
 - [ ] **PVE 2FA/TOTP not handled** — if a target user has a second
   factor on their PVE account, `/access/ticket` needs an extra
   round-trip the login flow doesn't do yet (`backend/auth.py`).

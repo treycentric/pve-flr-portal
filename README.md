@@ -266,7 +266,38 @@ service user. It survives `update.sh` redeploys and container reboots,
 but not a container recreate - see docs/plan.md §10 for what to
 preserve when moving/rebuilding the container.
 
-**Docker, mainly for local dev/testing:**
+**Container image.** Each release is published to GitHub Container
+Registry as `ghcr.io/treycentric/pve-flr-portal:<version>` (also
+`<major>.<minor>` and `latest`), for amd64 and arm64, by
+`.github/workflows/image.yml` once the test suite passes. It runs as an
+unprivileged user (uid 10001) with auto-reload off, and has a
+healthcheck. Configure it with the same variables as `.env.example`,
+passed as environment variables. Everything else in the image can be
+read-only: the app writes only `/app/certs` (its self-signed cert,
+unless you mount your own there), `/app/data`, and the temp directory
+while it builds a download bundle.
+
+```
+docker run -d -p 8008:8008 \
+  -e PVE_HOST=pve.example.com -e PVE_STORAGE=pbs -e PVE_VERIFY_SSL=true \
+  -v pve-flr-certs:/app/certs -v pve-flr-data:/app/data \
+  ghcr.io/treycentric/pve-flr-portal:latest
+```
+
+**Image signing (issue #111).** Every published image is signed with
+[cosign](https://github.com/sigstore/cosign), keyless via the publishing
+workflow's own GitHub Actions OIDC identity - there's no key to manage,
+rotate, or leak. Verify an image actually came from this repo's own
+`image.yml` workflow, not just "someone with a key":
+
+```
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/treycentric/pve-flr-portal/\.github/workflows/image\.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/treycentric/pve-flr-portal:latest
+```
+
+**Docker, building from source for local dev/testing:**
 
 ```
 docker compose up --build

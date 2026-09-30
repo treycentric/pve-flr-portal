@@ -19,3 +19,19 @@ App icon / favicon  (backend/static/assets/logo.png)
                https://www.svgrepo.com/
     License  : GPL (GPL-2.0-or-later) — compatible with this project's
                AGPL-3.0.
+
+htmx 1.9.12  (backend/static/vendor/htmx.min.js)
+
+    Unmodified dist/htmx.min.js from the htmx.org npm package, served
+    locally instead of from a CDN.
+
+    Source   : https://htmx.org/  (npm: htmx.org@1.9.12)
+    License  : Zero-Clause BSD (0BSD), backend/static/vendor/htmx.LICENSE
+
+Alpine.js 3.14.1  (backend/static/vendor/alpine.min.js)
+
+    Unmodified dist/cdn.min.js from the alpinejs npm package, served
+    locally instead of from a CDN.
+
+    Source   : https://alpinejs.dev/  (npm: alpinejs@3.14.1)
+    License  : MIT, backend/static/vendor/alpine.LICENSE.md

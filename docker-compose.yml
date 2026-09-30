@@ -3,6 +3,9 @@
 services:
   pve-flr-portal:
     build: .
+    # The image runs as uid 10001, which can't write a ./certs that Docker
+    # created as root on a Linux host, so local dev runs it as root.
+    user: "0"
     ports:
       - "8008:8008"
     volumes:
@@ -38,6 +41,7 @@ services:
   # `docker compose up`: docker compose --profile hostnet up pve-flr-portal-hostnet
   pve-flr-portal-hostnet:
     build: .
+    user: "0"  # as above
     network_mode: host
     volumes:
       - ./.env:/app/.env:ro
