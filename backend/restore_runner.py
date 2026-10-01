@@ -43,7 +43,7 @@ from .restore_chunking import (
     scratch_filename,
     scratch_path_sep,
 )
-from .restore_jobs import RestoreJob, RestoreJobManager, RestoreStatus
+from .restore_jobs import RestoreJob, RestoreJobManager
 
 _log = logging.getLogger("pve_flr_portal.restore_runner")
 
@@ -754,7 +754,7 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
     guest_os_family: str | None = None
     tmp_dir_ctx = None
     try:
-        job.status = RestoreStatus.RUNNING
+        jobs.mark_running(job.id)
         job.log(f"Starting restore of {len(job.items)} item(s) -> {job.destination!r}.")
         await ensure_fresh_ticket(job.session)
 
@@ -926,7 +926,7 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             jobs.mark_cancelled(job.id)
             return
 
-        job.status = RestoreStatus.VERIFYING
+        jobs.mark_verifying(job.id)
         job.log("Verifying every restored file against the embedded manifest.")
         if guest_os_family == "windows":
             manifest_guest_path = ntpath.join(job.destination, restore_bundle.MANIFEST_NAME)
@@ -994,7 +994,7 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
     scratch_dir: str | None = None
     guest_os_family: str | None = None
     try:
-        job.status = RestoreStatus.RUNNING
+        jobs.mark_running(job.id)
         job.log(f"Starting restore of {job.source!r} -> {job.destination!r}.")
         await ensure_fresh_ticket(job.session)
 
@@ -1210,7 +1210,7 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
             job.progress_current += 1
 
         if job.verify:
-            job.status = RestoreStatus.VERIFYING
+            jobs.mark_verifying(job.id)
             job.log("Verifying checksum against the source.")
             expected = hasher.hexdigest()
             verified = await _verify_checksum(job, expected, guest_os_family)

@@ -144,6 +144,20 @@ def clear_dir_cache():
 
 
 @pytest.fixture(autouse=True)
+def clear_job_history():
+    """Issue #124: job_history persists to disk (PFR_DATA_DIR, same
+    shared tmp dir as dir_cache above) - without this, a job row written
+    by one test (or the lifespan startup reconciliation TestClient
+    triggers on every `with TestClient(...) as c:`) would leak into a
+    later test's own job-list/history assertions."""
+    from backend import job_history
+
+    job_history.clear()
+    yield
+    job_history.clear()
+
+
+@pytest.fixture(autouse=True)
 def clear_windows_disk_cache():
     """Same leak-between-tests convention as sessions/restore jobs above,
     for issue #77's per-vmid whole-VM disk-bus/drive-letter cache -

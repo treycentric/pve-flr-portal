@@ -1247,6 +1247,93 @@ the Cancel button for a job the session can't act on — the real
 enforcement is server-side either way, this just avoids inviting a
 guaranteed-403 click.
 
+**Persisted job history + restart reconciliation (issue #124).**
+`RestoreJobManager` above is still in-memory-only for its own
+bookkeeping (unchanged tradeoff, same as `auth._sessions`) — but every
+status transition now also writes through to `backend/job_history.py`,
+a **separate** SQLite file (`job_history.sqlite`, under `PFR_DATA_DIR`)
+from PH.6's `dir_cache.sqlite3` — different lifecycle (a job record is
+meant to outlive the process; a directory listing is just re-fetchable
+on demand) and different sensitivity (a job's log/source/destination
+can carry real filesystem paths pulled out of a guest). SQLite files
+are cheap; no reason to share one for unrelated concerns.
+
+- **Write timing.** A row is upserted at job creation (`queued`) and at
+  every coarse status transition — `RestoreJobManager.create()` /
+  `mark_running()` / `mark_verifying()` / `mark_done()` /
+  `mark_failed()` / `mark_cancelled()`, all now call
+  `job_history.persist_sync()`. `restore_runner.py`'s two direct
+  `job.status = RestoreStatus.RUNNING`/`VERIFYING` assignments became
+  `jobs.mark_running(job.id)`/`jobs.mark_verifying(job.id)` calls so
+  *every* status change goes through the manager, not just the terminal
+  ones — a job that dies between `create()` and its first transition
+  still gets a `queued` row to reconcile later, instead of silently
+  having no record at all. Deliberately **not** written on every
+  `progress_current` tick (a chunked transfer can be hundreds of
+  chunks) — the persisted record only matters once this process's own
+  in-memory copy is gone (a restart), at which point the job is
+  necessarily terminal already (reconciliation, below) and live
+  mid-transfer progress is moot by then.
+- **Writes are synchronous**, not wrapped in `asyncio.to_thread` the
+  way `dir_cache` is. `dir_cache` offloads because it's a genuine hot
+  path (every directory browse, every user). A job's status transitions
+  happen a handful of times over its *entire* lifetime, so a brief
+  blocking SQLite write on the event loop thread is an acceptable,
+  bounded cost here — and avoids threading `async`/`await` through
+  `RestoreJobManager`'s many call sites across `restore_runner.py` for
+  no real benefit. Reads (the list endpoint's history merge, the
+  retention sweep, startup reconciliation) do use `asyncio.to_thread`,
+  since those run from `main.py`'s async routes/startup hook, where
+  blocking the loop would stall every other concurrent request, not
+  just one job's own transition.
+- **Retention.** `JOB_HISTORY_RETENTION_DAYS` (default 7).
+  `job_history.evict_expired()` deletes rows whose `finished_at` is
+  past the cutoff — called opportunistically from `GET
+  /api/restore-jobs` on every load, no scheduled background job, same
+  pattern as `dir_cache.evict_missing()`. A still-active row
+  (`finished_at IS NULL`) is never swept by age alone.
+- **Restart reconciliation.** `job_history.reconcile_interrupted()`
+  runs once, before serving any request, from `main.py`'s `lifespan`
+  context manager (FastAPI's modern startup/shutdown hook — this app
+  had no prior startup hook to extend, so this is the first one).
+  Every row still `queued`/`running`/`verifying` at that point is
+  necessarily left over from a previous process — nothing in the
+  current process could have created an active job yet — so each is
+  closed out to a new terminal status, **`RestoreStatus.INTERRUPTED`**,
+  with a log line and `finished_at` set to the reconciliation time.
+  Deliberately its own status, not folded into `FAILED` — nothing about
+  the restore itself failed, the process just didn't survive to finish
+  tracking it. `ACTIVE_STATUSES` excludes it (terminal, like
+  done/failed/cancelled), and since this app has no failure-counting or
+  notification logic at all today (checked — `activeCount` in `app.js`
+  is the only status-driven aggregate, and it already only counts
+  queued/running/verifying), there was nothing else to decide about how
+  `INTERRUPTED` should be treated.
+- **The job list merges live + persisted (the issue's open design
+  question, resolved).** "Retention" only means something if history
+  survives a restart, and a restarted process's own
+  `RestoreJobManager` starts empty — so `GET /api/restore-jobs` and the
+  detail endpoint both query `job_history` for anything not in the
+  current process's live job dict (keyed by id, live always wins over
+  its own stale persisted snapshot) and merge the two, sorted by actual
+  start time (`job_history.list_recent()` returns each persisted row
+  with its raw `_started_at` alongside the published `to_detail_dict()`
+  shape — `to_dict()`/`to_detail_dict()` carry no raw timestamp of
+  their own, only derived `elapsed_seconds` — purely so `main.py` can
+  interleave live and persisted entries correctly before stripping
+  `_started_at` back out). A persisted-only entry's `can_cancel` is
+  always `False`: by the time anything is persisted-only, reconciliation
+  has already guaranteed nothing non-terminal survives into
+  `job_history` from a previous process, so there's no "still active"
+  case to cancel. The detail endpoint (log viewer) falls back to
+  `job_history.get()` the same way, so opening the log of a job from a
+  previous process still works within the retention window.
+- **No UI styling needed for the new status.** Checked first: nothing
+  in `app.js`/`style.css` color-codes by status today (`formatStatus()`
+  just renders the raw string, optionally with a `(NN%)` suffix) —
+  `"interrupted"` renders the same generic way every other status
+  already does, no new CSS or JS branch required.
+
 **Session handling for background jobs.** A job holds its *own copy*
 of the requester's `SessionData` (`dataclasses.replace(session)` at
 submission time inside `RestoreJobManager.create()`, not left to the

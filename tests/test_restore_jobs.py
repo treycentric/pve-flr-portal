@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from backend import job_history
 from backend.restore_bundle import BundleItem
 from backend.restore_jobs import RestoreJobManager, RestoreStatus
 
@@ -136,6 +137,50 @@ def test_mark_cancelled_sets_status(manager, session_data):
     manager.mark_cancelled(job.id)
     assert job.status == RestoreStatus.CANCELLED
     assert not job.is_active
+
+
+def test_mark_running_sets_status(manager, session_data):
+    job = _make(manager, session_data)
+    manager.mark_running(job.id)
+    assert job.status == RestoreStatus.RUNNING
+    assert job.is_active
+
+
+def test_mark_verifying_sets_status(manager, session_data):
+    job = _make(manager, session_data)
+    manager.mark_verifying(job.id)
+    assert job.status == RestoreStatus.VERIFYING
+    assert job.is_active
+
+
+def test_mark_running_and_verifying_are_no_ops_for_unknown_id(manager):
+    manager.mark_running("nope")
+    manager.mark_verifying("nope")  # just must not raise
+
+
+def test_interrupted_is_a_terminal_status_not_counted_active():
+    from backend.restore_jobs import ACTIVE_STATUSES
+
+    assert RestoreStatus.INTERRUPTED not in ACTIVE_STATUSES
+
+
+async def test_create_and_every_mark_method_persist_to_job_history(manager, session_data):
+    """Issue #124: every status transition writes through to
+    job_history, not just the terminal ones - see restore_jobs.py's
+    module docstring for why."""
+    job = _make(manager, session_data)
+    assert (await job_history.get(job.id))["status"] == "queued"
+
+    manager.mark_running(job.id)
+    assert (await job_history.get(job.id))["status"] == "running"
+
+    manager.mark_verifying(job.id)
+    assert (await job_history.get(job.id))["status"] == "verifying"
+
+    manager.mark_done(job.id)
+    detail = await job_history.get(job.id)
+    assert detail["status"] == "done"
+    assert any("completed successfully" in line for line in detail["log"])
 
 
 def test_to_dict_shape_matches_ui_columns(manager, session_data):

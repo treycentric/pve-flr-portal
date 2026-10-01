@@ -5,6 +5,7 @@ import json
 import logging
 import tarfile
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
@@ -23,6 +24,7 @@ from . import (
     guest_agent,
     guest_browse,
     guest_original_location,
+    job_history,
     pve_client,
     restore_bundle,
     restore_download,
@@ -34,8 +36,23 @@ from .config import settings
 from .restore_chunking import DEFAULT_CHUNK_SIZE_BYTES
 from .version import REPO_URL, __version__
 
-app = FastAPI(title="pve-flr-portal")
 _log = logging.getLogger("pve_flr_portal.main")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Issue #124: reconcile any restore job left non-terminal by a
+    previous process (crash, redeploy) before serving any request - see
+    job_history.reconcile_interrupted()'s own docstring for why this is
+    safe to run unconditionally on every startup (nothing in *this*
+    process could have created an active job yet)."""
+    reconciled = await job_history.reconcile_interrupted()
+    if reconciled:
+        _log.info("Reconciled %d restore job(s) left in progress by a previous run as interrupted", len(reconciled))
+    yield
+
+
+app = FastAPI(title="pve-flr-portal", lifespan=_lifespan)
 
 _TEMPLATES_DIR = "backend/templates"
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
@@ -982,20 +999,47 @@ async def restore_jobs_list(
     since that method has no session to check ownership against. The
     server-side check in restore_jobs_cancel() below is the real
     enforcement; this only drives whether the UI's Cancel button is
-    even enabled, so a non-owner isn't invited to try and get a 403."""
+    even enabled, so a non-owner isn't invited to try and get a 403.
+
+    Issue #124: merges this process's live, in-memory jobs with
+    job_history's persisted rows for anything this process didn't
+    itself create (i.e. survivors from a previous run, within
+    JOB_HISTORY_RETENTION_DAYS) - a live job always wins over its own
+    stale persisted snapshot, keyed by id. Also sweeps expired history
+    rows opportunistically here (no background job, same pattern as
+    dir_cache.evict_missing()) rather than on a schedule."""
     is_admin = auth.is_job_admin(session)
     can_see_all = (not settings.restrict_jobs_to_own) or is_admin
+
+    await job_history.evict_expired(settings.job_history_retention_days)
+    live_jobs = restore_jobs.manager.list_jobs()
+    live_ids = frozenset(j.id for j in live_jobs)
+    persisted = await job_history.list_recent(settings.job_history_retention_days, exclude_ids=live_ids)
+
+    entries: list[tuple[float, dict]] = [
+        (
+            job.started_at,
+            {**job.to_dict(), "can_cancel": job.is_active and (job.requested_by == session.username or is_admin)},
+        )
+        for job in live_jobs
+    ]
+    for detail in persisted:
+        entry = {k: v for k, v in detail.items() if k not in ("log", "_started_at")}
+        # A persisted-only entry is never cancellable - reconcile_interrupted()
+        # guarantees nothing non-terminal survives into job_history past
+        # this process's own startup, so there's no "still active" case here.
+        entry["can_cancel"] = False
+        entries.append((detail["_started_at"], entry))
+    entries.sort(key=lambda pair: pair[0], reverse=True)
+
     requested_scope = scope or ("mine" if settings.restrict_jobs_to_own else "all")
     effective_scope = requested_scope if (requested_scope == "mine" or can_see_all) else "mine"
-    jobs = restore_jobs.manager.list_jobs()
+    jobs = [entry for _, entry in entries]
     if effective_scope == "mine":
-        jobs = [j for j in jobs if j.requested_by == session.username]
+        jobs = [j for j in jobs if j["requested_by"] == session.username]
     return JSONResponse(
         {
-            "jobs": [
-                {**job.to_dict(), "can_cancel": job.is_active and (job.requested_by == session.username or is_admin)}
-                for job in jobs
-            ],
+            "jobs": jobs,
             "scope": effective_scope,
             "can_see_all": can_see_all,
         }
@@ -1011,11 +1055,20 @@ async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.g
 
     Also get_session_keepalive: the log viewer re-polls this on the same
     tick as the list, and watching a log is not activity either (issue
-    #27) - an idle user parked on the log viewer still times out."""
+    #27) - an idle user parked on the log viewer still times out.
+
+    Issue #124: falls back to job_history's persisted record when the
+    id isn't (or isn't anymore) in this process's in-memory
+    RestoreJobManager - the log viewer can still open a job from a
+    previous process within the retention window, same as the list
+    endpoint already shows it there."""
     job = restore_jobs.manager.get(job_id)
-    if job is None:
+    if job is not None:
+        return JSONResponse(job.to_detail_dict())
+    persisted = await job_history.get(job_id)
+    if persisted is None:
         raise HTTPException(status_code=404, detail="No such restore job")
-    return JSONResponse(job.to_detail_dict())
+    return JSONResponse(persisted)
 
 
 @app.post("/api/restore-jobs/{job_id}/cancel")

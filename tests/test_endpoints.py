@@ -19,7 +19,7 @@ import pytest
 main = pytest.importorskip("backend.main", reason="backend.main needs FastAPI")
 from fastapi.testclient import TestClient
 
-from backend import auth, dir_cache, pve_client
+from backend import auth, dir_cache, job_history, pve_client
 
 ARCHIVES = [
     {"volid": "pbs:backup/vm/133/2026-08-30T02:03:57Z", "ctime": 200, "size": 10, "verification": {"state": "ok"}},
@@ -1236,6 +1236,105 @@ def test_restore_jobs_list_empty_when_none_submitted(client):
     assert body["can_see_all"] is True
 
 
+def _persist_historical_job(session_data, **overrides):
+    """Issue #124: simulates a job left behind by a *previous* process -
+    written straight to job_history via a throwaway RestoreJobManager
+    that's never wired into main.app, so it never shows up in the
+    current process's own in-memory restore_jobs.manager."""
+    from backend.restore_jobs import RestoreJobManager
+
+    throwaway = RestoreJobManager()
+    defaults = dict(
+        session=session_data,
+        guest_type="vm",
+        vmid="133",
+        guest_label="web (133)",
+        task_name="Restore 2026-08-30 14:48 -> /etc",
+        snapshot_time="2026-08-30T14:48:06Z",
+        source_volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        source_filepath="L2V0Yy9ob3N0cw==",
+        source="/etc/hosts",
+        destination="/etc",
+    )
+    defaults.update(overrides)
+    return throwaway.create(**defaults)
+
+
+def test_restore_jobs_list_includes_persisted_jobs_from_a_previous_process(client, session_data):
+    import time
+
+    from backend.restore_jobs import RestoreStatus
+
+    job = _persist_historical_job(session_data)
+    job.status = RestoreStatus.DONE
+    job.finished_at = time.time()
+    job_history.persist_sync(job)
+
+    resp = client.get("/api/restore-jobs")
+    body = resp.json()
+    entry = next((j for j in body["jobs"] if j["id"] == job.id), None)
+    assert entry is not None
+    assert entry["status"] == "done"
+    assert entry["can_cancel"] is False
+    assert "log" not in entry
+
+
+def test_restore_jobs_list_live_job_takes_precedence_over_its_own_persisted_row(client, monkeypatch):
+    """A job still tracked by this process's in-memory manager must not
+    also show up a second time via its own (now-stale) persisted row."""
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    resp = client.get("/api/restore-jobs")
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["id"] == submitted["id"]]
+    assert len(matches) == 1
+
+
+def test_restore_jobs_list_omits_persisted_jobs_past_retention(client, monkeypatch, session_data):
+    import time
+
+    from backend.restore_jobs import RestoreStatus
+
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, job_history_retention_days=7))
+    job = _persist_historical_job(session_data)
+    job.status = RestoreStatus.DONE
+    job.finished_at = time.time() - (8 * 86400)
+    job_history.persist_sync(job)
+
+    resp = client.get("/api/restore-jobs")
+    body = resp.json()
+    assert all(j["id"] != job.id for j in body["jobs"])
+
+
+def test_restore_jobs_detail_falls_back_to_persisted_history(client, session_data):
+    from backend.restore_jobs import RestoreStatus
+
+    job = _persist_historical_job(session_data)
+    job.status = RestoreStatus.DONE
+    job.log("ran to completion")
+    job_history.persist_sync(job)
+
+    resp = client.get(f"/api/restore-jobs/{job.id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert any("ran to completion" in line for line in body["log"])
+
+
+def test_restore_jobs_detail_404s_when_not_live_or_persisted(client):
+    resp = client.get("/api/restore-jobs/does-not-exist-anywhere")
+    assert resp.status_code == 404
+
+
 def test_restore_jobs_list_defaults_to_mine_when_restricted(client, monkeypatch):
     monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
     resp = client.get("/api/restore-jobs")
@@ -1437,6 +1536,21 @@ def test_restore_jobs_cancel_requires_auth():
     with TestClient(main.app) as c:
         resp = c.post("/api/restore-jobs/x/cancel", follow_redirects=False)
     assert resp.status_code in (302, 401)
+
+
+async def test_startup_reconciles_jobs_left_active_by_a_previous_process(session_data):
+    """Issue #124: a row still queued/running/verifying when a NEW
+    TestClient enters (triggering main.py's lifespan startup hook) is
+    exactly the shape a crashed/restarted process leaves behind -
+    closed out as interrupted before anything else can see it."""
+    job = _persist_historical_job(session_data)  # left "queued" - never transitioned
+    assert job.is_active
+
+    with TestClient(main.app):
+        pass  # lifespan startup/shutdown is all this test needs to trigger
+
+    detail = await job_history.get(job.id)
+    assert detail["status"] == "interrupted"
 
 
 def test_restore_capabilities_requires_auth():

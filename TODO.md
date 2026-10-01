@@ -137,14 +137,20 @@ requirement folded into the retention ticket:
   The job list's per-job dicts also gained `can_cancel` so the UI can
   grey out the Cancel button proactively. See `docs/plan.md` §7.5's
   "Cancel ownership" subsection.
-- #124 — open: persisted job + log history with a configurable
-  retention window (`JOB_HISTORY_RETENTION_DAYS`, proposed default 7)
-  in a dedicated `job_history.sqlite` under `PFR_DATA_DIR` (deliberately
-  separate from PH.6's `dir_cache.sqlite`). Also needs restart
-  reconciliation: any job still `queued`/`running`/`verifying` when the
-  backend starts up must be closed out as `interrupted` rather than
-  left looking perpetually in-progress, since today's in-memory
-  `RestoreJobManager` loses all job state across a restart.
+- #124 — **SHIPPED.** Persisted job + log history in a dedicated
+  `job_history.sqlite` under `PFR_DATA_DIR` (separate from PH.6's
+  `dir_cache.sqlite3`), with a configurable retention window
+  (`JOB_HISTORY_RETENTION_DAYS`, default 7) swept opportunistically on
+  every job-list load. A row is written at job creation and every
+  status transition, not just at completion. New
+  `RestoreStatus.INTERRUPTED`: `main.py`'s `lifespan` startup hook
+  reconciles any row still `queued`/`running`/`verifying` at boot
+  (necessarily left over from a previous process) to this status
+  instead of leaving it looking perpetually in-progress.
+  `GET /api/restore-jobs`/the detail endpoint merge this process's
+  live, in-memory jobs with persisted rows from previous processes,
+  within the retention window. See `docs/plan.md` §7.5's "Persisted job
+  history + restart reconciliation" subsection.
 
 ## Server-side per-user preferences store (follow-up to #29)
 

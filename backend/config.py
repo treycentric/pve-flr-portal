@@ -250,6 +250,16 @@ class Settings:
     # meaningful to expose here.
     job_admin_privilege: str
 
+    # Issue #124: how many days a *terminal* (done/failed/cancelled/
+    # interrupted) restore job's persisted history row (job_history.py,
+    # a separate SQLite file from PH.6's dir_cache - different lifecycle/
+    # sensitivity, see docs/plan.md §7.5) is kept before an opportunistic
+    # sweep (on the next job-list load, no background job - same pattern
+    # as dir_cache.evict_missing()) deletes it. A still-active row is
+    # never swept by age alone - it ages out once it reaches a terminal
+    # state and crosses this window from there.
+    job_history_retention_days: int
+
     # Issue #60: caps how many `file-restore/list` calls this app has
     # in flight to PVE at once. Each cold call boots an ephemeral helper
     # VM on the PVE node (~3s, docs/plan.md §3) - Proxmox exposes no API
@@ -342,6 +352,7 @@ settings = Settings(
     default_theme=_theme("DEFAULT_THEME", "auto"),
     restrict_jobs_to_own=_bool("RESTRICT_JOBS_TO_OWN", False),
     job_admin_privilege=_get("JOB_ADMIN_PRIVILEGE", "Sys.Audit"),
+    job_history_retention_days=_int("JOB_HISTORY_RETENTION_DAYS", 7),
     data_dir=_path("PFR_DATA_DIR", "data"),
 )
 
