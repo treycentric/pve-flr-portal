@@ -1250,29 +1250,55 @@ guaranteed-403 click.
 **Persisted job history + restart reconciliation (issue #124).**
 `RestoreJobManager` above is still in-memory-only for its own
 bookkeeping (unchanged tradeoff, same as `auth._sessions`) — but every
-status transition now also writes through to `backend/job_history.py`,
-a **separate** SQLite file (`job_history.sqlite`, under `PFR_DATA_DIR`)
-from PH.6's `dir_cache.sqlite3` — different lifecycle (a job record is
-meant to outlive the process; a directory listing is just re-fetchable
-on demand) and different sensitivity (a job's log/source/destination
-can carry real filesystem paths pulled out of a guest). SQLite files
-are cheap; no reason to share one for unrelated concerns.
+status transition and log line now also writes through to
+`backend/job_history.py`, a **separate** SQLite file
+(`job_history.sqlite`, under `PFR_DATA_DIR`) from PH.6's
+`dir_cache.sqlite3` — different lifecycle (a job record is meant to
+outlive the process; a directory listing is just re-fetchable on
+demand) and different sensitivity (a job's log/source/destination can
+carry real filesystem paths pulled out of a guest). SQLite files are
+cheap; no reason to share one for unrelated concerns.
 
-- **Write timing.** A row is upserted at job creation (`queued`), at
-  every coarse status transition — `RestoreJobManager.create()` /
-  `mark_running()` / `mark_verifying()` / `mark_done()` /
-  `mark_failed()` / `mark_cancelled()`, all now call
-  `job_history.persist_sync()` — **and on every `RestoreJob.log()`
-  call** (follow-up, 2026-10-01, from a user question about whether a
-  crash mid-run would lose log lines written since the last status
-  change: it would have, under the original "transitions only" design).
-  `restore_runner.py`'s two direct `job.status =
-  RestoreStatus.RUNNING`/`VERIFYING` assignments became
+- **Two tables, not one JSON blob (2026-10-01 redesign).** The first
+  cut of this feature stored each job's entire `to_detail_dict()`
+  snapshot — including its whole log so far — as one JSON blob column,
+  rewritten in full on every `RestoreJob.log()` call. A user review
+  question ("wouldn't a separate log-entries table with a FK be better
+  than constantly rewriting an entire record?") was right: that design
+  gets strictly more expensive to persist as a job's log grows, and
+  forced the list endpoint to fetch and parse a job's full log on every
+  load just to strip it back out (the list view never shows log lines).
+  Replaced with `jobs` (one row per job, `RestoreJob.to_dict()`'s
+  fields as real columns — `progress_percent`/`elapsed_seconds`/
+  `cancellable` stored as the *computed* values `to_dict()` already
+  produces, not re-derived from raw state on the read side, so
+  `RestoreJob`'s own clamping/pinning logic isn't duplicated a second
+  time in this module) plus an append-only `job_log_entries` child
+  table (`id` autoincrement, `job_id` FK `REFERENCES jobs(id) ON DELETE
+  CASCADE`, `line` text). Logging a line is now a single small `INSERT`
+  independent of how long the log already is, and `list_recent()`
+  never joins `job_log_entries` at all. `ON DELETE CASCADE` needs `conn.execute("PRAGMA
+  foreign_keys = ON")` on the connection to actually take effect —
+  sqlite3 leaves FK enforcement off by default per-connection even when
+  the schema declares one — confirmed live with a dedicated test
+  (`test_evict_expired_does_not_orphan_log_entries`) that checks
+  `job_log_entries` directly for leftover rows after `evict_expired()`.
+- **Write timing.** A `jobs` row is upserted at job creation (`queued`)
+  and at every coarse status transition — `RestoreJobManager.create()`
+  / `mark_running()` / `mark_verifying()` / `mark_done()` /
+  `mark_failed()` / `mark_cancelled()`, all call `job_history.
+  persist_sync()`. A `job_log_entries` row is appended on every
+  `RestoreJob.log()` call via `job_history.append_log_entry()`,
+  independently of those status writes (a follow-up, prompted by a
+  separate user question about whether a crash mid-run would lose log
+  lines written since the last status change: it would have, under the
+  original "transitions only" design). `restore_runner.py`'s two direct
+  `job.status = RestoreStatus.RUNNING`/`VERIFYING` assignments became
   `jobs.mark_running(job.id)`/`jobs.mark_verifying(job.id)` calls so
   *every* status change goes through the manager, not just the terminal
   ones — a job that dies between `create()` and its first transition
   still gets a `queued` row to reconcile later, instead of silently
-  having no record at all. Putting the persist call inside
+  having no record at all. Putting the log-append call inside
   `RestoreJob.log()` itself (rather than threading a `jobs:
   RestoreJobManager` reference through the ~15 helper functions in
   `restore_runner.py` that call `job.log()` but don't otherwise touch
@@ -1283,35 +1309,39 @@ are cheap; no reason to share one for unrelated concerns.
   chunked-write heartbeat, the bundle-download progress callback) —
   never one call per chunk or byte — so even a large transfer logs on
   the order of dozens to ~150 times, not thousands.
-  `mark_done()`/`mark_failed()`/`mark_cancelled()` dropped their own
-  now-redundant trailing `persist_sync()` call, since each already
-  calls `job.log()` with status/`finished_at` already set, so that
-  `log()` call's own persist captures the final state. Deliberately
-  **still not** written on every `progress_current` tick itself (a
-  chunked transfer can take hundreds of chunks, and nothing calls
-  `log()` for each one) — that field only matters live, while this
-  process's own in-memory copy is what's being read; once that copy is
-  gone (a restart), the job is necessarily terminal already
-  (reconciliation, below) and a frozen last-known percentage is fine.
+  `mark_done()`/`mark_failed()`/`mark_cancelled()` each call both
+  `job.log()` (appends to `job_log_entries`) and `job_history.
+  persist_sync()` (updates the `jobs` row's status/`finished_at`) —
+  independent writes to independent tables now, so there's no ordering
+  dependency between them the way there briefly was when logging
+  doubled as the metadata-persist mechanism. Deliberately **still not**
+  written on every `progress_current` tick itself (a chunked transfer
+  can take hundreds of chunks, and nothing calls `log()` for each one)
+  — that field only matters live, while this process's own in-memory
+  copy is what's being read; once that copy is gone (a restart), the
+  job is necessarily terminal already (reconciliation, below) and a
+  frozen last-known percentage is fine.
 - **Writes are synchronous**, not wrapped in `asyncio.to_thread` the
   way `dir_cache` is. `dir_cache` offloads because it's a genuine hot
   path (every directory browse, every user). A job's `log()` calls and
   status transitions are bounded to roughly dozens over its *entire*
-  lifetime (see above), so a brief blocking SQLite write on the event
-  loop thread is an acceptable, bounded cost here — and avoids
+  lifetime (see above), and each is now a small, single-row write (not
+  a growing blob rewrite), so a brief blocking SQLite write on the
+  event loop thread is an acceptable, bounded cost here — and avoids
   threading `async`/`await` through dozens of call sites across
   `restore_runner.py` for no real benefit. Reads (the list endpoint's
   history merge, the retention sweep, startup reconciliation) do use
-  `asyncio.to_thread`,
-  since those run from `main.py`'s async routes/startup hook, where
-  blocking the loop would stall every other concurrent request, not
-  just one job's own transition.
+  `asyncio.to_thread`, since those run from `main.py`'s async
+  routes/startup hook, where blocking the loop would stall every other
+  concurrent request, not just one job's own transition.
 - **Retention.** `JOB_HISTORY_RETENTION_DAYS` (default 7).
-  `job_history.evict_expired()` deletes rows whose `finished_at` is
-  past the cutoff — called opportunistically from `GET
-  /api/restore-jobs` on every load, no scheduled background job, same
-  pattern as `dir_cache.evict_missing()`. A still-active row
-  (`finished_at IS NULL`) is never swept by age alone.
+  `job_history.evict_expired()` deletes `jobs` rows whose `finished_at`
+  is past the cutoff — `ON DELETE CASCADE` takes the matching
+  `job_log_entries` rows with it, no separate delete needed. Called
+  opportunistically from `GET /api/restore-jobs` on every load, no
+  scheduled background job, same pattern as `dir_cache.evict_missing()`.
+  A still-active row (`finished_at IS NULL`) is never swept by age
+  alone.
 - **Restart reconciliation.** `job_history.reconcile_interrupted()`
   runs once, before serving any request, from `main.py`'s `lifespan`
   context manager (FastAPI's modern startup/shutdown hook — this app
@@ -1337,11 +1367,12 @@ are cheap; no reason to share one for unrelated concerns.
   current process's live job dict (keyed by id, live always wins over
   its own stale persisted snapshot) and merge the two, sorted by actual
   start time (`job_history.list_recent()` returns each persisted row
-  with its raw `_started_at` alongside the published `to_detail_dict()`
-  shape — `to_dict()`/`to_detail_dict()` carry no raw timestamp of
-  their own, only derived `elapsed_seconds` — purely so `main.py` can
-  interleave live and persisted entries correctly before stripping
-  `_started_at` back out). A persisted-only entry's `can_cancel` is
+  with its `started_at` column alongside the published `to_dict()`
+  shape, under the `_started_at` key — `to_dict()`/`to_detail_dict()`
+  carry no raw timestamp of their own, only derived `elapsed_seconds` —
+  purely so `main.py` can interleave live and persisted entries
+  correctly before stripping `_started_at` back out). A persisted-only
+  entry's `can_cancel` is
   always `False`: by the time anything is persisted-only, reconciliation
   has already guaranteed nothing non-terminal survives into
   `job_history` from a previous process, so there's no "still active"

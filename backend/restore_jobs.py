@@ -153,18 +153,22 @@ class RestoreJob:
 
     def log(self, message: str) -> None:
         elapsed = round(time.time() - self.started_at, 1)
-        self.log_lines.append(f"+{elapsed}s {message}")
-        # Issue #124 follow-up: every log line persists immediately,
-        # not just at the coarser status transitions below - restore_
-        # runner.py already throttles its own log() calls to roughly
-        # one per percentage point or every few seconds in any loop
-        # (the per-chunk heartbeat, the bundle-download progress
-        # callback, etc. - never one per chunk/byte), so this stays a
-        # bounded, modest write rate even on a large transfer, and means
-        # a job interrupted mid-run keeps its log current up to the
-        # last line actually logged, not just up to its last status
-        # change.
-        job_history.persist_sync(self)
+        line = f"+{elapsed}s {message}"
+        self.log_lines.append(line)
+        # Issue #124 follow-up: every log line persists immediately, not
+        # just at the coarser status transitions below - a single,
+        # append-only row in job_history's job_log_entries table
+        # (independent of how long the log already is, unlike an
+        # earlier version of this that rewrote a whole JSON blob per
+        # line). restore_runner.py already throttles its own log() calls
+        # to roughly one per percentage point or every few seconds in
+        # any loop (the per-chunk heartbeat, the bundle-download
+        # progress callback, etc. - never one per chunk/byte), so this
+        # stays a bounded, modest write rate even on a large transfer,
+        # and means a job interrupted mid-run keeps its log current up
+        # to the last line actually logged, not just up to its last
+        # status change.
+        job_history.append_log_entry(self.id, line)
 
     @property
     def elapsed_seconds(self) -> float:
@@ -311,10 +315,11 @@ class RestoreJobManager:
         if job is not None:
             job.status = RestoreStatus.CANCELLED
             job.finished_at = time.time()
-            # job.log() persists on its own now - status/finished_at are
-            # already set above, so this one write captures the final
-            # state. No separate job_history.persist_sync() call needed.
+            # job.log() only appends a job_log_entries row now (separate
+            # table from job metadata) - this still needs its own
+            # explicit write to persist the status/finished_at change.
             job.log("Cancelled.")
+            job_history.persist_sync(job)
 
     def mark_done(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
@@ -322,6 +327,7 @@ class RestoreJobManager:
             job.status = RestoreStatus.DONE
             job.finished_at = time.time()
             job.log("Restore completed successfully.")
+            job_history.persist_sync(job)
 
     def mark_failed(self, job_id: str, error: str) -> None:
         job = self._jobs.get(job_id)
@@ -330,6 +336,7 @@ class RestoreJobManager:
             job.error = error
             job.finished_at = time.time()
             job.log(f"Failed: {error}")
+            job_history.persist_sync(job)
 
     def clear(self) -> None:
         """Test/dev helper - mirrors auth._sessions.clear()'s role in tests."""

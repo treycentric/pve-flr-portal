@@ -40,6 +40,41 @@ async def test_persisted_detail_includes_log(session_data):
     assert any("did a thing" in line for line in detail["log"])
 
 
+async def test_log_entries_accumulate_rather_than_overwrite(session_data):
+    """The point of the two-table split: each log() call appends a new
+    job_log_entries row instead of rewriting a growing blob - all prior
+    lines must still be there after several calls, in order."""
+    job = _make(session_data)
+    job.log("first")
+    job.log("second")
+    job.log("third")
+    detail = await job_history.get(job.id)
+    assert [line.split(" ", 1)[1] for line in detail["log"]] == ["first", "second", "third"]
+
+
+async def test_evict_expired_does_not_orphan_log_entries(session_data):
+    """ON DELETE CASCADE must actually take effect (sqlite3 disables FK
+    enforcement per-connection by default unless explicitly turned on) -
+    otherwise a deleted job's log rows pile up in job_log_entries
+    forever, orphaned with no parent jobs row."""
+    import time
+
+    job = _make(session_data)
+    job.log("some log line")
+    job.status = RestoreStatus.DONE
+    job.finished_at = time.time() - (8 * 86400)
+    job_history.persist_sync(job)
+
+    await job_history.evict_expired(7)
+
+    with job_history._lock:
+        conn = job_history._get_conn()
+        orphaned = conn.execute(
+            "SELECT COUNT(*) FROM job_log_entries WHERE job_id = ?", (job.id,)
+        ).fetchone()[0]
+    assert orphaned == 0
+
+
 async def test_persist_updates_in_place_not_a_new_row(session_data):
     job = _make(session_data)
     job_history.persist_sync(job)
