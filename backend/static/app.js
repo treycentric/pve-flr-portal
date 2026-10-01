@@ -67,6 +67,13 @@ function restoreJobsWidget() {
   return {
     open: false,
     jobs: [],
+    // Issue #122: "all" unless the server tells us otherwise on the
+    // first response (RESTRICT_JOBS_TO_OWN on means it starts at
+    // "mine" instead) - canSeeAll gates whether the toggle even
+    // renders, since there's no point offering "all" to a restricted,
+    // non-admin user who can't actually use it.
+    scope: 'all',
+    canSeeAll: true,
     selectedId: null,
     // Drag offset for the modal (docs/plan.md §7.5's UI section) - an
     // inline transform on the modal box, reset only on a fresh page
@@ -115,14 +122,22 @@ function restoreJobsWidget() {
     },
     async refresh() {
       try {
-        const resp = await apiFetch('/api/restore-jobs');
+        const resp = await apiFetch('/api/restore-jobs?scope=' + encodeURIComponent(this.scope));
         if (!resp.ok) return;
-        this.jobs = await resp.json();
+        const data = await resp.json();
+        this.jobs = data.jobs;
+        this.scope = data.scope;
+        this.canSeeAll = data.can_see_all;
       } catch (e) {
         // Transient failure - keep showing the last known list rather
         // than flashing it empty on every hiccup.
       }
       if (this.logOpen) await this.refreshLog();
+    },
+    setScope(scope) {
+      if (scope === this.scope) return;
+      this.scope = scope;
+      this.refresh();
     },
     async cancelSelected() {
       if (!this.selectedId || !this.selectedCancellable) return;

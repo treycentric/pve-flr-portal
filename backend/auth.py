@@ -16,7 +16,7 @@ import logging
 import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from fastapi import HTTPException, Request
@@ -53,6 +53,15 @@ class SessionData:
     csrf_token: str
     ticket_issued_at: float
     last_activity_at: float
+    # Issue #122: PVE's own computed-permissions summary, straight from
+    # /access/ticket's "cap" field (both the password and OIDC login
+    # paths return it - confirmed against PVE's own source, pve-access-
+    # control's AccessControl.pm/OpenId.pm). Bucketed by broad area
+    # ("dc", "nodes", "vms", "storage", ...), not by arbitrary path -
+    # see is_job_admin() below for what that means in practice. Kept
+    # fresh across a long session the same way the ticket itself is:
+    # _refresh_ticket() updates it from each refresh response too.
+    cap: dict = field(default_factory=dict)
 
 
 _sessions: dict[str, SessionData] = {}
@@ -106,8 +115,19 @@ def _store_ticket(data: dict) -> str:
         csrf_token=data["CSRFPreventionToken"],
         ticket_issued_at=now,
         last_activity_at=now,
+        cap=data.get("cap") or {},
     )
     return session_id
+
+
+def is_job_admin(session: SessionData) -> bool:
+    """Issue #122: does this session bypass RESTRICT_JOBS_TO_OWN? Checks
+    `cap["dc"]` - the bucket PVE's compute_api_permission uses for a
+    privilege granted at the bare root path "/" specifically, not
+    scoped to a storage/VM/node subtree - against settings.job_admin_privilege
+    (default Sys.Audit). See README's "Provisioning access" for the
+    recommended BackupAdmins role bundling this."""
+    return bool(session.cap.get("dc", {}).get(settings.job_admin_privilege))
 
 
 class TFARequired(Exception):
@@ -227,6 +247,7 @@ async def _refresh_ticket(session: SessionData) -> None:
     session.ticket = data["ticket"]
     session.csrf_token = data["CSRFPreventionToken"]
     session.ticket_issued_at = time.time()
+    session.cap = data.get("cap") or {}
 
 
 async def ensure_fresh_ticket(session: SessionData) -> None:

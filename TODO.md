@@ -115,6 +115,32 @@ during tree-sync fetches, since it wasn't shown there at all before and
 made the slow-but-working case look identical to broken) rather than
 by caching - this cache is the real fix for the underlying cost.
 
+## Restore job retention & visibility — split from #121
+
+Originally one issue, split into three on review (separately scoped:
+viewing vs. cancelling vs. retention) plus a restart-reconciliation
+requirement folded into the retention ticket:
+
+- #122 — **SHIPPED.** Job list shows who submitted each job
+  (`requested_by`), with an opt-in `RESTRICT_JOBS_TO_OWN` config
+  (default off — unscoped, unchanged behavior) and a `BackupAdmins`-
+  style bypass (`JOB_ADMIN_PRIVILEGE`, default `Sys.Audit`, checked via
+  PVE's own `cap["dc"]` bucket — a privilege granted at the bare root
+  path `/`, not scoped to any particular storage/VM). See
+  `docs/plan.md` §7.5's "Job visibility scoping" subsection and
+  README's "Provisioning access" → "Restore Job Visibility".
+- #123 — open: fix cancel permissions/scoping (today, any logged-in
+  user can cancel any job regardless of who submitted it — a separate,
+  not-yet-closed gap from #122's view-scoping).
+- #124 — open: persisted job + log history with a configurable
+  retention window (`JOB_HISTORY_RETENTION_DAYS`, proposed default 7)
+  in a dedicated `job_history.sqlite` under `PFR_DATA_DIR` (deliberately
+  separate from PH.6's `dir_cache.sqlite`). Also needs restart
+  reconciliation: any job still `queued`/`running`/`verifying` when the
+  backend starts up must be closed out as `interrupted` rather than
+  left looking perpetually in-progress, since today's in-memory
+  `RestoreJobManager` loses all job state across a restart.
+
 ## Server-side per-user preferences store (follow-up to #29)
 
 The colour theme (#29) persists per-browser in `localStorage` today, plus

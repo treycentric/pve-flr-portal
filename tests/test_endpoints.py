@@ -7,6 +7,7 @@ unauthenticated path.
 """
 
 import asyncio
+import dataclasses
 import io
 import json
 import time
@@ -1219,14 +1220,70 @@ def test_restore_jobs_list_returns_submitted_job(client, monkeypatch):
 
     resp = client.get("/api/restore-jobs")
     assert resp.status_code == 200
-    jobs = resp.json()
+    body = resp.json()
+    jobs = body["jobs"]
     assert any(j["id"] == submitted["id"] for j in jobs)
+    assert any(j["requested_by"] == submitted["requested_by"] for j in jobs)
 
 
 def test_restore_jobs_list_empty_when_none_submitted(client):
     resp = client.get("/api/restore-jobs")
     assert resp.status_code == 200
-    assert resp.json() == []
+    body = resp.json()
+    assert body["jobs"] == []
+    # Default RESTRICT_JOBS_TO_OWN is off - unrestricted/unchanged behavior.
+    assert body["scope"] == "all"
+    assert body["can_see_all"] is True
+
+
+def test_restore_jobs_list_defaults_to_mine_when_restricted(client, monkeypatch):
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
+    resp = client.get("/api/restore-jobs")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == "mine"
+    assert body["can_see_all"] is False
+
+
+def test_restore_jobs_list_restricted_non_admin_cannot_request_all(client, monkeypatch):
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
+    resp = client.get("/api/restore-jobs", params={"scope": "all"})
+    assert resp.status_code == 200
+    body = resp.json()
+    # Clamped back to "mine" - a restricted, non-admin session can't opt out server-side.
+    assert body["scope"] == "mine"
+    assert body["can_see_all"] is False
+
+
+def test_restore_jobs_list_restricted_admin_can_request_all(client, monkeypatch, session_data):
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
+    session_data.cap = {"dc": {"Sys.Audit": 1}}
+    resp = client.get("/api/restore-jobs", params={"scope": "all"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == "all"
+    assert body["can_see_all"] is True
+
+
+def test_restore_jobs_list_restricted_filters_to_own_jobs(client, monkeypatch):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
+    resp = client.get("/api/restore-jobs")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert all(j["requested_by"] == submitted["requested_by"] for j in body["jobs"])
+    assert any(j["id"] == submitted["id"] for j in body["jobs"])
 
 
 def test_restore_jobs_list_requires_auth():

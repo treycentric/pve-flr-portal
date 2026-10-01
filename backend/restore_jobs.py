@@ -155,6 +155,7 @@ class RestoreJob:
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "requested_by": self.requested_by,
             "device": self.guest_label,
             "task_name": self.task_name,
             "restore_version": self.snapshot_time,

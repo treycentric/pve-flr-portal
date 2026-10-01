@@ -1,3 +1,4 @@
+import dataclasses
 import time
 
 import httpx
@@ -308,6 +309,29 @@ async def test_ensure_fresh_ticket_refreshes_when_stale(session_data):
 
 
 @respx.mock
+async def test_ensure_fresh_ticket_refreshes_cap(session_data):
+    """Issue #122: `cap` (used by is_job_admin) must be kept current on
+    every ticket refresh, not just captured once at login - a role
+    change on PVE's side should take effect on the next refresh."""
+    respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "PVE:alice@pam:FRESH3",
+                    "CSRFPreventionToken": "csrf-fresh3",
+                    "cap": {"dc": {"Sys.Audit": 1}},
+                }
+            },
+        )
+    )
+    session_data.ticket_issued_at = time.time() - (auth._TICKET_REFRESH_AGE_SECONDS + 60)
+    await auth.ensure_fresh_ticket(session_data)
+    assert session_data.cap == {"dc": {"Sys.Audit": 1}}
+
+
+@respx.mock
 async def test_get_session_evicts_and_401s_when_ticket_refresh_rejected(session_data):
     """A stale session whose ticket PVE won't renew is expired, not a 500
     (issue #27) - get_session evicts it and raises 401 so the caller
@@ -350,3 +374,28 @@ async def test_get_session_refreshes_stale_ticket(session_data):
     assert route.called
     assert session_data.ticket == "PVE:alice@pam:FRESH"
     assert session_data.csrf_token == "csrf-fresh"
+
+
+def test_is_job_admin_false_with_no_cap(session_data):
+    assert session_data.cap == {}
+    assert auth.is_job_admin(session_data) is False
+
+
+def test_is_job_admin_false_when_privilege_elsewhere(session_data):
+    # Granted on a VM/storage subtree, not at the bare root "/" - compute_api_permission
+    # buckets that under its resource type (e.g. "vms"), never "dc".
+    session_data.cap = {"vms": {"Sys.Audit": 1}}
+    assert auth.is_job_admin(session_data) is False
+
+
+def test_is_job_admin_true_with_dc_privilege(session_data):
+    session_data.cap = {"dc": {"Sys.Audit": 1}}
+    assert auth.is_job_admin(session_data) is True
+
+
+def test_is_job_admin_respects_configured_privilege_name(session_data, monkeypatch):
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, job_admin_privilege="Sys.Modify"))
+    session_data.cap = {"dc": {"Sys.Audit": 1}}
+    assert auth.is_job_admin(session_data) is False
+    session_data.cap = {"dc": {"Sys.Modify": 1}}
+    assert auth.is_job_admin(session_data) is True

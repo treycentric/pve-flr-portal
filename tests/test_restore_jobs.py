@@ -143,6 +143,7 @@ def test_to_dict_shape_matches_ui_columns(manager, session_data):
     d = job.to_dict()
     assert set(d) == {
         "id",
+        "requested_by",
         "device",
         "task_name",
         "restore_version",

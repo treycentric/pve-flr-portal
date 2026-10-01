@@ -250,6 +250,32 @@ that's the path, not this app's file-level browser. Linux/BSD
 ownership and permissions don't have this problem and restore
 correctly (see "restore original owner/permissions" above).
 
+### Restore Job Visibility (`RESTRICT_JOBS_TO_OWN`)
+
+By default (`RESTRICT_JOBS_TO_OWN=false` in `.env.example`), the
+restore-jobs list is one shared task list — any logged-in user sees
+every job, same as before this setting existed. Set
+`RESTRICT_JOBS_TO_OWN=true` to scope it per user instead; each user
+then sees only jobs they submitted, with no option to switch to "all"
+unless they hold a bypass privilege (issue #122).
+
+**Grant the bypass** (e.g. for a small admin group) by adding
+`Sys.Audit` — already implied by most "can view PVE at all" roles — at
+the bare root path:
+
+```
+pveum role add BackupAdmins -privs "Sys.Audit"
+pveum acl modify / --users <user>@<realm> --roles BackupAdmins
+```
+
+The grant must be at `/` specifically, not `/vms` or `/storage/...` —
+PVE buckets a privilege by the path it's granted at (`compute_api_permission`),
+and only a root-path grant counts as "admin" for this check. A user who
+already holds `Sys.Audit` at root through some other role (e.g. an
+existing PVE admin role) needs no separate grant. If you'd rather use a
+privilege other than `Sys.Audit` as the bypass signal, set
+`JOB_ADMIN_PRIVILEGE` in `.env` instead and grant that one at `/`.
+
 ### SSO / OpenID Connect login
 
 If your PVE cluster has an `openid`-type realm configured (Datacenter →

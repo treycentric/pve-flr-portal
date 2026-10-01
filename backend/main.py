@@ -956,15 +956,38 @@ async def restore(
 
 
 @app.get("/api/restore-jobs")
-async def restore_jobs_list(session: SessionData = Depends(auth.get_session_keepalive)):
+async def restore_jobs_list(
+    scope: str | None = Query(None),
+    session: SessionData = Depends(auth.get_session_keepalive),
+):
     """PH.5 (docs/plan.md §7.5): the running-jobs indicator's data source,
-    polled from the top bar every few seconds. Jobs are visible to any
-    logged-in user, not scoped per-requester - a single-admin tool
-    with one shared task list, same as the rest of this design.
+    polled from the top bar every few seconds. Jobs were originally
+    visible to any logged-in user unconditionally - a single-admin tool
+    with one shared task list - and still are by default; issue #122
+    makes that configurable.
+
+    `scope` ("mine" or "all") is enforced here, not left to the client:
+    a non-admin can't pass scope=all to see past RESTRICT_JOBS_TO_OWN.
+    Default is "all" when the restriction is off (unchanged behavior)
+    and "mine" when it's on. `can_see_all` tells the frontend whether to
+    even offer the "all" option - no point rendering a toggle a
+    non-admin, restricted user can't actually use.
 
     Uses get_session_keepalive: this poll must not keep an idle session
     alive (issue #27) - if it 401s, apiFetch() in app.js redirects."""
-    return JSONResponse([job.to_dict() for job in restore_jobs.manager.list_jobs()])
+    can_see_all = (not settings.restrict_jobs_to_own) or auth.is_job_admin(session)
+    requested_scope = scope or ("mine" if settings.restrict_jobs_to_own else "all")
+    effective_scope = requested_scope if (requested_scope == "mine" or can_see_all) else "mine"
+    jobs = restore_jobs.manager.list_jobs()
+    if effective_scope == "mine":
+        jobs = [j for j in jobs if j.requested_by == session.username]
+    return JSONResponse(
+        {
+            "jobs": [job.to_dict() for job in jobs],
+            "scope": effective_scope,
+            "can_see_all": can_see_all,
+        }
+    )
 
 
 @app.get("/api/restore-jobs/{job_id}")

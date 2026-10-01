@@ -231,6 +231,25 @@ class Settings:
     # can still switch themes from the user menu.
     default_theme: str
 
+    # Issue #122: off by default - matches the original "one shared task
+    # list" behavior exactly, so turning this on is purely opt-in. When
+    # on, a user only sees their own restore jobs (GET /api/restore-jobs
+    # enforces this server-side, not just a UI filter) unless they hold
+    # job_admin_privilege - see auth.is_job_admin().
+    restrict_jobs_to_own: bool
+    # The PVE privilege that bypasses restrict_jobs_to_own, checked via
+    # the `cap` block PVE's own /access/ticket already returns at login/
+    # refresh (auth.SessionData.cap) - specifically cap["dc"], the
+    # category for privileges granted at the bare root path "/" (PVE's
+    # RPCEnvironment::compute_api_permission buckets by broad area, not
+    # arbitrary paths - "dc" is what a root-level grant becomes). Expects
+    # a role (conventionally named "BackupAdmins") bundling this
+    # privilege, granted at "/" specifically - see README's "Provisioning
+    # access". No separate "path" setting: cap has no finer-grained path
+    # information than which bucket a grant landed in, so one isn't
+    # meaningful to expose here.
+    job_admin_privilege: str
+
     # Issue #60: caps how many `file-restore/list` calls this app has
     # in flight to PVE at once. Each cold call boots an ephemeral helper
     # VM on the PVE node (~3s, docs/plan.md §3) - Proxmox exposes no API
@@ -321,6 +340,8 @@ settings = Settings(
     restore_data_nic_tls_ca_file=_get("RESTORE_DATA_NIC_TLS_CA_FILE", ""),
     restore_long_running_exec_timeout_seconds=_float("RESTORE_LONG_RUNNING_EXEC_TIMEOUT_SECONDS", 1800.0),
     default_theme=_theme("DEFAULT_THEME", "auto"),
+    restrict_jobs_to_own=_bool("RESTRICT_JOBS_TO_OWN", False),
+    job_admin_privilege=_get("JOB_ADMIN_PRIVILEGE", "Sys.Audit"),
     data_dir=_path("PFR_DATA_DIR", "data"),
 )
 

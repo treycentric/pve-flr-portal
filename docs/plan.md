@@ -1160,13 +1160,55 @@ restart, acceptable for a single-admin internal tool):
   `cancel(job_id)` sets the flag (the loop notices at the next chunk
   boundary and marks `cancelled`, cleaning up any scratch dir already
   written).
-- Jobs are visible to any logged-in user, not scoped per-requester —
-  matches this being a single-admin internal tool with one shared task
-  list (Synology ABB's own restore-task list works the same way), and
-  keeps the UI simple. Revisit if this ever becomes genuinely
-  multi-admin.
+- Jobs were originally visible to any logged-in user unconditionally,
+  not scoped per-requester — matched this being a single-admin internal
+  tool with one shared task list (Synology ABB's own restore-task list
+  works the same way), and kept the UI simple. **Issue #122
+  (2026-10-01) made this configurable** — see the subsection right
+  below; still unscoped by default, so nothing changes unless an admin
+  opts in.
 - New endpoints: `GET /api/restore-jobs` (list, polled by the UI),
   `POST /api/restore-jobs/{id}/cancel`.
+
+**Job visibility scoping (issue #122, shipped alongside the rest of
+this list).** `to_dict()` gained `requested_by` (`session.username` at
+submission time — display only; the credential itself still lives on
+`job.session`) so the UI can show an Owner column regardless of
+whether scoping is even turned on.
+
+`RESTRICT_JOBS_TO_OWN` (default `false` — unchanged behavior) gates
+whether `GET /api/restore-jobs` filters to the caller's own jobs.
+`scope` (`"mine"`/`"all"`) is a query param the *server* enforces, not
+the client: a restricted, non-admin caller passing `scope=all` gets
+clamped back to `"mine"` rather than trusted. The response shape became
+`{"jobs": [...], "scope": "mine"|"all", "can_see_all": bool}` (a
+breaking change from the original bare array — `app.js`'s
+`restoreJobsWidget()` and every test asserting the old shape were
+updated in the same change) so the frontend can render the right
+default and hide the mine/all toggle entirely for a session that has
+no use for it.
+
+`can_see_all` (and therefore the bypass) is driven by `is_job_admin()`
+in `auth.py`, which checks `session.cap["dc"][JOB_ADMIN_PRIVILEGE]`
+(default privilege `Sys.Audit`). `cap` is the field PVE's own
+`/access/ticket` response already carries (confirmed from
+`pve-access-control`'s `PVE::RPCEnvironment::compute_api_permission` —
+same source already cited in §7.1 for the ticket format) and was
+*not* previously captured into `SessionData`; this issue added it,
+refreshed on every ticket renewal (`_store_ticket()` /
+`_refresh_ticket()`) so a role change on PVE's side takes effect on the
+session's next refresh, not only at next login. `compute_api_permission`
+buckets a privilege by the broad resource category it was granted
+under (`vms`, `storage`, `nodes`, …), keyed off a regex on the
+privilege name — **not** by arbitrary ACL path — except that a grant at
+the bare root path `/` falls through to the `"dc"` bucket specifically
+(no second path segment to match against). That's what makes `"dc"` a
+clean "broad admin" signal here: `cap["dc"]["Sys.Audit"] == 1` means
+"granted at `/`", which is exactly the shape of grant README's
+"Provisioning access" → "Restore Job Visibility" asks for (a
+`BackupAdmins` role with `Sys.Audit`, granted at `/`). Verified via
+`PVE::API2::OpenId.pm` too, so an SSO/OIDC login (§7.1.1) gets the same
+`cap` shape as a password login — the bypass isn't password-login-only.
 
 **Session handling for background jobs.** A job holds its *own copy*
 of the requester's `SessionData` (`dataclasses.replace(session)` at

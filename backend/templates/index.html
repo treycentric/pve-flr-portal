@@ -64,15 +64,21 @@
       <div class="modal-filter">
         <button type="button" class="btn-outline" :disabled="!selectedId || !selectedCancellable" @click="cancelSelected()">Cancel</button>
         <button type="button" class="btn-outline" :disabled="!selectedId" @click="openLog()">View Log</button>
+        <div class="modal-filter-spacer"></div>
+        <div class="scope-toggle" x-show="canSeeAll">
+          <button type="button" class="btn-outline" :class="{ 'is-active': scope === 'mine' }" @click="setScope('mine')">My Jobs</button>
+          <button type="button" class="btn-outline" :class="{ 'is-active': scope === 'all' }" @click="setScope('all')">All Jobs</button>
+        </div>
       </div>
       <div class="modal-table-wrap">
         <table class="modal-table">
           <thead>
-            <tr><th>Device</th><th>Task Name</th><th>Restore ver.</th><th>Source</th><th>Destination</th><th>Status</th><th>Elapsed Time</th></tr>
+            <tr><th>Owner</th><th>Device</th><th>Task Name</th><th>Restore ver.</th><th>Source</th><th>Destination</th><th>Status</th><th>Elapsed Time</th></tr>
           </thead>
           <tbody>
             <template x-for="j in jobs" :key="j.id">
               <tr :class="{ 'is-selected': selectedId === j.id }" @click="selectedId = j.id" @dblclick="openLog()">
+                <td x-text="j.requested_by"></td>
                 <td x-text="j.device"></td>
                 <td x-text="j.task_name"></td>
                 <td x-text="j.restore_version"></td>

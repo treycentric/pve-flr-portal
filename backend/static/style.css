@@ -329,7 +329,27 @@ body {
 }
 
 .modal-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 14px 20px 0;
+}
+
+/* Issue #122: pushes the scope toggle to the far end of the same row
+   as Cancel/View Log, without needing a second flex container. */
+.modal-filter-spacer {
+  flex: 1;
+}
+
+.scope-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.scope-toggle .btn-outline.is-active {
+  background: var(--link);
+  color: var(--surface);
+  border-color: var(--link);
 }
 
 .modal-filter-input {
