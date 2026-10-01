@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See [`docs/dev/versioning.md`](docs/dev/versioning.md) for how entries
 here are generated from commit messages.
 
+## [1.8.0] - 2026-09-30
+
+### Added
+- **docker:** publish a production container image to GHCR (#107) (474c9b2)
+- **image:** sign published container images with cosign (#111) (7699d0f)
+- **auth:** support PVE 2FA/TOTP and recovery keys in the login flow (#15) (6ffe3b5)
+
+### Fixed
+- **deploy:** mark update.sh executable, matching install.sh/lxc-create.sh (#89) (06bc1e5)
+- **pve-client:** lower concurrency default to 2, and ship PH.6's directory-listing cache (#110) (e323080)
+- **frontend:** serve htmx and Alpine from /static instead of unpkg (#105) (2de5ad9)
+
 ## [1.7.0] - 2026-09-29
 
 ### Added
