@@ -1579,7 +1579,7 @@ entry points at. Two reasons this matters, both raised in review:
   screenshot's placement), showing a small spinning ring around it
   whenever `GET /api/restore-jobs` (polled every few seconds while any
   job is `queued`/`running`/`verifying`) reports at least one active
-  job. Click opens a "Restore Task" modal: a table (Device, Task Name,
+  job. Click opens a "Restore Jobs" modal: a table (Device, Task Name,
   Restore ver., Source, Destination, Status, Elapsed Time, an actions
   column) with row selection and a "Cancel" button wired to
   `POST /api/restore-jobs/{id}/cancel`, an empty "No data" state, and
@@ -1608,7 +1608,7 @@ entry points at. Two reasons this matters, both raised in review:
   out of the polled list endpoint (`RestoreJob.to_dict()`) to keep that
   payload light; a new `GET /api/restore-jobs/{id}` returns the full
   detail (`to_detail_dict()`, list + log) on demand. A "View Log"
-  button (or double-clicking a row) in the Restore Task modal opens a
+  button (or double-clicking a row) in the Restore Jobs modal opens a
   second modal showing it, live-updated by piggybacking on the same 4s
   poll tick the job list already uses whenever the log viewer is open,
   rather than running a second timer — auto-scrolls to the bottom on
@@ -1674,7 +1674,7 @@ entry points at. Two reasons this matters, both raised in review:
    `POST /api/restore-jobs/{id}/cancel` wired into `main.py`;
    `restoreJobsWidget()` (new top-bar Alpine component, between the
    task picker and user menu) polls every 4s, shows a spinning ring +
-   active-job-count badge on the icon, and opens the "Restore Task"
+   active-job-count badge on the icon, and opens the "Restore Jobs"
    modal (device/task/restore-ver/source/destination/status/elapsed
    columns, row select, Cancel, matching the reference screenshots).
 6. ~~Multi-chunk write, metadata restore, verify~~ — **done**:

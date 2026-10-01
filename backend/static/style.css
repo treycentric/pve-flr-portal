@@ -636,7 +636,7 @@ body {
 }
 
 .modal-overlay--log {
-  /* Layers above the Restore Task modal, which can stay open underneath
+  /* Layers above the Restore Jobs modal, which can stay open underneath
      it - both use the same z-index:100 base from .modal-overlay. */
   z-index: 110;
 }
