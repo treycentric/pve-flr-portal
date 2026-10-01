@@ -13,31 +13,40 @@ real filesystem paths out of a guest; a directory listing is scoped to
 what the user could already browse to anyway). SQLite files are cheap -
 no reason to share one for unrelated concerns.
 
-**Write timing.** A row is upserted at job creation (status `queued`)
-and at every coarse status transition (`running`/`verifying`/terminal)
-- see `RestoreJobManager.create()`/`mark_running()`/`mark_verifying()`/
-`mark_done()`/`mark_failed()`/`mark_cancelled()` in `restore_jobs.py`.
-Deliberately **not** on every `progress_current` tick (a chunked
-transfer can take hundreds of chunks) - the persisted record only
-matters once this process's own in-memory copy is gone (a restart), at
-which point the job is necessarily in a terminal state already (see
-`reconcile_interrupted()` below) and live, mid-transfer progress is
-moot. Each write stores a full `RestoreJob.to_detail_dict()` snapshot
+**Write timing.** A row is upserted at job creation (status `queued`),
+at every coarse status transition (`running`/`verifying`/terminal) -
+see `RestoreJobManager.create()`/`mark_running()`/`mark_verifying()`/
+`mark_done()`/`mark_failed()`/`mark_cancelled()` in `restore_jobs.py` -
+**and on every `RestoreJob.log()` call**, so an interrupted job's
+persisted log is current up to the last line actually logged, not just
+up to its last status change. This is safe at the call volume `log()`
+actually sees: every loop in `restore_runner.py` that calls it already
+throttles itself to roughly one line per percentage point or every few
+seconds (the chunked-write heartbeat, the bundle-download progress
+callback) - never one call per chunk or byte - so even a large,
+long-running transfer logs on the order of dozens to ~150 times, not
+thousands. Deliberately **not** on every `progress_current` tick
+itself (a chunked transfer can take hundreds of chunks, and nothing
+calls `log()` for each one) - that field only matters live, while this
+process's own in-memory copy is what's being read; once that copy is
+gone (a restart), the job is necessarily terminal already (see
+`reconcile_interrupted()` below) and a frozen last-known percentage is
+fine. Each write stores a full `RestoreJob.to_detail_dict()` snapshot
 (including `log_lines`) as one JSON blob, keyed by job id - simpler
 than normalizing every field into its own column, and means reads need
 no join or separate "fetch the log" query.
 
 **Writes are synchronous, not `asyncio.to_thread`-wrapped like PH.6's
 `dir_cache`.** `dir_cache` offloads because it's a hot path - every
-directory browse, for every user, calls it. A restore job's status
-transitions happen a handful of times over a job's entire lifetime
-(queued -> running -> [verifying] -> one terminal state), so a brief
-synchronous SQLite write on the event loop thread is an acceptable,
-bounded cost here, and avoids threading `async`/`await` through
-`RestoreJobManager`'s ~15 call sites across `restore_runner.py` for no
-real benefit. Reads (the job list's history merge, retention sweep,
-startup reconciliation) do use `asyncio.to_thread`, since those run
-from `main.py`'s async routes and startup hook where blocking the loop
+directory browse, for every user, calls it. A restore job's `log()`
+calls and status transitions are bounded to roughly dozens over a
+job's entire lifetime (see above), so a brief synchronous SQLite write
+on the event loop thread is an acceptable, bounded cost here, and
+avoids threading `async`/`await` through dozens of call sites across
+`restore_runner.py` for no real benefit. Reads (the job list's history
+merge, retention sweep, startup reconciliation) do use
+`asyncio.to_thread`, since those run from `main.py`'s async routes and
+startup hook where blocking the loop
 matters more (a slow query would stall every other concurrent request,
 not just this one job's own transition).
 """

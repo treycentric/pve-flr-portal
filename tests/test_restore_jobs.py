@@ -183,6 +183,20 @@ async def test_create_and_every_mark_method_persist_to_job_history(manager, sess
     assert any("completed successfully" in line for line in detail["log"])
 
 
+async def test_job_log_persists_immediately_not_just_at_status_transitions(manager, session_data):
+    """Follow-up to #124: a plain job.log() call mid-run (no status
+    change) must still be visible in the persisted record right away -
+    this is what keeps an interrupted job's log current up to the last
+    line actually logged, not just up to its last status change."""
+    job = _make(manager, session_data)
+    manager.mark_running(job.id)
+
+    job.log("working on it")
+    detail = await job_history.get(job.id)
+    assert any("working on it" in line for line in detail["log"])
+    assert detail["status"] == "running"  # log() didn't change status
+
+
 def test_to_dict_shape_matches_ui_columns(manager, session_data):
     job = _make(manager, session_data)
     d = job.to_dict()

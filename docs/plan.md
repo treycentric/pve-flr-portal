@@ -1258,31 +1258,51 @@ on demand) and different sensitivity (a job's log/source/destination
 can carry real filesystem paths pulled out of a guest). SQLite files
 are cheap; no reason to share one for unrelated concerns.
 
-- **Write timing.** A row is upserted at job creation (`queued`) and at
+- **Write timing.** A row is upserted at job creation (`queued`), at
   every coarse status transition — `RestoreJobManager.create()` /
   `mark_running()` / `mark_verifying()` / `mark_done()` /
   `mark_failed()` / `mark_cancelled()`, all now call
-  `job_history.persist_sync()`. `restore_runner.py`'s two direct
-  `job.status = RestoreStatus.RUNNING`/`VERIFYING` assignments became
+  `job_history.persist_sync()` — **and on every `RestoreJob.log()`
+  call** (follow-up, 2026-10-01, from a user question about whether a
+  crash mid-run would lose log lines written since the last status
+  change: it would have, under the original "transitions only" design).
+  `restore_runner.py`'s two direct `job.status =
+  RestoreStatus.RUNNING`/`VERIFYING` assignments became
   `jobs.mark_running(job.id)`/`jobs.mark_verifying(job.id)` calls so
   *every* status change goes through the manager, not just the terminal
   ones — a job that dies between `create()` and its first transition
   still gets a `queued` row to reconcile later, instead of silently
-  having no record at all. Deliberately **not** written on every
-  `progress_current` tick (a chunked transfer can be hundreds of
-  chunks) — the persisted record only matters once this process's own
-  in-memory copy is gone (a restart), at which point the job is
-  necessarily terminal already (reconciliation, below) and live
-  mid-transfer progress is moot by then.
+  having no record at all. Putting the persist call inside
+  `RestoreJob.log()` itself (rather than threading a `jobs:
+  RestoreJobManager` reference through the ~15 helper functions in
+  `restore_runner.py` that call `job.log()` but don't otherwise touch
+  the manager) means every log line is captured with no call-site
+  changes anywhere in `restore_runner.py` at all. Safe at the volume
+  `log()` actually sees: every loop that calls it already self-throttles
+  to roughly one line per percentage point or every few seconds (the
+  chunked-write heartbeat, the bundle-download progress callback) —
+  never one call per chunk or byte — so even a large transfer logs on
+  the order of dozens to ~150 times, not thousands.
+  `mark_done()`/`mark_failed()`/`mark_cancelled()` dropped their own
+  now-redundant trailing `persist_sync()` call, since each already
+  calls `job.log()` with status/`finished_at` already set, so that
+  `log()` call's own persist captures the final state. Deliberately
+  **still not** written on every `progress_current` tick itself (a
+  chunked transfer can take hundreds of chunks, and nothing calls
+  `log()` for each one) — that field only matters live, while this
+  process's own in-memory copy is what's being read; once that copy is
+  gone (a restart), the job is necessarily terminal already
+  (reconciliation, below) and a frozen last-known percentage is fine.
 - **Writes are synchronous**, not wrapped in `asyncio.to_thread` the
   way `dir_cache` is. `dir_cache` offloads because it's a genuine hot
-  path (every directory browse, every user). A job's status transitions
-  happen a handful of times over its *entire* lifetime, so a brief
-  blocking SQLite write on the event loop thread is an acceptable,
-  bounded cost here — and avoids threading `async`/`await` through
-  `RestoreJobManager`'s many call sites across `restore_runner.py` for
-  no real benefit. Reads (the list endpoint's history merge, the
-  retention sweep, startup reconciliation) do use `asyncio.to_thread`,
+  path (every directory browse, every user). A job's `log()` calls and
+  status transitions are bounded to roughly dozens over its *entire*
+  lifetime (see above), so a brief blocking SQLite write on the event
+  loop thread is an acceptable, bounded cost here — and avoids
+  threading `async`/`await` through dozens of call sites across
+  `restore_runner.py` for no real benefit. Reads (the list endpoint's
+  history merge, the retention sweep, startup reconciliation) do use
+  `asyncio.to_thread`,
   since those run from `main.py`'s async routes/startup hook, where
   blocking the loop would stall every other concurrent request, not
   just one job's own transition.

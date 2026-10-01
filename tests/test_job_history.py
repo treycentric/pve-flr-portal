@@ -120,6 +120,20 @@ async def test_reconcile_interrupted_closes_out_active_rows(session_data):
     assert any("Interrupted" in line for line in detail["log"])
 
 
+async def test_reconcile_interrupted_preserves_log_lines_after_last_transition(session_data):
+    """The motivating scenario for persisting on every log() call, not
+    just status transitions: a crash mid-"running" phase must not lose
+    log lines written since the last mark_running()/mark_verifying()."""
+    job = _make(session_data)
+    job.status = RestoreStatus.RUNNING
+    job_history.persist_sync(job)
+    job.log("mid-run progress line")  # RestoreJob.log() persists this itself
+    reconciled = await job_history.reconcile_interrupted()
+    assert job.id in reconciled
+    detail = await job_history.get(job.id)
+    assert any("mid-run progress line" in line for line in detail["log"])
+
+
 async def test_reconcile_interrupted_leaves_terminal_rows_alone(session_data):
     job = _make(session_data)
     job.status = RestoreStatus.DONE
