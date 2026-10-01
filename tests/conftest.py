@@ -24,6 +24,12 @@ os.environ.setdefault("PFR_DATA_DIR", tempfile.mkdtemp(prefix="pve-flr-portal-te
 # own real .env (e.g. while setting up live verification) must never leak
 # into what's supposed to be a hermetic test run.
 os.environ.setdefault("RESTORE_DATA_NICS", "[]")
+# Issue #122's job-visibility scoping is opt-in - pinned off here for the
+# same "a developer's real .env must never leak into a hermetic test
+# run" reason as the rest of this block. Individual tests that want it
+# on monkeypatch `main.settings` directly (dataclasses.replace(), since
+# Settings is frozen) rather than relying on this default.
+os.environ.setdefault("RESTRICT_JOBS_TO_OWN", "false")
 
 import time
 from pathlib import Path

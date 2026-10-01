@@ -974,8 +974,17 @@ async def restore_jobs_list(
     non-admin, restricted user can't actually use.
 
     Uses get_session_keepalive: this poll must not keep an idle session
-    alive (issue #27) - if it 401s, apiFetch() in app.js redirects."""
-    can_see_all = (not settings.restrict_jobs_to_own) or auth.is_job_admin(session)
+    alive (issue #27) - if it 401s, apiFetch() in app.js redirects.
+
+    Each job dict also carries `can_cancel` (issue #123) - whether
+    *this* session may cancel *that* job (owner or a job admin, and
+    still active). Computed here, not in `RestoreJob.to_dict()` itself,
+    since that method has no session to check ownership against. The
+    server-side check in restore_jobs_cancel() below is the real
+    enforcement; this only drives whether the UI's Cancel button is
+    even enabled, so a non-owner isn't invited to try and get a 403."""
+    is_admin = auth.is_job_admin(session)
+    can_see_all = (not settings.restrict_jobs_to_own) or is_admin
     requested_scope = scope or ("mine" if settings.restrict_jobs_to_own else "all")
     effective_scope = requested_scope if (requested_scope == "mine" or can_see_all) else "mine"
     jobs = restore_jobs.manager.list_jobs()
@@ -983,7 +992,10 @@ async def restore_jobs_list(
         jobs = [j for j in jobs if j.requested_by == session.username]
     return JSONResponse(
         {
-            "jobs": [job.to_dict() for job in jobs],
+            "jobs": [
+                {**job.to_dict(), "can_cancel": job.is_active and (job.requested_by == session.username or is_admin)}
+                for job in jobs
+            ],
             "scope": effective_scope,
             "can_see_all": can_see_all,
         }
@@ -1008,9 +1020,16 @@ async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.g
 
 @app.post("/api/restore-jobs/{job_id}/cancel")
 async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.get_session)):
+    """Issue #123: independent of RESTRICT_JOBS_TO_OWN (#122) - that
+    setting controls who can *see* a job, this controls who can *act* on
+    one. A non-owner, non-admin gets 403, not 404 - the job IS visible
+    to them in the "all jobs" view (unless #122's restriction also hides
+    it), so pretending it doesn't exist would be a dishonest signal."""
     job = restore_jobs.manager.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No such restore job")
+    if job.requested_by != session.username and not auth.is_job_admin(session):
+        raise HTTPException(status_code=403, detail="Only the job's owner or a backup admin can cancel it")
     restore_jobs.manager.cancel(job_id)
     return JSONResponse(job.to_dict())
 

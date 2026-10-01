@@ -113,8 +113,10 @@ function restoreJobsWidget() {
       return this.jobs.filter((j) => ACTIVE_STATUSES.includes(j.status)).length;
     },
     get selectedCancellable() {
+      // can_cancel (issue #123) folds in ownership/admin, not just
+      // "still active" - the server is the real enforcement either way.
       const job = this.jobs.find((j) => j.id === this.selectedId);
-      return !!job && job.cancellable;
+      return !!job && job.can_cancel;
     },
     init() {
       this.refresh();

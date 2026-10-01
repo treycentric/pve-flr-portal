@@ -14,6 +14,7 @@ function job(overrides = {}) {
     elapsed_seconds: 5,
     error: null,
     cancellable: true,
+    can_cancel: true,
     ...overrides,
   };
 }
@@ -35,7 +36,7 @@ test('activeCount counts only queued/running/verifying jobs', () => {
 test('selectedCancellable reflects the selected job, false when none selected', () => {
   const { restoreJobsWidget } = loadApp();
   const w = restoreJobsWidget();
-  w.jobs = [job({ id: '1', cancellable: true }), job({ id: '2', cancellable: false })];
+  w.jobs = [job({ id: '1', can_cancel: true }), job({ id: '2', can_cancel: false })];
 
   w.selectedId = null;
   assert.equal(w.selectedCancellable, false);
@@ -44,6 +45,17 @@ test('selectedCancellable reflects the selected job, false when none selected', 
   assert.equal(w.selectedCancellable, true);
 
   w.selectedId = '2';
+  assert.equal(w.selectedCancellable, false);
+});
+
+test('selectedCancellable is false for an active job the session cant cancel (issue #123)', () => {
+  // can_cancel folds in ownership/admin on top of "still active" - a
+  // non-owner, non-admin session must not see the button enabled even
+  // though the job itself is still running.
+  const { restoreJobsWidget } = loadApp();
+  const w = restoreJobsWidget();
+  w.jobs = [job({ id: '1', status: 'running', cancellable: true, can_cancel: false })];
+  w.selectedId = '1';
   assert.equal(w.selectedCancellable, false);
 });
 
@@ -169,7 +181,7 @@ test('cancelSelected is a no-op without a cancellable selection', async () => {
     w.selectedId = null;
     await w.cancelSelected();
 
-    w.jobs = [job({ id: 'x', cancellable: false })];
+    w.jobs = [job({ id: 'x', cancellable: false, can_cancel: false })];
     w.selectedId = 'x';
     await w.cancelSelected();
   } finally {

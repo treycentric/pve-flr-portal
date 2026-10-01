@@ -1210,6 +1210,43 @@ clean "broad admin" signal here: `cap["dc"]["Sys.Audit"] == 1` means
 `PVE::API2::OpenId.pm` too, so an SSO/OIDC login (§7.1.1) gets the same
 `cap` shape as a password login — the bypass isn't password-login-only.
 
+**Real-world finding (2026-10-01):** `Sys.Audit` is not a rare,
+deliberately-granted signal — `pve-access-control`'s own
+`$special_roles` construction (`PVE/AccessControl.pm`) folds every
+category's `audit`-bucket privileges (where `Sys.Audit` lives) into
+PVE's built-in `PVEAuditor` role and into every `PVE*Admin`/`PVEAdmin`
+role too. A user holding `PVEAuditor` at `/` for unrelated "see the
+whole cluster read-only" reasons would trip the bypass with zero
+backup-admin intent. Investigated after a live report of a test user
+unexpectedly seeing all jobs — in that specific case the actual cause
+turned out to be `RESTRICT_JOBS_TO_OWN` simply not being enabled on the
+deployment (restriction is opt-in, off by default, so "everyone sees
+everything" was correct, expected behavior), not the `PVEAuditor`
+scenario. Left here as a documented caveat for whoever provisions
+`BackupAdmins`: grant `Sys.Audit` at `/` **specifically** for that
+purpose, on a dedicated role, rather than assuming any existing
+`PVEAuditor`/`PVE*Admin` grant was intentionally meant to confer backup
+visibility — it works, but likely not on purpose.
+
+**Cancel ownership (issue #123).** `GET`-ing the job list and
+*cancelling* a job are independent permissions — `RESTRICT_JOBS_TO_OWN`
+(above) only ever controlled who could *see* a job; `POST
+/api/restore-jobs/{id}/cancel` had **no ownership check at all** before
+this issue, so any logged-in user could cancel anyone else's job
+regardless of visibility settings. Fixed by checking `job.requested_by
+== session.username` or `auth.is_job_admin(session)` (the exact same
+bypass check #122 built — not a separate privilege) before honoring a
+cancel request; a non-owner, non-admin gets **403**, not 404 — the job
+*is* visible to them in the "all jobs" view (when visibility isn't
+restricted), so claiming it doesn't exist would be a dishonest signal
+for something that's visible but not actionable. `GET
+/api/restore-jobs`'s per-job dicts also gained `can_cancel` (computed
+in the route, not `RestoreJob.to_dict()` itself, since that method has
+no session to check ownership against) purely so the UI can grey out
+the Cancel button for a job the session can't act on — the real
+enforcement is server-side either way, this just avoids inviting a
+guaranteed-403 click.
+
 **Session handling for background jobs.** A job holds its *own copy*
 of the requester's `SessionData` (`dataclasses.replace(session)` at
 submission time inside `RestoreJobManager.create()`, not left to the

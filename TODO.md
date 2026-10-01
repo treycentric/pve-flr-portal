@@ -129,9 +129,14 @@ requirement folded into the retention ticket:
   path `/`, not scoped to any particular storage/VM). See
   `docs/plan.md` §7.5's "Job visibility scoping" subsection and
   README's "Provisioning access" → "Restore Job Visibility".
-- #123 — open: fix cancel permissions/scoping (today, any logged-in
-  user can cancel any job regardless of who submitted it — a separate,
-  not-yet-closed gap from #122's view-scoping).
+- #123 — **SHIPPED.** `POST /api/restore-jobs/{id}/cancel` now checks
+  `job.requested_by == session.username` or `auth.is_job_admin(session)`
+  (reusing #122's exact bypass check, not a separate privilege) before
+  honoring a cancel — previously any logged-in user could cancel any
+  job regardless of who submitted it. A non-owner, non-admin gets 403.
+  The job list's per-job dicts also gained `can_cancel` so the UI can
+  grey out the Cancel button proactively. See `docs/plan.md` §7.5's
+  "Cancel ownership" subsection.
 - #124 — open: persisted job + log history with a configurable
   retention window (`JOB_HISTORY_RETENTION_DAYS`, proposed default 7)
   in a dedicated `job_history.sqlite` under `PFR_DATA_DIR` (deliberately

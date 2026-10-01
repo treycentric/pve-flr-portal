@@ -1354,6 +1354,85 @@ def test_restore_jobs_cancel_marks_flag_and_returns_job(client, monkeypatch):
     assert resp.json()["id"] == submitted["id"]
 
 
+def test_restore_jobs_cancel_forbidden_for_non_owner_non_admin(client, monkeypatch, session_data):
+    """Issue #123: cancel has its own ownership check, independent of
+    RESTRICT_JOBS_TO_OWN (#122) - a job submitted by one user can't be
+    cancelled by another who isn't a job admin either."""
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def hangs(job, jobs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", hangs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    other = dataclasses.replace(session_data, username="mallory@pam", cap={})
+    main.app.dependency_overrides[auth.get_session] = lambda: other
+    try:
+        resp = client.post(f"/api/restore-jobs/{submitted['id']}/cancel")
+    finally:
+        main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    assert resp.status_code == 403
+
+    job = restore_jobs.manager.get(submitted["id"])
+    assert job.status != restore_jobs.RestoreStatus.CANCELLED
+
+
+def test_restore_jobs_cancel_allowed_for_job_admin(client, monkeypatch, session_data):
+    """A non-owner who holds the configured bypass privilege (cap["dc"])
+    can still cancel someone else's job."""
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def hangs(job, jobs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", hangs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    admin = dataclasses.replace(session_data, username="admin@pam", cap={"dc": {"Sys.Audit": 1}})
+    main.app.dependency_overrides[auth.get_session] = lambda: admin
+    try:
+        resp = client.post(f"/api/restore-jobs/{submitted['id']}/cancel")
+    finally:
+        main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    assert resp.status_code == 200
+
+
+def test_restore_jobs_list_can_cancel_reflects_ownership(client, monkeypatch, session_data):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    resp = client.get("/api/restore-jobs")
+    jobs = {j["id"]: j for j in resp.json()["jobs"]}
+    assert jobs[submitted["id"]]["can_cancel"] is True
+
+    other = dataclasses.replace(session_data, username="mallory@pam", cap={})
+    main.app.dependency_overrides[auth.get_session_keepalive] = lambda: other
+    try:
+        resp = client.get("/api/restore-jobs")
+    finally:
+        main.app.dependency_overrides[auth.get_session_keepalive] = lambda: session_data
+    jobs = {j["id"]: j for j in resp.json()["jobs"]}
+    assert jobs[submitted["id"]]["can_cancel"] is False
+
+
 def test_restore_jobs_cancel_requires_auth():
     with TestClient(main.app) as c:
         resp = c.post("/api/restore-jobs/x/cancel", follow_redirects=False)
