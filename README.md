@@ -28,7 +28,7 @@ Also check [GitHub issues](https://github.com/treycentric/pve-flr-portal/issues)
   controlled through PVE. See "Provisioning access" below for how to grant
   a user access.
 - Light, dark, and Proxmox Dark color themes.
-- **Restore straight back into a running guest** via `qemu-guest-agent`
+- Restore straight back into a running guest via `qemu-guest-agent`
   including single file, multiple files, and whole directories to the
   original location (auto-resolved from the item's own path) or to a
   location of the user's choosing (browse live guest drives and
