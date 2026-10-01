@@ -73,7 +73,13 @@ commit.
   Deferred follow-ups: `openssl s_client` POSIX candidate;
   `UNINSTALL_CA_AFTER`; `bitsadmin` over HTTPS.
 - #52 — bake certbot + a DNS-01 plugin into the LXC/Docker build, with a
-  renewal deploy hook and a first-run helper. Design in the issue.
+  renewal deploy hook and a first-run helper. **SHIPPED** —
+  `deploy/certbot-setup.sh` (first-run, DNS-01 issuance) +
+  `deploy/certbot-deploy-hook.sh` (renewal glue, installs the cert and
+  restarts the service), `INSTALL_CERTBOT`/`CERTBOT_DNS_PLUGIN` in
+  `install.sh`/`lxc-create.sh`. Docker's own path isn't covered (no
+  systemd/certbot.timer inside the container image) — out of scope for
+  now, LXC is the primary deployment target. See docs/plan.md §7.3.
 
 ## PH.6 — Directory-listing cache — SHIPPED (issue #109)
 

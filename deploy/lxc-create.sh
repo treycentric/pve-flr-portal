@@ -31,6 +31,10 @@ CORES="${CORES:-1}"
 BRIDGE="${BRIDGE:-vmbr0}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"   # or e.g. "10.0.0.50/24,gw=10.0.0.1"
 REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
+# Passed straight through to install.sh (issue #52) - see its own
+# comment for what these do.
+INSTALL_CERTBOT="${INSTALL_CERTBOT:-1}"
+CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-rfc2136}"
 
 echo "==> pve-flr-portal LXC setup"
 echo "    CTID=$CTID  HOSTNAME=$CT_HOSTNAME  STORAGE=$STORAGE  DISK=${DISK_GB}G  MEM=${MEMORY_MB}MB"
@@ -109,7 +113,8 @@ pct exec "$CTID" -- bash -c "
 # own header comment documents first), where "$0" is just "bash" and
 # `dirname "$0"` resolves to "." Confirmed live 2026-09-01: a curl-piped
 # run failed with "failed to open ./install.sh for reading".
-pct exec "$CTID" -- bash /opt/pve-flr-portal/deploy/install.sh
+pct exec "$CTID" -- env "INSTALL_CERTBOT=${INSTALL_CERTBOT}" "CERTBOT_DNS_PLUGIN=${CERTBOT_DNS_PLUGIN}" \
+  bash /opt/pve-flr-portal/deploy/install.sh
 
 CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
 echo

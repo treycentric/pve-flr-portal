@@ -845,6 +845,45 @@ admin hasn't supplied their own.
   which is about *this app* trusting *PVE's* self-signed cert when
   calling out to it — don't conflate the two in docs/config naming.
 
+**Real, CA-issued certs (issue #52, 2026-09-29):** the self-signed
+default above works but triggers a browser warning. `deploy/install.sh`
+installs `certbot` + a DNS-01 plugin (`CERTBOT_DNS_PLUGIN`, default
+`rfc2136`) by default; `deploy/certbot-setup.sh <domain>...` issues a
+cert via DNS-01 (chosen over `http-01` since this app is often deployed
+internally, with no port 80/443 exposed to the internet), installs it at
+`TLS_CERT_FILE`/`TLS_KEY_FILE` via `deploy/certbot-deploy-hook.sh`, and
+registers that hook as the cert's `renew_hook` so `certbot.timer`
+renews automatically from then on — one command, no hand-written
+renewal glue. `PFR_ACME_DATA_PLANE=1` extends the same hook to also
+install the issued cert at `RESTORE_DATA_NIC_TLS_CERT_FILE`/`_KEY_FILE`
+(§7.6.1) when the domain passed to `certbot-setup.sh` also covers the
+data-plane hostname. Safe by construction: `ensure_self_signed_cert`/
+`ensure_data_plane_cert` never overwrite or delete an admin-supplied
+cert (only a broken *self-signed* one), so a certbot-managed path is
+just another admin-supplied cert as far as `tls.py` is concerned.
+
+`certbot-setup.sh` also takes an `ACME_SERVER` override (a directory
+URL) so an internal ACME server — e.g. an
+[acme2certifier](https://github.com/grindsa/acme2certifier) instance
+fronting an internal PKI, rather than Let's Encrypt itself — can be
+used. certbot writes the server into the certificate's own
+`renewalparams`, so `certbot renew` (and therefore
+`certbot-deploy-hook.sh` as its `renew_hook`) keeps targeting the same
+server with no extra plumbing on this project's side. The one thing
+outside this script's control: if that internal server's own TLS cert
+isn't from a publicly-trusted CA, its issuing CA has to be trusted by
+the container first (`update-ca-certificates`) — certbot has no
+`--no-verify-ssl`-equivalent for the ACME server itself (that flag,
+where it exists at all, is about challenge-verification requests, not
+the ACME connection).
+
+`CERTBOT_KEY_TYPE`/`CERTBOT_RSA_KEY_SIZE` cover the other internal-CA
+mismatch found in practice: an internal CA that only issues against
+RSA (certbot's own default moved to ECDSA on recent versions), and/or
+wants a non-default key size (4096 rather than certbot's default
+2048). Both flags land in the same `renewalparams` as `--server`, so
+renewal stays consistent automatically.
+
 **Resolved (2026-08-30):**
 - `storage/content` verification shape confirmed (7.1 implementation
   note above).

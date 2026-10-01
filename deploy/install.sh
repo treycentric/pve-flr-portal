@@ -12,6 +12,17 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_USER="pveflr"
 SERVICE_NAME="pve-flr-portal"
+# Issue #52: certbot + a DNS-01 plugin, so an admin who wants a real
+# (CA-issued) cert can run deploy/certbot-setup.sh once instead of
+# hand-writing a renewal hook. Ready to go by default but skippable
+# (INSTALL_CERTBOT=0) since the self-signed cert tls.py generates works
+# fine without it. rfc2136 is the default plugin - DNS-01 is the right
+# challenge type for an internal deployment with no port 80/443 exposed
+# to the internet for http-01, and rfc2136 covers any DNS server that
+# speaks RFC 2136 dynamic updates (most self-hosted DNS, many providers'
+# BIND frontends) without committing to one commercial DNS API.
+INSTALL_CERTBOT="${INSTALL_CERTBOT:-1}"
+CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-rfc2136}"
 
 # Git's "dubious ownership" safety check (CVE-2022-24765) rejects git
 # commands against a repo it doesn't consider safely owned - confirmed
@@ -26,6 +37,17 @@ git config --system --add safe.directory "$APP_DIR"
 echo "==> Installing OS packages"
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip
+
+if [ "$INSTALL_CERTBOT" = "1" ]; then
+  echo "==> Installing certbot + dns-${CERTBOT_DNS_PLUGIN} plugin"
+  apt-get install -y -qq certbot
+  # Separate call: a missing/renamed plugin package (Debian's certbot
+  # DNS plugins occasionally don't exist for every provider on every
+  # release) should be a warning, not abort the whole install over an
+  # optional feature.
+  apt-get install -y -qq "python3-certbot-dns-${CERTBOT_DNS_PLUGIN}" || \
+    echo "    Warning: python3-certbot-dns-${CERTBOT_DNS_PLUGIN} not available - certbot installed, but deploy/certbot-setup.sh needs this plugin package too."
+fi
 
 if ! id "$APP_USER" >/dev/null 2>&1; then
   echo "==> Creating service user $APP_USER"

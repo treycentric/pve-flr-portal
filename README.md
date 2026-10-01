@@ -405,6 +405,51 @@ SAN; the portal won't touch an admin-supplied cert, it only logs a
 UI cert is unaffected — it's keyed to `PVE_HOST`/`localhost`, not the
 container IP.)
 
+**TLS certificates → Let's Encrypt (DNS-01, issue #52).** The
+self-signed cert above works fine but triggers a browser warning.
+`deploy/install.sh` installs `certbot` + a DNS-01 plugin
+(`CERTBOT_DNS_PLUGIN`, default `rfc2136`) by default
+(`INSTALL_CERTBOT=1`). DNS-01 is used instead of `http-01` because this
+app is often deployed internally, with no port 80/443 exposed to the
+internet for Let's Encrypt to reach — the challenge is proven via a DNS
+TXT record instead.
+
+1. Copy `deploy/rfc2136-credentials.ini.example` (or the equivalent for
+   your plugin) to `/etc/letsencrypt/<plugin>-credentials.ini` inside
+   the container, fill in real values, `chmod 600` it.
+2. `bash deploy/certbot-setup.sh flr.example.com` — issues the cert,
+   installs it at `TLS_CERT_FILE`/`TLS_KEY_FILE`, restarts the service,
+   and wires up automatic renewal (`certbot.timer` + `deploy/certbot-deploy-hook.sh`
+   as the renewal hook — no separate step needed after this).
+3. Want the Direct Network Transfer data-plane cert issued too (instead
+   of its own auto-generated self-signed one)? Pass its hostname as an
+   extra domain (`bash deploy/certbot-setup.sh flr.example.com
+   flr-data.example.com`) and set `PFR_ACME_DATA_PLANE=1` in `.env`
+   first.
+
+**Using an internal ACME server instead of Let's Encrypt** (e.g. an
+[acme2certifier](https://github.com/grindsa/acme2certifier) instance
+fronting your own internal PKI): set `ACME_SERVER` to that server's
+directory URL, e.g. `ACME_SERVER=https://acme.internal.example.com/directory
+bash deploy/certbot-setup.sh flr.internal.example.com`. certbot records
+the server in the certificate's own renewal config, so `certbot renew`
+keeps using it automatically — no extra step. If that server's own TLS
+cert isn't from a publicly-trusted CA, its issuing CA needs to be
+trusted by the container first (`update-ca-certificates`); certbot has
+no separate flag to skip verifying the ACME server's own TLS.
+
+**Key type/size**, if your internal CA doesn't support certbot's
+current default (ECDSA): set `CERTBOT_KEY_TYPE=rsa` and, if you need a
+non-default size, `CERTBOT_RSA_KEY_SIZE=4096` before running
+`certbot-setup.sh`. Both are recorded in the certificate's own renewal
+config too, so `certbot renew` keeps using the same key type/size
+automatically.
+
+`tls.py` never overwrites or deletes an admin-supplied cert (only a
+broken *self-signed* one), so pointing it at a certbot-managed path is
+safe — certbot renews in place, the hook re-copies, the app just sees a
+valid file.
+
 ## Tests
 
 ```
