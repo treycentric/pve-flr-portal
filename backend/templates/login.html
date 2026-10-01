@@ -32,6 +32,28 @@
     </div>
   </header>
   <div class="login-wrap">
+    {% if tfa_challenge %}
+    {# Issue #15, second step: a plain form, no Alpine needed here - the
+       realm/openid branching above doesn't apply mid-2FA-flow. Carries
+       username/realm/the PVE-issued challenge back as hidden fields so
+       this route needs no server-side state for a login in progress;
+       the original password was already verified to get here and isn't
+       needed again (see auth.TFARequired's docstring). #}
+    <form class="login-box" method="post" action="/login">
+      <img class="about-logo login-logo" src="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}" alt="">
+      <h2 class="login-title">Two-factor authentication</h2>
+      {% if error %}
+      <p class="login-error">{{ error }}</p>
+      {% endif %}
+      <input type="hidden" name="username" value="{{ tfa_username }}">
+      <input type="hidden" name="realm" value="{{ tfa_realm }}">
+      <input type="hidden" name="tfa_challenge" value="{{ tfa_challenge }}">
+      <label class="login-label" for="password">Authenticator code or recovery key</label>
+      <input class="login-input" type="text" id="password" name="password" autocomplete="one-time-code" autofocus required>
+      <button type="submit" class="btn-primary login-submit">Verify</button>
+      <a class="login-back-link" href="/login">&larr; Back</a>
+    </form>
+    {% else %}
     <form
       class="login-box"
       method="post"
@@ -102,7 +124,8 @@
       </label>
       <button type="submit" class="btn-primary login-submit" x-text="selectedType === 'openid' ? 'Continue with SSO' : 'Log in'">Log in</button>
     </form>
+    {% endif %}
   </div>
-  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script defer src="/static/vendor/alpine.min.js?v={{ static_version('vendor/alpine.min.js') }}"></script>
 </body>
 </html>

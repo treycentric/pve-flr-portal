@@ -19,6 +19,7 @@ from starlette.exceptions import HTTPException
 
 from . import (
     auth,
+    dir_cache,
     guest_agent,
     guest_browse,
     guest_original_location,
@@ -100,18 +101,79 @@ async def login_page(request: Request, reason: str | None = Query(None)):
 
 @app.post("/login")
 async def login_submit(
-    request: Request, username: str = Form(...), realm: str = Form(...), password: str = Form(...)
+    request: Request,
+    username: str = Form(...),
+    realm: str = Form(...),
+    password: str = Form(""),
+    tfa_challenge: str = Form(""),
 ):
-    full_username = username if "@" in username else f"{username}@{realm}"
-    try:
-        session_id = await auth.login(full_username, password)
-    except HTTPException:
+    """Issue #15: a second POST here - distinguished by `tfa_challenge`
+    being set - is the second step of a 2FA login. `password` doubles
+    as "the account password" (first step) or "the TOTP/recovery code"
+    (second step), same as PVE's own /access/ticket contract does.
+
+    On the code-entry step, the `username` hidden field carries PVE's
+    own fully-qualified `data["username"]` from the first response
+    (TFARequired.username) verbatim - **not** a client-side
+    `f"{username}@{realm}"` reconstruction. PVE's challenge ticket is
+    cryptographically bound to that exact string as AAD
+    (`assemble_ticket($ticket_data, $aad)` in its own
+    PVE/API2/AccessControl.pm, `$aad = $username` after
+    `lookup_username` normalization) - resending anything other than
+    the exact string PVE itself returned makes the second call fail
+    verification, even with the right code. Confirmed live: this was
+    the actual bug behind an initial "the submitted code isn't
+    working" report."""
+
+    async def _login_error(error: str, status_code: int):
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": "Invalid username or password", "notice": None, "realms": await auth.list_realms()},
-            status_code=401,
+            {
+                "error": error,
+                "notice": None,
+                "realms": await auth.list_realms(),
+                "tfa_challenge": tfa_challenge,
+                "tfa_username": username,
+                "tfa_realm": realm,
+            },
+            status_code=status_code,
         )
+
+    try:
+        if tfa_challenge:
+            # `username` is already PVE's own fully-qualified string here -
+            # see the docstring above. Not reconstructed from realm.
+            session_id = await auth.finish_tfa_login(username, password, tfa_challenge)
+        else:
+            full_username = username if "@" in username else f"{username}@{realm}"
+            session_id = await auth.login(full_username, password)
+    except auth.TFARequired as tfa:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "error": None,
+                "notice": None,
+                "realms": await auth.list_realms(),
+                "tfa_challenge": tfa.challenge,
+                "tfa_username": tfa.username,
+                "tfa_realm": realm,
+            },
+        )
+    except HTTPException:
+        return await _login_error(
+            "Invalid authentication code" if tfa_challenge else "Invalid username or password", 401
+        )
+    except httpx.HTTPError as exc:
+        # A transport-level failure (PVE unreachable, TLS verification
+        # failure against its cert, DNS) isn't an HTTPException - issue
+        # #98, confirmed live as an unhandled 500 with zero indication
+        # of the real cause. Logged here since the login page's own
+        # message is deliberately generic (no PVE_HOST/internals in a
+        # page anyone can reach pre-auth).
+        _log.warning("Login failed - could not reach PVE: %s", exc)
+        return await _login_error("Could not reach PVE - see the server log for details.", 502)
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         "session_id",
@@ -227,6 +289,20 @@ def _parse_volid(volid: str) -> tuple[str, str, str]:
 async def index(request: Request, task: str | None = None, session: SessionData = Depends(auth.get_session)):
     listing = await pve_client.list_backup_archives(session)
     archives = listing.archives
+    if not listing.errors:
+        # PH.6 cache GC (issue #109 follow-up): a snapshot can disappear
+        # (PBS retention pruning) or this user's access to it can be
+        # revoked after it was cached - neither is detectable from
+        # dir_cache alone, so reconcile against this request's own
+        # live, permission-filtered archive list. Skipped entirely if
+        # any configured storage errored - a transient PVE hiccup must
+        # never look like "nothing exists anymore" and wipe good cache
+        # entries; better to leave possibly-stale rows a little longer
+        # than to wrongly nuke everything on a blip.
+        try:
+            await dir_cache.evict_missing(session.username, frozenset(a["volid"] for a in archives))
+        except Exception:
+            _log.exception("dir_cache eviction failed - leaving cached entries as-is")
     try:
         guest_names = await pve_client.list_guest_names(session)
     except httpx.HTTPStatusError:
@@ -287,18 +363,30 @@ async def index(request: Request, task: str | None = None, session: SessionData 
         "index.html",
         {
             "snapshots": snapshots,
-            "snapshots_json": json.dumps(snapshots),
+            "snapshots_json": _json_for_script(snapshots),
             "guest_vmid": guest_vmid,
             "guest_type": guest_type,
             "guest_label": guest_label,
-            "guest_json": json.dumps({"type": guest_type, "vmid": guest_vmid, "label": guest_label}),
-            "groups_json": json.dumps(groups),
+            "guest_json": _json_for_script({"type": guest_type, "vmid": guest_vmid, "label": guest_label}),
+            "groups_json": _json_for_script(groups),
             "current_identity": session.username,
             "storage_errors": [dataclasses.asdict(e) for e in listing.errors],
             "app_version": __version__,
             "repo_url": REPO_URL,
         },
     )
+
+
+def _json_for_script(data) -> str:
+    """json.dumps() for embedding inside a <script> block via the `|safe`
+    filter. json.dumps() doesn't escape "<", so a value containing the
+    literal text "</script>" - e.g. a PVE guest display name, which any
+    user able to rename a VM/CT controls, far below file-restore/PBS
+    privilege - would close the script element early and let the
+    attacker's own markup/script run in every other user's session
+    (stored XSS). Escaping "<" as its Unicode escape is the standard
+    mitigation and is a no-op for JSON parsing."""
+    return json.dumps(data).replace("<", "\\u003c")
 
 
 def _type_label(entry: dict, at_root: bool, filesystem_root: bool = False) -> str:
@@ -871,8 +959,8 @@ async def restore(
 async def restore_jobs_list(session: SessionData = Depends(auth.get_session_keepalive)):
     """PH.5 (docs/plan.md §7.5): the running-jobs indicator's data source,
     polled from the top bar every few seconds. Jobs are visible to any
-    logged-in user, not scoped per-requester - a single-admin homelab
-    tool with one shared task list, same as the rest of this design.
+    logged-in user, not scoped per-requester - a single-admin tool
+    with one shared task list, same as the rest of this design.
 
     Uses get_session_keepalive: this poll must not keep an idle session
     alive (issue #27) - if it 401s, apiFetch() in app.js redirects."""

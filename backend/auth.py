@@ -8,11 +8,12 @@ refresh server-side, transparently - the browser only ever holds our
 own opaque session cookie, never the real PVE ticket.
 
 Session store is a plain in-memory dict: this is a single-process
-homelab tool (CLAUDE.md - no extra services), so a backend restart
+internal tool (CLAUDE.md - no extra services), so a backend restart
 logging everyone out is an acceptable tradeoff.
 """
 import asyncio
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -109,8 +110,27 @@ def _store_ticket(data: dict) -> str:
     return session_id
 
 
+class TFARequired(Exception):
+    """Issue #15: raised by login() when the account has a second factor
+    (TOTP or a recovery key - PVE's own second /access/ticket call
+    doesn't distinguish which) configured. `challenge` is PVE's own
+    signed, opaque intermediate value - not a real session ticket yet -
+    that finish_tfa_login() must echo back verbatim as `tfa-challenge`.
+    It encodes the already-verified username/password itself (confirmed
+    against PVE's own source, PVE/API2/AccessControl.pm's create_ticket:
+    the intermediate ticket is `assemble_ticket("!tfa!$tfa_info")`,
+    PVE's normal ticket-signing applied to a TFA-prefixed payload), so
+    the original password is never needed again on the second call."""
+
+    def __init__(self, challenge: str, username: str):
+        self.challenge = challenge
+        self.username = username
+
+
 async def login(username: str, password: str) -> str:
-    """Authenticate against PVE's ticket endpoint; returns our opaque session id."""
+    """Authenticate against PVE's ticket endpoint; returns our opaque
+    session id, or raises TFARequired if a second factor is needed -
+    call finish_tfa_login() next with the code the user enters."""
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         resp = await client.post(
             f"{_API_ROOT}/access/ticket",
@@ -118,6 +138,41 @@ async def login(username: str, password: str) -> str:
         )
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    data = resp.json()["data"]
+    if data.get("NeedTFA"):
+        raise TFARequired(challenge=data["ticket"], username=data["username"])
+    return _store_ticket(data)
+
+
+_TOTP_CODE_RE = re.compile(r"^\d{6,8}$")
+
+
+async def finish_tfa_login(username: str, code: str, challenge: str) -> str:
+    """Issue #15, second factor: `code` is whatever the user entered - a
+    TOTP code or a one-time recovery key, PVE accepts either the same
+    way here, in `password` (mixing it with the unrelated `otp` param is
+    explicitly rejected server-side: "TFA response should be in
+    'password', not 'otp'"). **The value must be prefixed with which
+    method it's for** - `totp:123456` or `recovery:<key>` - confirmed
+    against PVE's own web UI (proxmox-widget-toolkit's TfaWindow.js,
+    `finishChallenge('totp:' + code)` / `finishChallenge('recovery:' +
+    key)`); a bare code is silently rejected regardless of whether it's
+    actually correct. This was a real, live-reported bug - the Perl
+    API2 schema alone doesn't document the prefix requirement, only
+    PVE's own client does.
+
+    A recovery key is always four hyphen-separated groups of 4 hex
+    digits (`^[0-9a-f]{4}(-[0-9a-f]{4}){3}$`, per the same widget's own
+    input validation) and never looks like a bare 6-8 digit number, so
+    which prefix to use is unambiguous without a second input field."""
+    method = "totp" if _TOTP_CODE_RE.match(code) else "recovery"
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        resp = await client.post(
+            f"{_API_ROOT}/access/ticket",
+            data={"username": username, "password": f"{method}:{code}", "tfa-challenge": challenge},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid authentication code")
     return _store_ticket(resp.json()["data"])
 
 

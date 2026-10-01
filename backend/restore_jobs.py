@@ -7,7 +7,7 @@ immediately; the actual work runs as a tracked asyncio task here.
 Same tradeoff already accepted for auth._sessions (CLAUDE.md - no extra
 services): single-process, in-memory, lost on a backend restart. Jobs
 are visible to any logged-in user rather than scoped per-requester -
-this is a single-admin homelab tool with one shared task list, the same
+this is a single-admin tool with one shared task list, the same
 way Synology ABB's own restore-task list works.
 
 **Session handling.** A job holds its own SessionData *snapshot*

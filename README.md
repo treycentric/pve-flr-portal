@@ -34,18 +34,18 @@ Also check [GitHub issues](https://github.com/treycentric/pve-flr-portal/issues)
   location of the user's choosing (browse live guest drives and
   directories or manually type a path). Restoration supports a few
   different methods (support detected automatically):
-  - Chunk method using qeumu-guest-agent (slower). Useful for smaller
+  - Chunk method using qemu-guest-agent (slower). Useful for smaller
     content.
   - HTTP/HTTPS Direct Network Transfer path (faster). Preferable for
     larger content or lots of files/directories.
 - Automatically resolves Windows drive-letter mapping to partitions for
-  display in the UI, matched to the guest's real disk/partition layout).
-- Supports the use of multiple PBS storage backents;
+  display in the UI, matched to the guest's real disk/partition layout.
+- Supports the use of multiple PBS storage backends.
 - Hides partitions automatically that aren't readable or don't contain
   supported filesystems. This also includes Windows striped/mirrored volumes.
 
 See `CHANGELOG.md` for the version-by-version detail and `TODO.md` for
-what's on the roadmap. 
+what's on the roadmap.
 
 ## Using the File Restore Portal
 
@@ -87,7 +87,7 @@ what's on the roadmap.
    through any file-restore API Proxmox currently exposes; see
    "Restore-to-guest" below). Large transfers use a Direct Network Transfer
    path automatically when a data NIC is configured for the application.
-7. **Restore Jobs Task** This allows for viewing the progress of running
+7. **Restore Jobs** (top right) allows for viewing the progress of running
    or completed restore jobs.
 8. **Color Theme** Change the currently selected color theme used by the app
    (stored in user's browser state).
@@ -116,8 +116,8 @@ The app serves HTTPS by default on port **8008** (a self-signed cert is
 generated automatically on first run at `certs/portal.crt`/`portal.key`
 if you haven't dropped in your own). Open **https://127.0.0.1:8008/** —
 your browser will warn about the self-signed cert the first time; that's
-expected for a developer self-signed setup. Drop a CA-issued cert/key at
-the same paths to replace it.
+expected until you replace it. Drop a CA-issued cert/key at the same
+paths to do so.
 
 See "Provisioning access" below for how to grant a user the
 `FileRestoreReader` role needed to browse and download (restore-to-guest
@@ -203,7 +203,7 @@ pveum role add FileRestoreOperator -privs "VM.GuestAgent.Audit,VM.GuestAgent.Fil
   `0644`, fresh mtime — no further guest access needed.
 - `VM.GuestAgent.Unrestricted` enables **full restore**: larger files,
   directories, and the optional "restore metadata" / "verify"
-  upgrades. This is a much larger grant — Proxmox doesn't expAlsoose a
+  upgrades. This is a much larger grant — Proxmox doesn't expose a
   narrower privilege for `guest-exec`, so anything that needs to run a
   command inside the guest needs this one. Add it only for guests
   where that broader access is acceptable:
@@ -345,7 +345,20 @@ docker run -d -p 8008:8008 \
   ghcr.io/treycentric/pve-flr-portal:latest
 ```
 
-### Docker for Local Devevelopment/Testing
+**Image signing (issue #111).** Every published image is signed with
+[cosign](https://github.com/sigstore/cosign), keyless via the publishing
+workflow's own GitHub Actions OIDC identity - there's no key to manage,
+rotate, or leak. Verify an image actually came from this repo's own
+`image.yml` workflow, not just "someone with a key":
+
+```
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/treycentric/pve-flr-portal/\.github/workflows/image\.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/treycentric/pve-flr-portal:latest
+```
+
+### Docker for Local Development/Testing
 
 ```
 docker compose up --build

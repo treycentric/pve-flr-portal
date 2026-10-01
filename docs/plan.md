@@ -370,21 +370,24 @@ reason for it:**
 So there is **nothing to implement here** — the scheduled poll is
 dropped from the plan, not outstanding work.
 
-### The directory-listing cache — real, still unbuilt, optional
+### The directory-listing cache — built (PH.6, issue #109)
 
-The part of the old "cache" idea that would still help is different and
-narrower: per §3, an uncached `file-restore/list` costs ~3s (cold, via
-the helper VM). Today `/api/browse` pays that **every** time — scrub
-across ten snapshots in the same folder and you wait ten times; revisit
-a folder and you wait again. A lazily-populated `dir_cache` keyed by
-(volid, path) holding the raw list response would make repeat
+The part of the old "cache" idea that helps is different and narrower:
+per §3, an uncached `file-restore/list` costs ~3s (cold, via the helper
+VM). Before this, `/api/browse` paid that **every** time — scrub across
+ten snapshots in the same folder and you wait ten times; revisit a
+folder and you wait again. A lazily-populated `dir_cache` keyed by
+(username, volid, path) holding the raw list response (§6) makes repeat
 navigation and cross-snapshot scrubbing in a known folder instant.
 
-This is a **performance optimization, not a correctness gap** — the app
-works without it. It's carved out as its own optional phase (see the
-roadmap). If built, it can stay a single SQLite file written on
-cache-miss from the request path — still no background job, no extra
-service.
+Originally scoped as a **performance optimization, not a correctness
+gap** — the app worked without it. Re-scoped after issue #109: PVE's
+own privileged API worker pool that `file-restore/list` competes for is
+small (default 3) and shared node-wide, so cutting how *often* this app
+calls PVE turned out to matter for host stability, not just responsiveness -
+see §9.1's "Helper-VM stampede" writeup. Stayed a single SQLite file
+written on cache-miss from the request path — no background job, no
+extra service, per CLAUDE.md.
 
 ## 5. UI mapping — ABB screenshot → this build
 
@@ -466,31 +469,66 @@ shadows were pulled out into `--surface-*`, `--row-hover`,
 
 ## 6. Data model
 
-**Not implemented. As of PH.4 the app has no database.** This section is
-kept as the design for the *directory-listing cache* if that optional
-phase is ever taken (see §4 and the roadmap).
-
-The original `snapshots` table is **dropped** — snapshot enumeration is
-a live PVE `storage/{id}/content` call and the timeline renders from
-JSON embedded in the page (§4). Only `dir_cache` remains as a candidate,
-and without a `snapshots` table it keys directly off the volid:
+**Implemented (PH.6, issue #109, 2026-09-30)** as `backend/dir_cache.py`
+— the app's first and, as of this writing, only piece of on-disk state
+beyond `PFR_DATA_DIR`'s bare existence (issue #30). The original
+`snapshots` table stays **dropped** — snapshot enumeration is a live PVE
+`storage/{id}/content` call and the timeline renders from JSON embedded
+in the page (§4). Only `dir_cache` was built:
 
 ```sql
--- CANDIDATE, not built. Written on cache-miss from the request path;
--- no background job populates it.
 CREATE TABLE dir_cache (
+  username      TEXT NOT NULL,        -- session_data.username, e.g. 'alice@pam'
   volume        TEXT NOT NULL,        -- full volid, e.g. 'pbs:backup/vm/132/2026-08-29T14:48:06Z'
   path          TEXT NOT NULL,        -- the opaque filepath token from file-restore/list ('/' for root)
   listing_json  TEXT NOT NULL,        -- verbatim file-restore/list response
   fetched_at    TEXT NOT NULL,
-  PRIMARY KEY (volume, path)
+  PRIMARY KEY (username, volume, path)
 );
 ```
 
-Invalidation is trivial in practice: a backup snapshot is immutable, so
-a (volume, path) listing never changes once cached. `fetched_at` is
-only there for an optional "evict entries older than N days" sweep to
-cap the file size.
+**Keyed by `username` too, correcting the original sketch above** (which
+only had `(volume, path)`). `pve_client.list_path()`'s in-flight-call
+coalescing (issue #60, §9.1) already had to solve this exact problem:
+file-restore access is permission-gated per PVE ticket, and different
+users can hold different ACL grants on different storages/VMs, so
+serving User B a listing that only ever proved User A's authorization
+would be a real access-control bypass. `dir_cache` reuses the same
+threat model. Caught before implementation, not after — see issue
+#109's discussion.
+
+**Content invalidation** is trivial: a backup snapshot is immutable, so
+a `(username, volume, path)` listing never changes once cached.
+`fetched_at` is kept for a possible future "evict entries older than N
+days" sweep to cap the file size — not built; the file has stayed small
+in practice (one row per distinct listing a user has ever viewed, no
+background growth).
+
+**Existence invalidation is a different problem "immutable content"
+doesn't solve** — the snapshot itself can still disappear (PBS
+retention pruning, a manual delete) or the user's own access to it can
+be revoked, and nothing about `dir_cache` would notice either on its
+own. `evict_missing()` (called from `main.py`'s `index()`, right after
+its own `list_backup_archives()` call — no separate sweep or background
+job) reconciles a user's cached volumes against that same request's
+live, permission-filtered list and drops anything not in it. This isn't
+just tidiness: `get()` never re-checks permission on a hit, so without
+this, a user whose access to a guest was revoked could otherwise keep
+reading out everything they'd cached from it before, indefinitely — a
+real access-control gap the reconciliation closes as a side effect.
+Skipped entirely when `listing.errors` is non-empty (any configured
+storage failed to answer) — a transient PVE hiccup must never look
+like "nothing exists anymore" and wipe good entries from the storages
+that did answer; better to leave possibly-stale rows a little longer
+than to wrongly nuke everything on a blip. Scoped per-user throughout:
+one user's reconciliation never touches another user's own rows for
+the exact same volume.
+
+Reused for what it actually turned out to fix: originally scoped as
+"optional, perf only" (§4), then re-scoped after issue #109 (a real
+host-instability report) into a genuine stability mitigation — see
+§9.1's "Helper-VM stampede" writeup for why cutting how *often* this
+app calls PVE matters as much as capping how many calls run *at once*.
 
 ## 7. Auth & TLS — how the current system works
 
@@ -517,7 +555,7 @@ inline on any request once it's more than 90 minutes old. Same effect
 as a timer (tickets never hit their ~2h expiry for an active user),
 simpler code — no timer bookkeeping to leak or clean up.
 
-PVE 2FA/TOTP is **not** handled — see `TODO.md`.
+PVE 2FA/TOTP (TOTP and recovery keys) is handled — issue #15, see below.
 
 ### 7.1 PVE-only auth, no separate PBS token
 
@@ -572,10 +610,78 @@ comes back in the same shape PBS's admin API gives, since the UI's
 - `pve_client.py`'s functions need a `session` argument instead of
   reading the module-level static token; `_headers()` becomes
   `_headers(session)`.
-- 2FA/TOTP: if any target user has a second factor enabled on their PVE
-  account, `/access/ticket` requires an extra round-trip. Confirm
-  whether that applies here before committing to a single-step login
-  form.
+- **2FA/TOTP — shipped (issue #15).** A second factor on the account
+  does require an extra round-trip, confirmed against PVE's own source
+  (`pve-access-control`'s `PVE/API2/AccessControl.pm`, `create_ticket`)
+  rather than guessed: the first `/access/ticket` response carries
+  `NeedTFA: 1` plus an opaque, signed intermediate value in `ticket` -
+  not a real session ticket yet, but not something the client needs to
+  interpret either, just echo back. The second POST sends `username`,
+  the entered code in `password` (never `otp` - PVE's own code
+  explicitly rejects mixing the two when `tfa-challenge` is set), and
+  that intermediate value in `tfa-challenge`. The original password
+  isn't needed again: the intermediate value is itself PVE's normal
+  ticket-signing applied to a `!tfa!`-prefixed payload, so it already
+  encodes that the first factor checked out.
+
+  `auth.py`: `login()` raises `TFARequired(challenge, username)` instead
+  of returning when `NeedTFA` is set; `finish_tfa_login(username, code,
+  challenge)` does the second call. `login.html` reveals a code-entry
+  step in place (same POST route, `tfa_challenge` present or not is
+  what distinguishes the two steps) with username/realm/challenge
+  carried as hidden fields - no server-side "pending login" state
+  needed, matching this project's stateless-login design.
+
+  Covers TOTP and recovery keys - PVE's second call doesn't distinguish
+  which the entered string represents, so the same plain-text code
+  field accepts either. WebAuthn is explicitly out of scope: it needs
+  real browser credential-API JavaScript (`navigator.credentials.get()`
+  against a challenge), not just a text field posted through the same
+  two-step ticket exchange.
+
+  **Real bug, caught live against an actual 2FA account (2026-09-30):**
+  the second call kept failing with a correct code. Cause: the
+  code-entry form's hidden `username` field was echoing back the raw,
+  client-typed username (e.g. `alice`) reconstructed with the realm
+  (`alice@pam`), instead of the exact string PVE itself returned as
+  `data["username"]` in the first response. That distinction matters
+  because PVE's challenge ticket is cryptographically bound to it: the
+  intermediate ticket is `assemble_ticket($ticket_data, $aad)` with
+  `$aad = $username` - the *normalized* username, after PVE's own
+  `lookup_username` - not whatever a client-side `f"{username}@{realm}"`
+  string happens to produce. Any mismatch fails the second call's
+  verification outright, independent of whether the code itself is
+  right. Fixed by carrying `TFARequired.username` (PVE's own returned
+  value) through the hidden field verbatim instead of reconstructing
+  it - `login_submit` no longer touches the username at all on the
+  second step. A real-world illustration of why "obviously equivalent"
+  strings (`alice@pam` built two different ways) aren't safe to
+  interchange across a cryptographic boundary designed around one
+  specific, authoritative source of that string.
+
+  **UX addition, same live test:** the code-entry step needed a way
+  back to the username/password form without a page reload - a plain
+  `<a href="/login">` link, not a form action, so it abandons the
+  in-progress challenge rather than trying to resubmit it.
+
+  **Second real bug, same live test, after the username fix above still
+  didn't get a correct code accepted:** the `password` value on the
+  second call needs a **type prefix** - `totp:123456` or
+  `recovery:<key>` - not a bare code. Confirmed against PVE's real web
+  UI client (`proxmox-widget-toolkit`'s `TfaWindow.js`:
+  `finishChallenge('totp:' + code)` / `finishChallenge('recovery:' +
+  key)`), not documented anywhere in the API2 schema itself - the Perl
+  endpoint's own parameter description for `password` ("The secret
+  password. This can also be a valid ticket.") gives no hint that a TFA
+  response additionally needs this prefix. Without it, PVE silently
+  rejects the response regardless of whether the code is actually
+  correct - confirmed live against a real account that could log into
+  the Proxmox web UI with the same OTP. Fixed by prefixing based on
+  shape: a recovery key is always four hyphenated groups of 4 hex
+  digits (`^[0-9a-f]{4}(-[0-9a-f]{4}){3}$`, per that same widget's own
+  input validation) and never looks like a bare 6-8-digit number, so
+  which prefix to use is unambiguous without a second input field the
+  way PVE's own multi-tab widget has.
 
 **What this simplifies vs. today:** no more `pbs_client.py`, no more
 `PBS_HOST`/`PBS_DATASTORE`/`PBS_TOKEN_*`/`PBS_VERIFY_SSL` in `.env` —
@@ -744,7 +850,7 @@ admin hasn't supplied their own.
   note above).
 - 2FA: not investigated, not handled — flagged as a known gap above.
 - Session store: in-memory, as expected — a backend restart logs
-  everyone out. Accepted tradeoff for a single-process homelab tool.
+  everyone out. Accepted tradeoff for a single-process internal tool.
 - Logout UX: a person-icon menu at the far right of the top banner
   (matching the ABB reference the user provided), with an About entry
   (app logo/name/credit) alongside it. Session cookie is `HttpOnly`,
@@ -1007,7 +1113,7 @@ aren't guest-agent commands and don't share the channel:
   today's single-write restore, but will matter once a multi-chunk
   restore (§ Design B above) is sending many sequential commands back
   to back — left off by default since there's no evidence yet of what
-  a typical homelab actually needs; tune it up if a restore is ever
+  a typical deployment actually needs; tune it up if a restore is ever
   observed crowding out other guest-agent users.
 
 Response shape:
@@ -1039,7 +1145,7 @@ and returns its id immediately; the actual work runs as a tracked
 asyncio background task. New `backend/restore_jobs.py`, same
 single-process/in-memory tradeoff already accepted for
 `auth._sessions` (CLAUDE.md's "no extra services" — lost on a backend
-restart, acceptable for a homelab tool):
+restart, acceptable for a single-admin internal tool):
 
 - `RestoreJob`: id, a **snapshot** of the requesting session (see
   below), guest type/vmid/name, task name (auto-generated, e.g.
@@ -1055,7 +1161,7 @@ restart, acceptable for a homelab tool):
   boundary and marks `cancelled`, cleaning up any scratch dir already
   written).
 - Jobs are visible to any logged-in user, not scoped per-requester —
-  matches this being a single-admin homelab tool with one shared task
+  matches this being a single-admin internal tool with one shared task
   list (Synology ABB's own restore-task list works the same way), and
   keeps the UI simple. Revisit if this ever becomes genuinely
   multi-admin.
@@ -1791,8 +1897,9 @@ present:
 **Network segmentation.** Design C is the first (and so far only)
 feature where the guest genuinely needs a network path to this app —
 everything else is QMP-mediated with no such requirement. Given a
-homelab with several *mutually non-routable* subnets, "add one NIC" isn't
-enough — the design is **one data-plane NIC per non-routable subnet**:
+network with several *mutually non-routable* subnets, "add one NIC"
+isn't enough — the design is **one data-plane NIC per non-routable
+subnet**:
 
 - The existing interface keeps serving the UI (user-facing) and the
   outbound PVE API calls (management-plane) — unchanged.
@@ -1849,7 +1956,7 @@ QGA auto-match picked correctly; concrete firewall rule examples
 (Proxmox's own firewall, and iptables/nftables as a generic Docker-path
 fallback) restricting each data NIC to inbound-only-to-the-download-
 route; and a worked example with 2–3 subnets, matching the actual
-homelab shape this is built for.
+network shape this is built for.
 
 **Simpler alternative worth documenting alongside this, not competing
 with it: guests with a full desktop, when they can reach the management
@@ -2174,7 +2281,7 @@ and `verify` clients reject it until you do).
 
 **Guest trust-store management.** `RESTORE_DATA_NIC_TLS_INSTALL_CA` =
 `never` (default is `never`, but the shipped `PREFERRED` default is
-`verify`, so a homelab that wants zero pre-provisioning sets this to
+`verify`, so a deployment that wants zero pre-provisioning sets this to
 `if-missing`) / `if-missing` (skip when it's already there — a
 `certutil -store Root <thumbprint>` check on Windows, an anchor-file
 `test -f` on Linux) / `always`. Install = `agent/file-write` the CA PEM
@@ -2667,12 +2774,11 @@ record):**
 - **Backend:** Python, FastAPI — one small process, typed surface for a
   handful of endpoints (list snapshots, list a path, download, later
   push-to-guest).
-- **Storage:** none currently — the app is stateless and reads
-  everything live from the PVE API each request. SQLite is held in
-  reserve for one optional thing only: a lazily-populated
-  directory-listing cache (§6, PH.6). If added it stays a single file
-  written from the request path — never a system of record, never a
-  background job.
+- **Storage:** the app is otherwise stateless and reads everything live
+  from the PVE API each request. The one exception (PH.6, issue #109):
+  a lazily-populated SQLite directory-listing cache (§6) — a single
+  file written from the request path, never a system of record, never
+  a background job.
 - **Frontend:** server-rendered HTML + htmx + Alpine.js — the timeline
   is a few dozen DOM nodes reacting to small JSON payloads; this needs
   no build pipeline, no `node_modules`, no bundler to keep patched.
@@ -2681,7 +2787,7 @@ record):**
   zoom."
 
 This is a tool one person maintains occasionally alongside an already
-full plate of homelab admin — optimize for low ongoing maintenance over
+full plate of other work — optimize for low ongoing maintenance over
 architectural purity.
 
 ## 9. Risks & unknowns
@@ -2742,26 +2848,108 @@ recorded here so the ceiling is known before anyone leans on it.
   other request (auth included) until it finishes. Single-file
   `/api/download` is unaffected — it streams. *Fix: stream the archive
   as it's built; move compression to a thread (`run_in_executor`).*
-- **No directory-listing cache.** Every `/api/browse` / `/api/tree` is a
-  live `file-restore/list` = the ~3s cold helper-VM round trip (§3).
-  Scrubbing N snapshots in one folder pays it N times; revisiting pays
-  again. This is the main day-to-day limit. *Fix: PH.6.*
-- **Helper-VM stampede — mitigated (issue #60).** Proxmox boots an
-  ephemeral helper VM per cold snapshot browsed, and exposes no API to
-  list or stop those VMs directly — they aren't visible as regular
-  guests and self-terminate on PVE's own internal idle timeout, so this
-  app has no way to tear one down early. The only lever it has is
-  limiting how many `file-restore/list` calls it makes:
-  `pve_client.list_path()` now caps in-flight calls to PVE via a
-  semaphore (`FILE_RESTORE_LIST_MAX_CONCURRENCY`, default 4 — callers
-  beyond the cap queue rather than fail) and coalesces identical
-  concurrent requests, keyed by `(session.username, volume, filepath)`
-  so one user's in-flight call is never handed to a second user without
-  PVE re-checking that user's own permission. This caps the app's own
-  contribution to the stampede; it does not (and cannot) cap what PVE
-  itself decides to do with the calls that do go through. PH.6's
-  directory-listing cache would still reduce the underlying call volume
-  further — this is a ceiling, not a replacement for that.
+- **Directory-listing cache — built (PH.6, issue #109).** Was the main
+  day-to-day limit: every `/api/browse` / `/api/tree` was a live
+  `file-restore/list` = the ~3s cold helper-VM round trip (§3), paid
+  again on every revisit. `dir_cache` (§6) makes repeat navigation
+  instant — see below for why this turned out to matter for stability,
+  not just responsiveness.
+- **Helper-VM stampede — mitigated (issue #60), tightened (issue #109).**
+  Proxmox boots an ephemeral helper VM per cold snapshot browsed, and
+  exposes no API to list or stop those VMs directly — they aren't
+  visible as regular guests and self-terminate on PVE's own internal
+  idle timeout, so this app has no way to tear one down early. The only
+  levers it has: limiting how many `file-restore/list` calls it makes,
+  and limiting how *often* it needs to make one at all.
+  `pve_client.list_path()` (in this order):
+  1. Checks `dir_cache` first (PH.6) — a hit skips everything below.
+     Since a backup snapshot is immutable, this is a pure win for any
+     repeat visit, and timeline scrubbing is disproportionately
+     revisit-heavy (dragging back and forth over already-seen points is
+     normal scrub UX).
+  2. Coalesces identical concurrent requests, keyed by
+     `(session.username, volume, filepath)` so one user's in-flight
+     call is never handed to a second user without PVE re-checking
+     that user's own permission (`dir_cache` is keyed the same way, for
+     the same reason — see §6).
+  3. Caps in-flight calls to PVE via a semaphore
+     (`FILE_RESTORE_LIST_MAX_CONCURRENCY`, default **2** — callers
+     beyond the cap queue rather than fail).
+
+  This caps the app's own contribution to the stampede; it does not
+  (and cannot) cap what PVE itself decides to do with the calls that do
+  go through, and a first-time visit to N distinct new snapshots still
+  needs N live calls regardless of caching — PH.6 and the concurrency
+  cap are complementary, not substitutes for each other.
+
+  **Why 2, not 4 (issue #109, 2026-09-30):** a user reported their PVE
+  host effectively crashing (unresponsive, possibly HA-fenced) while
+  scrubbing the timeline. Verified against Proxmox's own source
+  (`PVE/Service/pvedaemon.pm`, `PVE/Service/pveproxy.pm`): both hardcode
+  `max_workers => 3` as their default. Critically, this worker pool is
+  **shared node-wide** across every user and every privileged operation
+  — not scoped to this app or to file-restore specifically. The
+  original default of 4 could exceed PVE's *entire* pool on its own;
+  even exactly matching it at 3 would still let this app alone claim
+  100% of the node's API capacity for the ~3s+ duration of each cold
+  helper-VM boot, starving VM operations, other backups, and the PVE
+  UI itself for that window — a plausible mechanism for an apparent
+  "crash" with no OOM or panic involved (an HA-enabled cluster fences a
+  node it can't reach via the API). 2 guarantees at least one of PVE's
+  three shared slots stays free at all times, regardless of what this
+  app is doing.
+
+  **Confirmed independently (issue #104, credit to reporter `scyto`):**
+  a second live report, with a precise root cause this project's own
+  research hadn't nailed down yet — `file-restore/list` is `protected =>
+  1` in Proxmox's `PVE::API2::Storage::FileRestore`, so `pveproxy`
+  *always* hands it to `pvedaemon` specifically (not a "probably one of
+  the two daemons" guess, as this doc originally hedged). Their
+  reproduction: with the old default of 4, all three of `pvedaemon`'s
+  workers went busy servicing file-restore listings, and `POST
+  /access/ticket` (an ordinary PVE login) then queued behind them —
+  reported as "Proxmox logins stopped working on the node set as
+  PVE_HOST until the portal was stopped," not a crash in the sense of a
+  panic/OOM, but effectively as disruptive. They now run with
+  `FILE_RESTORE_LIST_MAX_CONCURRENCY=1` in production and suggested "1,
+  or at most 2" as the new default — this project chose 2, the upper
+  end of that range.
+
+  **New fact from that report, not previously documented:** every
+  helper VM boots on **`PVE_HOST`'s node specifically**, regardless of
+  which node the actual guest/VM being browsed lives on. In a
+  multi-node cluster, this concentrates *all* file-restore traffic —
+  from every guest, on every node — onto one node's `pvedaemon` worker
+  pool. That node's API capacity is a single point of contention for
+  the whole cluster's file-restore experience, not just for guests
+  local to it.
+
+  **Raising PVE's own worker count is possible, and a legitimate lever
+  for an admin who has headroom to spare** — `MAX_WORKERS=<n>` in
+  `/etc/default/pvedaemon` on `PVE_HOST`'s node, then `systemctl restart
+  pvedaemon` to apply it. What this actually trades off, worth stating
+  plainly since it's easy to under- or over-estimate:
+  - `pvedaemon`'s worker pool isn't scoped to file-restore — it's
+    *every* protected/privileged PVE API call on that node (logins,
+    starting/stopping guests, most write operations). Raising
+    `MAX_WORKERS` gives more headroom to all of them at once, not just
+    to this app; it's a node-wide capacity change, not something scoped
+    to this app's traffic.
+  - Each worker is a forked `pvedaemon` process held open for the
+    duration of whatever it's servicing — for a file-restore listing,
+    that's the full ~3s+ cold helper-VM boot. More workers means more
+    of those held open concurrently, which costs memory and process
+    overhead proportional to the node's own normal API load, not
+    something this project has measured or can respec on the
+    reader's behalf. Treat it as "more concurrent capacity, at a
+    node-resource cost scaled to how busy that node's API already is,"
+    not a free unlock — raise it deliberately, on a node you've
+    confirmed has spare capacity, not as a default recommendation.
+  - This app's own `FILE_RESTORE_LIST_MAX_CONCURRENCY` should still
+    stay comfortably under whatever `MAX_WORKERS` ends up being (same
+    "always leave at least one slot free" reasoning as the default-2
+    choice above) — raising PVE's pool size doesn't remove the need for
+    this app's own cap, it just changes what a safe value for it is.
 - **No pagination.** A directory with tens of thousands of entries
   (Maildir, `node_modules`, WinSxS) returns the full list, renders every
   row into the HTML partial, and the client sorts/filters all of it in
@@ -2776,7 +2964,7 @@ recorded here so the ceiling is known before anyone leans on it.
   cache (same underlying limit as above), so this cost is paid on every
   root view, not just the first. Adds up to one more cold-lookup round
   trip to every VM guest's root browse, worst case. Accepted as a
-  reasonable cost for the convenience on a single-admin homelab tool;
+  reasonable cost for the convenience on a single-admin internal tool;
   would be the first thing to revisit if PH.6's cache ever lands.
 
 - **In-memory sessions + `reload=True`, one worker** (`run.py`): can't
@@ -2786,7 +2974,8 @@ recorded here so the ceiling is known before anyone leans on it.
   stay single-worker or move sessions to the SQLite file if PH.6 lands.*
 - **`httpx.AsyncClient` per call.** Every `pve_client` function opens a
   fresh client — new TLS handshake, no connection pooling. Wasteful
-  under load, negligible at homelab volume. *Fix: one shared client.*
+  under load, negligible at the scale this app runs at. *Fix: one
+  shared client.*
 - **`index()` is O(all archives on the datastore)** per page load:
   `list_backup_archives` pulls every backup, then `index()` parses and
   groups the whole list each time. Thousands of entries on a busy
@@ -2798,7 +2987,7 @@ recorded here so the ceiling is known before anyone leans on it.
 
 **Fine as-is:** streaming single-file download, the auth/session path,
 the live snapshot-list call (one PVE request, no helper VM), the
-timeline at realistic homelab retention.
+timeline at a realistic backup-retention count.
 
 ## 10. Deployment
 
@@ -2816,8 +3005,8 @@ options given the hard PVE dependency. Considered:
   "runs on any hypervisor" isn't a real benefit here since the target
   audience is, by definition, already running Proxmox.
 - **LXC container (chosen, primary path).** PVE-native, minimal
-  overhead, matches how the Proxmox homelab community already ships
-  companion tools (the common `pct create` + install-script pattern,
+  overhead, matches how the Proxmox community already ships companion
+  tools (the common `pct create` + install-script pattern,
   e.g. community-scripts/tteck-style helpers). Fully isolated from the
   PVE host's own OS/package management. See `deploy/lxc-create.sh`
   (creates an unprivileged Debian 12 container, installs the app,
@@ -2888,7 +3077,7 @@ Notes:
   catch mid-write is a half-written preferences/cache file once those
   features exist; both are designed to be safe to discard and rebuild.
 - The backup will contain `certs/` — including the TLS **private key**.
-  For the default self-signed homelab cert this is low-stakes, but if
+  For the default self-signed cert this is low-stakes, but if
   you install a real CA-issued key, treat that backup (and the PBS
   datastore holding it) accordingly.
 - Pointing this portal at the **same** PBS/PVE that backs up its own

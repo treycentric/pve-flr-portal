@@ -319,6 +319,43 @@ async def test_list_path_does_not_coalesce_across_different_users(session_data):
 
 
 @respx.mock
+async def test_list_path_serves_a_repeat_call_from_the_cache(session_data):
+    """PH.6 (issue #109): a backup snapshot is immutable, so once this
+    user has seen a (volume, path) listing it never needs a second live
+    call - this is what actually cuts down on how often the app hits
+    PVE's shared worker pool during a scrub session (mostly revisits)."""
+    calls = []
+
+    async def _track(request):
+        calls.append(1)
+        return httpx.Response(200, json={"data": [{"text": "etc"}]})
+
+    respx.get(f"{base('vol')}/list").mock(side_effect=_track)
+    out1 = await pve_client.list_path(session_data, "vol", "/")
+    out2 = await pve_client.list_path(session_data, "vol", "/")
+    assert out1 == out2 == [{"text": "etc"}]
+    assert len(calls) == 1
+
+
+@respx.mock
+async def test_list_path_does_not_share_cache_across_users(session_data):
+    """Same authorization reasoning as the in-flight-coalescing case
+    above: dir_cache is keyed by username too, not just (volume, path) -
+    see dir_cache.py's own module docstring."""
+    other = dataclasses.replace(session_data, username="mallory@pam")
+    calls = []
+
+    async def _track(request):
+        calls.append(1)
+        return httpx.Response(200, json={"data": []})
+
+    respx.get(f"{base('vol')}/list").mock(side_effect=_track)
+    await pve_client.list_path(session_data, "vol", "/")
+    await pve_client.list_path(other, "vol", "/")
+    assert len(calls) == 2
+
+
+@respx.mock
 async def test_list_path_caps_concurrent_calls_to_pve(session_data, monkeypatch):
     """Issue #60: callers beyond FILE_RESTORE_LIST_MAX_CONCURRENCY queue
     for a slot rather than all firing at once and piling helper VMs onto

@@ -1,0 +1,171 @@
+name: Image
+
+# Builds the container image and publishes it to GitHub Container Registry
+# as ghcr.io/<repository owner>/pve-flr-portal.
+#
+# - A version tag (the same push release.yml turns into a GitHub release)
+#   publishes <version> and <major>.<minor> for amd64 and arm64, after the
+#   full test suite and a smoke test of the built image pass. `latest` moves
+#   only on a release tag: metadata-action adds it for a semver tag and
+#   leaves a pre-release (v1.8.0-rc.1) with its version tag alone. Every
+#   push is signed with cosign (keyless, via this job's own GitHub Actions
+#   OIDC identity - issue #111); see README for how to verify.
+# - A pull request that changes the image builds and smoke-tests it for
+#   amd64 without pushing. CI runs the tests.
+# - workflow_dispatch publishes one tag of your choosing from any branch,
+#   for trying a build before a release.
+on:
+  push:
+    tags: ["v*.*.*"]
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - requirements.txt
+      - .github/workflows/image.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish, e.g. 1.6.0-test.1
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+# One run per ref. A newer push to a PR replaces its running build; a
+# release build is never cancelled.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Install npm dependencies (CSS suite)
+        run: npm install
+
+      - name: Run the full test suite
+        run: ./run-tests.sh
+
+  image:
+    needs: test
+    # Runs after a passing test job, or on a PR, where test is skipped.
+    if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Job-level permissions replace the workflow-level block above for
+    # this job, not merge with it - contents/packages are restated here.
+    # id-token is scoped to this job alone (not test, which doesn't need
+    # it): it's what lets cosign request a short-lived OIDC token from
+    # GitHub for keyless signing (issue #111) - no key to manage or leak.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Registry paths must be lowercase; an owner name may not be.
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pve-flr-portal" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Build for this runner and load it into Docker, to test the image
+      # itself before anything is pushed.
+      - name: Build for the smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: pve-flr-portal:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The app starts without reaching PVE (it calls PVE_HOST only when
+      # someone logs in or browses), so a placeholder host is enough.
+      # Checks: the image's own healthcheck passes, it runs as uid 10001,
+      # it serves a static file over its HTTPS, and it runs as one process
+      # (uvicorn's reload supervisor would make two).
+      - name: Smoke test
+        run: |
+          docker run -d --name smoke -p 127.0.0.1:8008:8008 \
+            -e PVE_HOST=pve.invalid -e PVE_STORAGE=pbs pve-flr-portal:smoke
+          fail() { echo "::error title=smoke::$1"; docker logs smoke; exit 1; }
+          for _ in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' smoke)
+            [ "$status" = healthy ] && break
+            [ "$(docker inspect -f '{{.State.Running}}' smoke)" = true ] || fail "the container exited"
+            sleep 3
+          done
+          [ "$status" = healthy ] || fail "not healthy after 90s (last status: $status)"
+          [ "$(docker exec smoke id -u)" = 10001 ] || fail "not running as uid 10001"
+          code=$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:8008/static/style.css)
+          [ "$code" = 200 ] || fail "/static/style.css answered $code"
+          procs=$(docker top smoke -o pid | tail -n +2 | wc -l)
+          [ "$procs" -eq 1 ] || fail "$procs processes, expected 1 (is reload on?)"
+          echo "healthy, uid 10001, static files served, one process"
+
+      - uses: docker/setup-qemu-action@v4
+        if: env.PUSH == 'true'
+
+      - uses: docker/login-action@v4
+        if: env.PUSH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        if: env.PUSH == 'true'
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - id: push
+        name: Build and push
+        if: env.PUSH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: sigstore/cosign-installer@v3
+        if: env.PUSH == 'true'
+
+      # Keyless signing (issue #111): cosign requests a short-lived cert
+      # from Sigstore's public Fulcio CA using this job's own GitHub
+      # Actions OIDC token, and records the signature in the public
+      # Rekor transparency log - no private key generated, stored, or
+      # rotated anywhere. Signs by digest, not tag: a digest is
+      # immutable and this is the exact manifest list build-push-action
+      # just pushed, so the one signature covers every tag
+      # (<version>/<major>.<minor>/latest) pointing at it.
+      - name: Sign the published image
+        if: env.PUSH == 'true'
+        run: cosign sign --yes "${IMAGE}@${{ steps.push.outputs.digest }}"
