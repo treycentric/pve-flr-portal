@@ -282,12 +282,14 @@ Every restore job (and its step-by-step log) is persisted to its own
 SQLite file under `PFR_DATA_DIR`, so a job's record survives a backend
 restart instead of vanishing with the process — `GET
 /api/restore-jobs` and the log viewer both show jobs from before the
-most recent restart, within the retention window.
-`JOB_HISTORY_RETENTION_DAYS` (default 7) controls how long a
-*finished* job's record is kept; a job that was still in progress when
-the backend restarted is automatically marked `interrupted` the next
-time it starts up, rather than looking stuck forever. No extra setup
-needed — this is on unconditionally, independent of
+most recent restart. Separately, `JOB_HISTORY_RETENTION_DAYS` (default
+7) prunes a *finished* job's record once it's older than this many
+days — this pruning runs regardless of whether the backend has
+restarted; it's just a time-based cleanup, not a restart-recovery
+mechanism. A job that was still in progress when the backend restarted
+is automatically marked `interrupted` the next time it starts up,
+rather than looking stuck forever. No extra setup needed — this is on
+unconditionally, independent of
 `RESTRICT_JOBS_TO_OWN` above.
 
 ### SSO / OpenID Connect login
