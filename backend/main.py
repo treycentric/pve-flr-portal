@@ -41,11 +41,8 @@ _log = logging.getLogger("pve_flr_portal.main")
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Issue #124: reconcile any restore job left non-terminal by a
-    previous process (crash, redeploy) before serving any request - see
-    job_history.reconcile_interrupted()'s own docstring for why this is
-    safe to run unconditionally on every startup (nothing in *this*
-    process could have created an active job yet)."""
+    """Reconciles any restore job left non-terminal by a previous
+    process, before serving any request."""
     reconciled = await job_history.reconcile_interrupted()
     if reconciled:
         _log.info("Reconciled %d restore job(s) left in progress by a previous run as interrupted", len(reconciled))
@@ -1001,13 +998,10 @@ async def restore_jobs_list(
     enforcement; this only drives whether the UI's Cancel button is
     even enabled, so a non-owner isn't invited to try and get a 403.
 
-    Issue #124: merges this process's live, in-memory jobs with
-    job_history's persisted rows for anything this process didn't
-    itself create (i.e. survivors from a previous run, within
-    JOB_HISTORY_RETENTION_DAYS) - a live job always wins over its own
-    stale persisted snapshot, keyed by id. Also sweeps expired history
-    rows opportunistically here (no background job, same pattern as
-    dir_cache.evict_missing()) rather than on a schedule."""
+    Merges this process's live, in-memory jobs with job_history's
+    persisted rows for anything this process didn't itself create - a
+    live job always wins over its own stale persisted snapshot, keyed
+    by id. Also sweeps expired history rows opportunistically here."""
     is_admin = auth.is_job_admin(session)
     can_see_all = (not settings.restrict_jobs_to_own) or is_admin
 
@@ -1025,9 +1019,7 @@ async def restore_jobs_list(
     ]
     for detail in persisted:
         entry = {k: v for k, v in detail.items() if k not in ("log", "_started_at")}
-        # A persisted-only entry is never cancellable - reconcile_interrupted()
-        # guarantees nothing non-terminal survives into job_history past
-        # this process's own startup, so there's no "still active" case here.
+        # A persisted-only entry is never cancellable - it's necessarily terminal.
         entry["can_cancel"] = False
         entries.append((detail["_started_at"], entry))
     entries.sort(key=lambda pair: pair[0], reverse=True)
@@ -1057,11 +1049,8 @@ async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.g
     tick as the list, and watching a log is not activity either (issue
     #27) - an idle user parked on the log viewer still times out.
 
-    Issue #124: falls back to job_history's persisted record when the
-    id isn't (or isn't anymore) in this process's in-memory
-    RestoreJobManager - the log viewer can still open a job from a
-    previous process within the retention window, same as the list
-    endpoint already shows it there."""
+    Falls back to job_history's persisted record when the id isn't in
+    this process's in-memory RestoreJobManager."""
     job = restore_jobs.manager.get(job_id)
     if job is not None:
         return JSONResponse(job.to_detail_dict())

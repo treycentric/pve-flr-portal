@@ -165,9 +165,8 @@ def test_interrupted_is_a_terminal_status_not_counted_active():
 
 
 async def test_create_and_every_mark_method_persist_to_job_history(manager, session_data):
-    """Issue #124: every status transition writes through to
-    job_history, not just the terminal ones - see restore_jobs.py's
-    module docstring for why."""
+    """Every status transition writes through to job_history, not just
+    the terminal ones."""
     job = _make(manager, session_data)
     assert (await job_history.get(job.id))["status"] == "queued"
 

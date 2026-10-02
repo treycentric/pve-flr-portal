@@ -1237,10 +1237,9 @@ def test_restore_jobs_list_empty_when_none_submitted(client):
 
 
 def _persist_historical_job(session_data, **overrides):
-    """Issue #124: simulates a job left behind by a *previous* process -
-    written straight to job_history via a throwaway RestoreJobManager
-    that's never wired into main.app, so it never shows up in the
-    current process's own in-memory restore_jobs.manager."""
+    """Simulates a job left behind by a previous process - written
+    straight to job_history via a throwaway manager, never wired into
+    main.app's own in-memory restore_jobs.manager."""
     from backend.restore_jobs import RestoreJobManager
 
     throwaway = RestoreJobManager()
@@ -1539,10 +1538,8 @@ def test_restore_jobs_cancel_requires_auth():
 
 
 async def test_startup_reconciles_jobs_left_active_by_a_previous_process(session_data):
-    """Issue #124: a row still queued/running/verifying when a NEW
-    TestClient enters (triggering main.py's lifespan startup hook) is
-    exactly the shape a crashed/restarted process leaves behind -
-    closed out as interrupted before anything else can see it."""
+    """A new TestClient entering triggers main.py's lifespan startup
+    hook, which must reconcile a still-active row to interrupted."""
     job = _persist_historical_job(session_data)  # left "queued" - never transitioned
     assert job.is_active
 

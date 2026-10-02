@@ -41,9 +41,7 @@ async def test_persisted_detail_includes_log(session_data):
 
 
 async def test_log_entries_accumulate_rather_than_overwrite(session_data):
-    """The point of the two-table split: each log() call appends a new
-    job_log_entries row instead of rewriting a growing blob - all prior
-    lines must still be there after several calls, in order."""
+    """Each log() call appends a row; all prior lines stay, in order."""
     job = _make(session_data)
     job.log("first")
     job.log("second")
@@ -53,10 +51,7 @@ async def test_log_entries_accumulate_rather_than_overwrite(session_data):
 
 
 async def test_evict_expired_does_not_orphan_log_entries(session_data):
-    """ON DELETE CASCADE must actually take effect (sqlite3 disables FK
-    enforcement per-connection by default unless explicitly turned on) -
-    otherwise a deleted job's log rows pile up in job_log_entries
-    forever, orphaned with no parent jobs row."""
+    """ON DELETE CASCADE must actually take effect, not just be declared."""
     import time
 
     job = _make(session_data)
@@ -156,9 +151,8 @@ async def test_reconcile_interrupted_closes_out_active_rows(session_data):
 
 
 async def test_reconcile_interrupted_preserves_log_lines_after_last_transition(session_data):
-    """The motivating scenario for persisting on every log() call, not
-    just status transitions: a crash mid-"running" phase must not lose
-    log lines written since the last mark_running()/mark_verifying()."""
+    """A crash mid-run must not lose log lines written since the last
+    status transition."""
     job = _make(session_data)
     job.status = RestoreStatus.RUNNING
     job_history.persist_sync(job)

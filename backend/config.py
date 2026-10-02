@@ -250,14 +250,8 @@ class Settings:
     # meaningful to expose here.
     job_admin_privilege: str
 
-    # Issue #124: how many days a *terminal* (done/failed/cancelled/
-    # interrupted) restore job's persisted history row (job_history.py,
-    # a separate SQLite file from PH.6's dir_cache - different lifecycle/
-    # sensitivity, see docs/plan.md §7.5) is kept before an opportunistic
-    # sweep (on the next job-list load, no background job - same pattern
-    # as dir_cache.evict_missing()) deletes it. A still-active row is
-    # never swept by age alone - it ages out once it reaches a terminal
-    # state and crosses this window from there.
+    # How many days a terminal restore job's persisted history row is
+    # kept before an opportunistic sweep deletes it.
     job_history_retention_days: int
 
     # Issue #60: caps how many `file-restore/list` calls this app has

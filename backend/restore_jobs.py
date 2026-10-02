@@ -8,19 +8,15 @@ Same tradeoff already accepted for auth._sessions (CLAUDE.md - no extra
 services): single-process, in-memory, lost on a backend restart. Jobs
 are visible to any logged-in user rather than scoped per-requester -
 this is a single-admin tool with one shared task list, the same
-way Synology ABB's own restore-task list works. (Issue #122 made
-visibility/cancel-permission configurable on top of this default - see
-auth.is_job_admin() and config.settings.restrict_jobs_to_own.)
+way Synology ABB's own restore-task list works. Visibility/cancel-
+permission are configurable on top of this default - see
+auth.is_job_admin() and config.settings.restrict_jobs_to_own.
 
-**Persisted history (issue #124).** "In-memory, lost on restart" above
-describes this manager's own bookkeeping, not the full picture anymore
-- every status transition also writes through to `job_history.py`'s
-SQLite-backed record, which does survive a restart (within
-JOB_HISTORY_RETENTION_DAYS) and is what lets a job interrupted by a
-crash/redeploy show up as `RestoreStatus.INTERRUPTED` instead of
-silently vanishing. `main.py`'s job-list/detail endpoints merge this
-manager's live jobs with job_history's persisted ones for anything this
-process itself didn't create.
+Every status transition also writes through to `job_history.py`'s
+SQLite-backed record, which survives a restart and is what lets a job
+interrupted by a crash/redeploy show up as `RestoreStatus.INTERRUPTED`
+instead of vanishing. `main.py`'s job-list/detail endpoints merge this
+manager's live jobs with job_history's persisted ones.
 
 **Session handling.** A job holds its own SessionData *snapshot*
 (`dataclasses.replace(session)` at submission time), never the same
@@ -53,13 +49,8 @@ class RestoreStatus(StrEnum):
     DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"
-    # Issue #124: a job still queued/running/verifying when the backend
-    # restarts (crash, redeploy) can never actually finish - its process
-    # is gone. job_history.reconcile_interrupted() closes any such row
-    # out to this status at the next startup, before serving any
-    # request, rather than leaving it looking perpetually in-progress.
-    # Terminal, like done/failed/cancelled - deliberately not folded
-    # into FAILED, since nothing about the restore itself failed.
+    # Terminal, like done/failed/cancelled - a job still active when the
+    # backend restarts is reconciled to this status, not FAILED.
     INTERRUPTED = "interrupted"
 
 
@@ -155,19 +146,6 @@ class RestoreJob:
         elapsed = round(time.time() - self.started_at, 1)
         line = f"+{elapsed}s {message}"
         self.log_lines.append(line)
-        # Issue #124 follow-up: every log line persists immediately, not
-        # just at the coarser status transitions below - a single,
-        # append-only row in job_history's job_log_entries table
-        # (independent of how long the log already is, unlike an
-        # earlier version of this that rewrote a whole JSON blob per
-        # line). restore_runner.py already throttles its own log() calls
-        # to roughly one per percentage point or every few seconds in
-        # any loop (the per-chunk heartbeat, the bundle-download
-        # progress callback, etc. - never one per chunk/byte), so this
-        # stays a bounded, modest write rate even on a large transfer,
-        # and means a job interrupted mid-run keeps its log current up
-        # to the last line actually logged, not just up to its last
-        # status change.
         job_history.append_log_entry(self.id, line)
 
     @property
@@ -263,12 +241,6 @@ class RestoreJobManager:
             source_size=source_size,
         )
         self._jobs[job.id] = job
-        # Issue #124: the job's first persisted row, status "queued" -
-        # without this, a job that dies before its first status
-        # transition (e.g. the process crashes between create() and the
-        # run loop's first `mark_running()`) would never get a history
-        # row at all and just silently vanish instead of surfacing as
-        # interrupted on the next startup.
         job_history.persist_sync(job)
         return job
 
@@ -295,10 +267,6 @@ class RestoreJobManager:
         return True
 
     def mark_running(self, job_id: str) -> None:
-        """Issue #124: a manager method rather than restore_runner.py
-        setting job.status directly, so the status transition always
-        persists a history row too - the same reason mark_cancelled/
-        mark_done/mark_failed were already manager methods."""
         job = self._jobs.get(job_id)
         if job is not None:
             job.status = RestoreStatus.RUNNING
@@ -315,9 +283,6 @@ class RestoreJobManager:
         if job is not None:
             job.status = RestoreStatus.CANCELLED
             job.finished_at = time.time()
-            # job.log() only appends a job_log_entries row now (separate
-            # table from job metadata) - this still needs its own
-            # explicit write to persist the status/finished_at change.
             job.log("Cancelled.")
             job_history.persist_sync(job)
 
