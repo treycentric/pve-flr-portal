@@ -20,47 +20,21 @@ drift from reality. Three companion docs, kept separate on purpose:
   knowing before touching `backend/static/app.js` again. Not living —
   don't edit it; append new lessons to `docs/plan.md` instead.
 
-## Current status
-**Actively developed — deliberately no version number pinned here,
-since it goes stale the moment the next release ships; see
-`CHANGELOG.md` for the exact version history.** Browsing/downloading
-files out of PBS backups via PVE's file-restore API, a scrubbable
-multi-guest timeline, per-user PVE login (password or SSO/OIDC realm,
-#56), HTTPS by default, LXC/Docker deployment, colour themes (#29),
-multiple PBS storages/namespaces (#43), and **push-to-guest restore**
-via `qemu-guest-agent` (PH.5, issues #5/#22/#24) — single-file, Direct
-Network Transfer (HTTPS by default, #47), multi-file/directory
-bundles, and "restore to original location" (#68) resolved from the
-item's own path, including Windows drive-letter display matched to
-the guest's real disk/partition layout via bus-address matching, not
-just attachment-order guessing (#77). A partition, disk, or LVM volume
-PVE's file-restore helper can't mount is hidden automatically instead
-of surfaced as a dead end (#80), each with its own tree icon (#83).
-See `CHANGELOG.md` for release-by-release detail and `TODO.md` for
-what's left — every planned phase has shipped, including PH.6 (a
-directory-listing cache, issue #109); everything open in `TODO.md` is
-follow-on refinement.
-
-**No database, except one small cache.** The app is otherwise
-stateless — the snapshot list and any not-yet-cached directory listing
-are read live from the PVE API per request. See `docs/plan.md` §4 for
-why the originally-planned indexer/poll turned out unnecessary. The one
-exception is PH.6 (issue #109): a lazily-populated SQLite
-directory-listing cache under `PFR_DATA_DIR` (issue #30's designated
-writable directory, provisioned by the systemd unit / a Docker
-volume) — a single file written from the request path, never a system
-of record, never a background job. See `docs/plan.md` §6. This doesn't
-change the broader "no extra service" rule — it's a file, not a
-service.
-
-**PBS is required.** Everything hangs off Proxmox's File Restore
-feature, which per Proxmox is PBS-only — plain `vzdump` backups on
-dir/NFS/CIFS storage cannot be browsed via any API and are out of
-scope (`docs/plan.md` §2).
-
 ## Hard constraints
 - This is a separate companion app. Do not attempt to patch or embed into
   the Proxmox VE web UI — it has no plugin system.
+- **PBS is required.** Everything hangs off Proxmox's File Restore
+  feature, which per Proxmox is PBS-only — plain `vzdump` backups on
+  dir/NFS/CIFS storage cannot be browsed via any API and are out of
+  scope (`docs/plan.md` §2).
+- **Stateless except two small SQLite files.** The snapshot list and
+  any not-yet-cached directory listing are read live from the PVE API
+  per request (`docs/plan.md` §4). The exceptions: PH.6's
+  directory-listing cache (`dir_cache.sqlite3`, issue #109) and the
+  restore-job history/log store (`job_history.sqlite`, issue #124) —
+  both under `PFR_DATA_DIR` (issue #30), each a single file written
+  from the request path, never a system of record, never a background
+  job. See `docs/plan.md` §6.
 - The file-restore endpoints Proxmox's own GUI calls are **not** part of
   the published API reference. The core `file-restore/list` contract is
   captured in `docs/plan.md` §3 — read it before touching this code
@@ -81,16 +55,16 @@ scope (`docs/plan.md` §2).
 - Prefer the simplest thing that works for a single-admin internal tool:
   no build pipeline, no SPA framework, no extra services beyond the one
   backend process. Durable state, when a feature genuinely needs it,
-  goes in `PFR_DATA_DIR` (issue #30) as a single small file written from
-  the request path — never a background job, never a separate service.
-  SQLite is reserved for exactly this shape of need; PH.6's
-  directory-listing cache is the one feature that's taken it so far.
+  goes in `PFR_DATA_DIR` (issue #30) as a single small SQLite file
+  written from the request path — never a background job, never a
+  separate service.
 
 ## Stack (decided, see `docs/plan.md` §8 for why)
 - Backend: Python, FastAPI
 - Storage: otherwise stateless. `PFR_DATA_DIR` (issue #30) holds PH.6's
-  lazily-populated directory-listing cache (schema in `docs/plan.md`
-  §6) and is the provisioned location for any future small state
+  directory-listing cache and the restore-job history store (schemas in
+  `docs/plan.md` §6) and is the provisioned location for any future
+  small state
 - Frontend: server-rendered HTML + htmx + Alpine.js
 - Timeline widget: hand-rolled inline SVG (no charting library — nothing
   off the shelf fits "date axis, one dot per discrete event, drag to
