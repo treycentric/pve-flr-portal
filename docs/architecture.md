@@ -16,14 +16,20 @@ caches, plus the browser-facing UI.
 
 ```mermaid
 flowchart LR
-    Browser -->|browse / download| Backend[Backend<br/>FastAPI]
-    Backend -->|snapshot list, live per request| PVEc[PVE API<br/>storage content]
-    Backend -->|dir listing| Cache[(dir_cache.sqlite3)]
-    Backend -->|cache miss| PVE[PVE API<br/>file-restore/list]
-    Backend -->|job history| JobDB[(job_history.sqlite)]
-    PVE -->|boots to read guest FS| Helper[Ephemeral helper VM<br/>existing, unmodified]
-    Backend -->|push file via QGA| QGA[qemu-guest-agent<br/>in guest, existing]
+    Browser -->|browse / download / restore| Backend[Backend<br/>FastAPI]
+    Backend -->|snapshot list, live per request| PVEc[PVE API<br/>storage/content]
+    Backend <-->|dir listing cache| Cache[(dir_cache.sqlite3)]
+    Backend -->|list / download, on cache miss| PVE[PVE API<br/>file-restore]
+    PVE -->|boots to read guest filesystem| Helper[Ephemeral helper VM<br/>existing, unmodified]
+    Backend -->|push restored bytes via QGA| QGA[qemu-guest-agent<br/>in guest, existing]
+    Backend <-->|job records + log| JobDB[(job_history.sqlite)]
 ```
+
+Both browsing (`file-restore/list`) and downloading or restoring a file
+(`file-restore/download`) go through the same PVE endpoint family and
+the same ephemeral helper VM — restore-to-guest pulls bytes via
+`file-restore/download` exactly like a plain download does, then writes
+them into the guest via QGA; it never bypasses PVE/the helper VM.
 
 The app is otherwise stateless: the snapshot list and any not-yet-cached
 directory listing are read live from the PVE API on each request. The
