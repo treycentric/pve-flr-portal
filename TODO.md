@@ -172,10 +172,11 @@ Deferred out of #29 deliberately to keep that change small.
 Analysis lives in each issue; the fork is based on an older `main`, so
 adopt by re-implementing/cherry-picking, not merging.
 
-- [ ] #135 CSRF guard / POST logout / OIDC state binding / anti-framing
-      (PR open)
-- [ ] #136 Restored files + guest CA anchor possibly created `0666` by
-      `agent/file-write` - **confirmed on a live Linux guest**; fix in PR #143
+- [x] #135 CSRF guard / POST logout / OIDC state binding / anti-framing
+      (PR #144; SSO + TOTP login verified on a live PVE)
+- [x] #136 Restored files + guest CA anchor created `0666` by
+      `agent/file-write` - fixed in PR #143 (chmod after write; existing
+      anchors repaired), verified on a live Linux guest
 - [ ] #137 Root-owned app dir in `deploy/` (only `certs/` service-writable)
 - [ ] #138 Serve Open Sans locally (drop Google Fonts)
 - [ ] #139 Hash-locked `requirements.lock` - needs a Dependabot and
