@@ -199,8 +199,12 @@ pveum role add FileRestoreOperator -privs "VM.GuestAgent.Audit,VM.GuestAgent.Fil
   supports (capability detection) — grant it alongside either of the
   other two below, not on its own.
 - `VM.GuestAgent.FileWrite` enables **quick restore**: small files
-  written straight into the guest, landing `root:root`/SYSTEM, mode
-  `0644`, fresh mtime — no further guest access needed.
+  written straight into the guest, landing `root:root`/SYSTEM with a
+  fresh mtime. `agent/file-write` has no mode parameter and qemu-ga
+  creates new files `0666`, so on Linux/BSD guests the portal follows up
+  with a `chmod go-w` (`0644`) when `VM.GuestAgent.Unrestricted` is also
+  granted; with FileWrite alone the file stays `0666` and the job log
+  says so. (Windows files inherit their folder's ACL.)
 - `VM.GuestAgent.Unrestricted` enables **full restore**: larger files,
   directories, and the optional "restore metadata" / "verify"
   upgrades. This is a much larger grant — Proxmox doesn't expose a

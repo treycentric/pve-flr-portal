@@ -335,6 +335,21 @@ async def _clear_readonly_if_present(job: RestoreJob, guest_os_family: str | Non
         pass  # best-effort - the write immediately after surfaces any real problem on its own
 
 
+async def _secure_ca_anchor(job: RestoreJob, anchor: str) -> bool:
+    """Issue #136: agent/file-write takes no mode and qemu-ga creates the
+    file 0666 (confirmed live on a Linux guest), so a trust anchor written
+    through it is writable by every guest user - who could then change
+    what the whole guest trusts. `chmod 644` it; if that fails, remove it
+    (best effort) rather than leave a writable anchor in the trust
+    directory, and report False so the caller steps the TLS mode down."""
+    code, out, err = await _exec(job, ["chmod", "644", anchor])
+    if code == 0:
+        return True
+    job.log(f"Could not set permissions on the data-plane CA anchor: {(err or out).strip()}")
+    await _exec(job, ["rm", "-f", anchor])
+    return False
+
+
 async def _ensure_guest_trusts_ca(job: RestoreJob, guest_os_family: str | None) -> bool:
     """Install the Direct Network Transfer data-plane CA into the guest's
     trust store so `verify` mode works (issue #47 §7.6.1). Returns
@@ -379,9 +394,16 @@ async def _ensure_guest_trusts_ca(job: RestoreJob, guest_os_family: str | None) 
             return False
         anchor = guest_ca.linux_anchor_path(has_update_ca_certificates=has_deb)
         if only_if_missing and (await _exec(job, ["test", "-f", anchor]))[0] == 0:
+            # An anchor written by an earlier version came out 0666
+            # (agent/file-write has no mode, issue #136) - repair it rather
+            # than trusting a file any guest user could have altered.
+            if not await _secure_ca_anchor(job, anchor):
+                return False
             job.log("Guest already has the data-plane CA anchor file.")
             return True
         await pve_client.write_guest_file(job.session, job.guest_type, job.vmid, anchor, pem, node=job.node)
+        if not await _secure_ca_anchor(job, anchor):
+            return False
         code, out, err = await _exec(job, guest_ca.linux_update_argv(has_update_ca_certificates=has_deb))
         if code != 0:
             job.log(f"Could not refresh the guest CA trust store: {(err or out).strip()}")
@@ -690,6 +712,22 @@ async def _restore_ownership(job: RestoreJob, uid: int, gid: int, mode: int) -> 
     exitcode, out, err = await _exec(job, ["chmod", format(mode, "o"), job.destination])
     if exitcode != 0:
         raise RuntimeError(f"Could not restore permissions: {err.strip() or out.strip()}")
+
+
+async def _set_restored_file_mode(job: RestoreJob) -> None:
+    """Issue #136: agent/file-write has no mode parameter and qemu-ga
+    creates a new file 0666 (confirmed live on a Linux guest), so a
+    quick-restored file would be world-writable. `chmod go-w` turns that
+    into 0644 - the same result the guest-exec paths get from the
+    guest's umask - and never widens a stricter mode an overwritten file
+    already had. Non-Windows only (callers check). A failure (e.g. a vfat
+    mount) is a logged warning, not a failed restore. Restoring original
+    ownership/permissions, when requested, runs later and overrides this."""
+    exitcode, out, err = await _exec(job, ["chmod", "go-w", job.destination])
+    if exitcode != 0:
+        job.log(f"Warning: could not tighten the restored file's permissions: {(err or out).strip()}")
+        return
+    job.log("Removed group/world write from the restored file (agent/file-write creates it 0666).")
 
 
 def _parse_certutil_hash(out: str) -> str:
@@ -1092,6 +1130,15 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     job.session, job.guest_type, job.vmid, job.destination, bytes_to_wire_str(first_piece),
                     node=job.node,
                 )
+                if guest_os_family != "windows":
+                    if exec_available:
+                        await _set_restored_file_mode(job)
+                    else:
+                        job.log(
+                            "Warning: the restored file was left with the guest agent's creation mode "
+                            "(0666 on qemu-ga) - tightening it needs guest-exec "
+                            "(VM.GuestAgent.Unrestricted), which is not available."
+                        )
                 if not needs_exec:
                     job.progress_current = 1
                     jobs.mark_done(job.id)
