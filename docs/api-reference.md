@@ -1,6 +1,6 @@
 # API Reference — PVE file-restore and QEMU Guest Agent
 
-The undocumented or under-documented Proxmox API surfaces this app
+This reference documents the undocumented or under-documented Proxmox API surfaces this app
 depends on. None of this is in Proxmox's published API reference
 (`https://pve.proxmox.com/pve-docs/api-viewer/`) beyond the bare
 parameter list — it's reverse-engineered from the real GUI's traffic,
