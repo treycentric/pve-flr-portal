@@ -960,8 +960,14 @@ arbitrary feature line):
 - **Design A — quick restore.** A single file whose content fits in
   one `agent/file-write` call. No `guest-exec` anywhere in the path —
   works even where exec is blocked (RHEL-family guests). Needs only
-  `VM.GuestAgent.FileWrite`. Lands `root:root`/SYSTEM, mode `0644`,
-  fresh mtime — stated plainly in the UI, not hidden in a tooltip.
+  `VM.GuestAgent.FileWrite`. Lands `root:root`/SYSTEM, fresh mtime —
+  stated plainly in the UI, not hidden in a tooltip. `agent/file-write`
+  has no mode parameter and qemu-ga creates new files `0666` (confirmed
+  live on a Linux guest, issue #136): with guest-exec available a
+  Linux/BSD file is `chmod go-w`ed to `0644` after the write (the
+  guest-CA trust anchor gets `chmod 644`, and an existing anchor is
+  repaired too); without it the job log warns the file was left `0666`.
+  Windows has no mode bits - the file inherits its folder's ACL.
 - **Design B — full restore.** Anything Design A can't do in one call:
   larger files, directories, or a request to preserve metadata.
   Mechanism (per your assumption, confirmed as the right shape given
@@ -1418,7 +1424,7 @@ entry points at. Two reasons this matters, both raised in review:
   - **Only content restore available** (`FileWrite`, no
     `Unrestricted`): a plain typed `dest_dir` field (no directory
     browser — that needs `guest-exec` too, see below), overwrite
-    warning, "lands as root:root 0644" notice — no metadata/verify
+    warning, "lands as root:root" notice (0666 on Linux - see Design A above) — no metadata/verify
     checkboxes shown at all, since there's no exec to run them with.
   - **`Unrestricted` also available:** same modal additionally shows
     "Restore metadata", "Verify", and "Restore original owner/

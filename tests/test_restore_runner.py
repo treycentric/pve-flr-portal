@@ -1343,10 +1343,11 @@ async def test_design_c_on_unmet_fail_fails_the_job_when_no_tls_mode_qualifies(m
     assert "Direct Network Transfer required but unavailable" in job.error
 
 
-async def _run_dnt_verify_ca(manager, session_data, monkeypatch, *, update_exit=0):
+async def _run_dnt_verify_ca(manager, session_data, monkeypatch, *, update_exit=0, chmod_exit=0, exec_log=None):
     """DNT on a Debian-style Linux guest with curl available; the CA
     install's `update-ca-certificates` returns `update_exit`. Returns
-    (job, curl_argv, written)."""
+    (job, curl_argv, written). `chmod_exit` is the exit code of the
+    anchor's `chmod 644`; every exec argv is appended to `exec_log`."""
     monkeypatch.setattr(guest_ca, "load_ca_pem", lambda: "PEM-DATA")
     monkeypatch.setattr(guest_ca, "is_ca_cert", lambda _pem: True)
 
@@ -1365,7 +1366,13 @@ async def _run_dnt_verify_ca(manager, session_data, monkeypatch, *, update_exit=
         written.append((path, content))
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        if exec_log is not None:
+            exec_log.append(argv)
         if argv[:2] == ["mkdir", "-p"]:
+            return 0, "", ""
+        if argv[0] == "chmod":
+            return chmod_exit, "", "" if chmod_exit == 0 else "chmod failed"
+        if argv[:2] == ["rm", "-f"]:
             return 0, "", ""
         if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
             return 0, "/usr/bin/curl", ""
@@ -1417,6 +1424,95 @@ async def test_design_c_verify_ca_install_failure_fails_when_minimum_is_verify(m
     job, _curl_argv, _written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=1)
     assert job.status == RestoreStatus.FAILED
     assert "Direct Network Transfer required but unavailable" in job.error
+
+
+async def test_design_c_ca_anchor_is_chmodded_644_after_the_write(manager, session_data, monkeypatch):
+    # Issue #136: agent/file-write creates the anchor 0666.
+    _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")
+    exec_log: list[list[str]] = []
+    job, _curl, _written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, exec_log=exec_log)
+    assert job.status == RestoreStatus.DONE
+    anchor = "/usr/local/share/ca-certificates/pve-flr-portal-data-plane.crt"
+    assert exec_log.index(["chmod", "644", anchor]) < exec_log.index(["update-ca-certificates"])
+
+
+async def test_design_c_ca_anchor_chmod_failure_removes_it_and_steps_down(manager, session_data, monkeypatch):
+    _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")
+    exec_log: list[list[str]] = []
+    job, curl_argv, _written = await _run_dnt_verify_ca(
+        manager, session_data, monkeypatch, chmod_exit=1, exec_log=exec_log
+    )
+    anchor = "/usr/local/share/ca-certificates/pve-flr-portal-data-plane.crt"
+    assert ["rm", "-f", anchor] in exec_log
+    assert ["update-ca-certificates"] not in exec_log  # never trusted a writable anchor
+    assert job.status == RestoreStatus.DONE
+    assert "-k" in curl_argv
+    assert any("Could not set permissions on the data-plane CA anchor" in line for line in job.log_lines)
+
+
+async def test_design_c_existing_ca_anchor_is_repaired_not_just_trusted(manager, session_data, monkeypatch):
+    # An anchor from an earlier version is already there (0666): if-missing
+    # must fix its mode instead of returning early.
+    _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="if-missing")
+    exec_log: list[list[str]] = []
+    job, _curl, written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, exec_log=exec_log)
+    assert job.status == RestoreStatus.DONE
+    assert written == []  # not rewritten
+    assert any(c[:2] == ["chmod", "644"] for c in exec_log)
+    assert any("already has the data-plane CA anchor" in line for line in job.log_lines)
+
+
+# --- quick-restore file mode (issue #136) ---------------------------------
+
+
+async def _run_quick_restore(manager, session_data, monkeypatch, *, family="linux", exec_ok=True, chmod_exit=0):
+    job = _make_job(manager, session_data, destination="/etc/hosts")
+    _patch_download(monkeypatch, b"127.0.0.1 localhost")
+    exec_log: list[list[str]] = []
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps(guest_os_family=family, design_b=guest_agent.PathAvailability(exec_ok, "no exec"))
+
+    async def fake_write(session, guest_type, vmid, path, content, **kwargs):
+        exec_log.append(["<write>", path])
+
+    async def fake_exec(session, guest_type, vmid, argv, **kwargs):
+        exec_log.append(argv)
+        if argv[0] == "chmod":
+            return chmod_exit, "", "" if chmod_exit == 0 else "Operation not permitted"
+        return 0, "", ""
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
+    monkeypatch.setattr(pve_client, "run_guest_exec", fake_exec)
+    await run_restore(job, manager)
+    return job, exec_log
+
+
+async def test_quick_restore_on_linux_removes_group_world_write_after_the_write(manager, session_data, monkeypatch):
+    job, calls = await _run_quick_restore(manager, session_data, monkeypatch)
+    assert job.status == RestoreStatus.DONE
+    assert calls.index(["chmod", "go-w", "/etc/hosts"]) > calls.index(["<write>", "/etc/hosts"])
+
+
+async def test_quick_restore_chmod_failure_is_a_warning_not_a_failure(manager, session_data, monkeypatch):
+    job, _calls = await _run_quick_restore(manager, session_data, monkeypatch, chmod_exit=1)
+    assert job.status == RestoreStatus.DONE
+    assert any("could not tighten the restored file's permissions" in line for line in job.log_lines)
+
+
+async def test_quick_restore_without_exec_warns_the_file_is_left_0666(manager, session_data, monkeypatch):
+    job, calls = await _run_quick_restore(manager, session_data, monkeypatch, exec_ok=False)
+    assert job.status == RestoreStatus.DONE
+    assert not any(c[0] == "chmod" for c in calls)
+    assert any("0666 on qemu-ga" in line for line in job.log_lines)
+
+
+async def test_quick_restore_on_windows_never_chmods_or_warns(manager, session_data, monkeypatch):
+    job, calls = await _run_quick_restore(manager, session_data, monkeypatch, family="windows")
+    assert job.status == RestoreStatus.DONE
+    assert not any(c[0] == "chmod" for c in calls)
+    assert not any("0666" in line for line in job.log_lines)
 
 
 # --- cancellation / errors / cleanup ---------------------------------------
