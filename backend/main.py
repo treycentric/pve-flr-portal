@@ -1,5 +1,7 @@
 import asyncio
 import dataclasses
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -8,7 +10,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 import zstandard
@@ -99,6 +101,47 @@ async def unauthorized_handler(request: Request, exc: HTTPException):
             return JSONResponse(status_code=401, content={"detail": exc.detail})
         return RedirectResponse(url=target, status_code=302)
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_OIDC_BINDING_COOKIE = "oidc_binding"
+
+
+def _is_cross_site_write(request: Request) -> bool:
+    """CSRF defence beyond the SameSite=Lax session cookie, which still
+    sends the cookie on *same-site* cross-origin requests (another port or
+    sibling subdomain on the same host). Browsers label every request with
+    `Sec-Fetch-Site`; only "same-origin" (and "none", a user-initiated
+    navigation) is accepted for a state-changing method. Older browsers
+    that lack the header fall back to comparing `Origin` with `Host`. A
+    request with neither header is a non-browser client (curl, the test
+    client), which can't be CSRF'd, so it's allowed."""
+    if request.method in _SAFE_METHODS:
+        return False
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None:
+        return fetch_site not in ("same-origin", "none")
+    origin = request.headers.get("origin")
+    if origin is not None:
+        return urlsplit(origin).netloc != request.headers.get("host", "")
+    return False
+
+
+@app.middleware("http")
+async def csrf_and_framing_guard(request: Request, call_next):
+    if _is_cross_site_write(request):
+        return JSONResponse(status_code=403, content={"detail": "Cross-site request blocked"})
+    response = await call_next(request)
+    # Clickjacking: nothing here is meant to be embedded in another page.
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
+
+
+def _oidc_binding(state: str) -> str:
+    """Value of the cookie tying an OIDC callback to the browser that
+    started the flow - a hash of the `state` PVE put in the auth URL."""
+    return hashlib.sha256(state.encode()).hexdigest()
 
 
 @app.get("/login")
@@ -231,6 +274,21 @@ async def login_oidc_callback(
             status_code=401,
         )
     redirect_url = str(request.url_for("login_oidc_callback"))
+    # Login-CSRF guard: the callback must come from the browser that started
+    # the flow, else an attacker could hand a victim their own code/state.
+    binding = request.cookies.get(_OIDC_BINDING_COOKIE, "")
+    if not hmac.compare_digest(binding.encode(), _oidc_binding(state).encode()):
+        realms = await auth.list_realms()
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "error": "SSO login failed - this sign-in was not started from this browser. Please try again.",
+                "notice": None,
+                "realms": realms,
+            },
+            status_code=401,
+        )
     try:
         session_id = await auth.oidc_login(state, code, redirect_url)
     except (HTTPException, httpx.HTTPError):
@@ -250,6 +308,7 @@ async def login_oidc_callback(
         samesite="lax",
         max_age=60 * 60 * 24,
     )
+    response.delete_cookie(_OIDC_BINDING_COOKIE)
     return response
 
 
@@ -279,10 +338,33 @@ async def login_oidc_start(realm: str, request: Request):
             },
             status_code=502,
         )
-    return RedirectResponse(url=auth_url, status_code=302)
+    idp_state = (parse_qs(urlsplit(auth_url).query).get("state") or [""])[0]
+    if not idp_state:
+        _log.warning("OIDC auth URL for realm %r carried no state parameter", realm)
+        realms = await auth.list_realms()
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "error": "Could not start SSO login - the identity provider returned no state.",
+                "notice": None,
+                "realms": realms,
+            },
+            status_code=502,
+        )
+    response = RedirectResponse(url=auth_url, status_code=302)
+    response.set_cookie(
+        _OIDC_BINDING_COOKIE,
+        _oidc_binding(idp_state),
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        max_age=600,
+    )
+    return response
 
 
-@app.get("/logout")
+@app.post("/logout")
 async def logout_route(request: Request):
     session_id = request.cookies.get("session_id")
     if session_id:

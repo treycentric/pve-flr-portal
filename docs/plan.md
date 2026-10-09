@@ -855,6 +855,8 @@ admin hasn't supplied their own.
   (matching the ABB reference the user provided), with an About entry
   (app logo/name/credit) alongside it. Session cookie is `HttpOnly`,
   `SameSite=Lax`, and `Secure` whenever served over HTTPS (the default).
+  CSRF/framing guards (Sec-Fetch-Site/Origin check, POST logout, OIDC
+  state-binding cookie): see `docs/architecture.md`.
 - Idle timeout default: **30 minutes** (`SESSION_IDLE_TIMEOUT_MINUTES`).
 - Port: **8008** by default (follows PBS's own 8007), served over
   HTTPS via `run.py` rather than launching uvicorn directly from the

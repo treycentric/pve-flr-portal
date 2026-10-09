@@ -315,7 +315,12 @@ function userMenu(identity) {
     },
     logout() {
       this.open = false;
-      window.location = '/logout';
+      // POST, not a GET navigation - a cross-site link/img must not be able to log the user out.
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = '/logout';
+      document.body.appendChild(form);
+      form.submit();
     },
   };
 }
