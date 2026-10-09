@@ -167,6 +167,23 @@ and the `docs/plan.md` §4 note that state is actually being written.
 Deferred out of #29 deliberately to keep that change small.
 **Still needs its own GitHub issue.**
 
+## Security hardening (from the CSRF review + the IT-BAER `sms-hardening` fork review)
+
+Analysis lives in each issue; the fork is based on an older `main`, so
+adopt by re-implementing/cherry-picking, not merging.
+
+- [x] #135 CSRF guard / POST logout / OIDC state binding / anti-framing
+      (PR #144; SSO + TOTP login verified on a live PVE)
+- [x] #136 Restored files + guest CA anchor created `0666` by
+      `agent/file-write` - fixed in PR #143 (chmod after write; existing
+      anchors repaired), verified on a live Linux guest
+- [ ] #137 Root-owned app dir in `deploy/` (only `certs/` service-writable)
+- [ ] #138 Serve Open Sans locally (drop Google Fonts)
+- [ ] #139 Hash-locked `requirements.lock` - needs a Dependabot and
+      multi-Python plan first; generate our own, don't copy the fork's
+- [ ] #140 TLS key `0600` from creation; `PFR_RELOAD` off by default
+- [ ] #141 Restore directory owner/mode/mtime in bundle restores
+
 ## Known limitations / tech debt
 
 Detailed in `docs/plan.md` §9.1 ("Scaling & limits") — condensed here

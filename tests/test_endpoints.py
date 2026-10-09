@@ -1999,6 +1999,7 @@ def test_login_oidc_callback_sets_cookie_on_success(monkeypatch):
 
     monkeypatch.setattr(auth, "oidc_login", fake_oidc_login)
     with TestClient(main.app) as c:
+        c.cookies.set("oidc_binding", main._oidc_binding("st1"))
         resp = c.get(
             "/login/oidc/callback",
             params={"state": "st1", "code": "cd1"},
@@ -2040,19 +2041,87 @@ def test_login_oidc_callback_fails_cleanly_when_pve_rejects_the_exchange(monkeyp
     monkeypatch.setattr(auth, "oidc_login", fake_oidc_login)
     monkeypatch.setattr(auth, "list_realms", realms)
     with TestClient(main.app) as c:
+        c.cookies.set("oidc_binding", main._oidc_binding("st1"))
         resp = c.get("/login/oidc/callback", params={"state": "st1", "code": "cd1"})
     assert resp.status_code == 401
     assert "SSO login failed" in resp.text
+
+
+def test_login_oidc_start_sets_binding_cookie_for_the_idp_state(monkeypatch):
+    async def fake_auth_url(realm, redirect_url):
+        return "https://idp.example.com/authorize?client_id=x&state=y"
+
+    monkeypatch.setattr(auth, "oidc_auth_url", fake_auth_url)
+    with TestClient(main.app) as c:
+        resp = c.get("/login/oidc/keycloak", follow_redirects=False)
+    assert f"oidc_binding={main._oidc_binding('y')}" in resp.headers["set-cookie"]
+
+
+def test_login_oidc_callback_rejects_a_flow_this_browser_did_not_start(monkeypatch):
+    # Login CSRF: an attacker's code/state delivered to a victim who has no
+    # (or a different) binding cookie must never be exchanged.
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    async def fake_oidc_login(state, code, redirect_url):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(auth, "list_realms", realms)
+    monkeypatch.setattr(auth, "oidc_login", fake_oidc_login)
+    with TestClient(main.app) as c:
+        resp = c.get("/login/oidc/callback", params={"state": "st1", "code": "cd1"})
+        assert resp.status_code == 401
+        c.cookies.set("oidc_binding", main._oidc_binding("other-state"))
+        resp = c.get("/login/oidc/callback", params={"state": "st1", "code": "cd1"})
+    assert resp.status_code == 401
+    assert "not started from this browser" in resp.text
 
 
 def test_logout_clears_cookie_and_session(session_data):
     auth._sessions["session-xyz"] = session_data
     with TestClient(main.app) as c:
         c.cookies.set("session_id", "session-xyz")
-        resp = c.get("/logout", follow_redirects=False)
+        resp = c.post("/logout", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"] == "/login"
     assert "session-xyz" not in auth._sessions
+
+
+def test_logout_via_get_is_not_allowed():
+    with TestClient(main.app) as c:
+        assert c.get("/logout", follow_redirects=False).status_code == 405
+
+
+@pytest.mark.parametrize(
+    ("headers", "blocked"),
+    [
+        ({}, False),  # non-browser client
+        ({"Sec-Fetch-Site": "same-origin"}, False),
+        ({"Sec-Fetch-Site": "none"}, False),
+        ({"Sec-Fetch-Site": "same-site"}, True),  # sibling subdomain / other port
+        ({"Sec-Fetch-Site": "cross-site"}, True),
+        ({"Origin": "http://testserver"}, False),
+        ({"Origin": "http://evil.example.com"}, True),
+        ({"Origin": "null"}, True),
+    ],
+)
+def test_state_changing_requests_are_cross_site_guarded(headers, blocked):
+    with TestClient(main.app) as c:
+        resp = c.post("/logout", headers=headers, follow_redirects=False)
+    assert (resp.status_code == 403) is blocked
+
+
+def test_cross_site_get_is_not_blocked_by_the_guard():
+    with TestClient(main.app) as c:
+        resp = c.get("/login", headers={"Sec-Fetch-Site": "cross-site"})
+    assert resp.status_code == 200
+
+
+def test_responses_forbid_framing():
+    with TestClient(main.app) as c:
+        resp = c.get("/login")
+    assert resp.headers["content-security-policy"] == "frame-ancestors 'none'"
+    assert resp.headers["x-frame-options"] == "DENY"
 
 
 # --- Design C download endpoint (docs/plan.md §7.6, issue #22) -----------

@@ -187,6 +187,15 @@ own `GET /nodes/{node}/storage/{storage}/content?content=backup`.
   ticket_issued_at, last_activity_at, cap}`. The browser only ever holds
   this app's own `HttpOnly`/`SameSite=Lax` session cookie (`Secure` too,
   whenever served over HTTPS), never the raw PVE ticket.
+- **CSRF / framing:** `SameSite=Lax` alone still sends the cookie on
+  same-site requests from another port or sibling subdomain, so
+  `main.csrf_and_framing_guard` also rejects any non-GET/HEAD/OPTIONS
+  request whose `Sec-Fetch-Site` isn't `same-origin`/`none` (falling back
+  to `Origin` vs `Host`; requests with neither header are non-browser
+  clients and pass). Logout is `POST /logout`. The OIDC callback requires
+  an `oidc_binding` cookie (hash of the IdP `state`, set at flow start) so
+  a victim can't be logged in with an attacker's code. All responses send
+  `frame-ancestors 'none'` / `X-Frame-Options: DENY`.
 - **Outbound PVE calls** send `Cookie: PVEAuthCookie=<ticket>`;
   state-changing calls also send the `CSRFPreventionToken` header.
 - **Ticket refresh:** `auth.get_session()` refreshes a session's PVE
