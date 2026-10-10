@@ -18,7 +18,7 @@ os.environ.setdefault("SESSION_IDLE_TIMEOUT_MINUTES", "30")
 # a hermetic test run" reasoning as RESTORE_DATA_NICS below, so tests
 # never touch (or get polluted by) a developer's real ./data directory.
 os.environ.setdefault("PFR_DATA_DIR", tempfile.mkdtemp(prefix="pve-flr-portal-tests-"))
-# Design C (docs/plan.md §7.6, issue #22) tests assume this is unconfigured
+# Direct Network Transfer (docs/plan.md §7.6, issue #22) tests assume this is unconfigured
 # unless a test opts in itself (test_restore_runner.py's _with_data_nics) -
 # pinned here for the same reason as the rest of this block: a developer's
 # own real .env (e.g. while setting up live verification) must never leak
@@ -94,8 +94,8 @@ def clear_restore_jobs():
 @pytest.fixture(autouse=True)
 def clear_restore_download_tokens():
     """Same leak-between-tests convention as sessions/restore jobs above,
-    for Design C's (docs/plan.md §7.6, issue #22) single-use download
-    tokens."""
+    for Direct Network Transfer's (docs/plan.md §7.6, issue #22)
+    single-use download tokens."""
     from backend import restore_download
 
     restore_download.clear()

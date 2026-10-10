@@ -4,7 +4,7 @@ alongside the existing Browse/Manual-entry destination pickers.
 
 VM guests only - LXC containers can never reach this at all, since
 push-to-guest restore (guest_agent.get_restore_capabilities) is gated on
-qemu-guest-agent, which containers don't have (design_a/design_b are
+qemu-guest-agent, which containers don't have (file_write/guest_exec are
 always unavailable for guest_type == "ct" - see
 test_get_restore_capabilities_lxc_skips_agent_calls). The restore modal
 this feeds is simply never reachable for a container, so there is

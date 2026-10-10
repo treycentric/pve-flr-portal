@@ -440,7 +440,7 @@ def test_browse_annotates_windows_drive_letter_on_partition_folder(client, monke
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_disk_number(session, vmid, node, volume, disk_label):
         assert disk_label == "drive-efidisk0.img.fidx"
@@ -474,7 +474,7 @@ def test_tree_annotates_windows_drive_letter_on_partition_folder(client, monkeyp
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_disk_number(session, vmid, node, volume, disk_label):
         return 0
@@ -779,8 +779,8 @@ def test_restore_capabilities_returns_capability_json(client, monkeypatch):
             agent_running=True,
             pve_version_ok=True,
             guest_os_family="linux",
-            design_a=guest_agent.PathAvailability(True),
-            design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
+            file_write=guest_agent.PathAvailability(True),
+            guest_exec=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
             verify_supported=False,
         )
 
@@ -789,9 +789,9 @@ def test_restore_capabilities_returns_capability_json(client, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["agent_running"] is True
-    assert body["design_a"] == {"available": True, "reason": None}
-    assert body["design_b"]["available"] is False
-    assert "Unrestricted" in body["design_b"]["reason"]
+    assert body["file_write"] == {"available": True, "reason": None}
+    assert body["guest_exec"]["available"] is False
+    assert "Unrestricted" in body["guest_exec"]["reason"]
 
 
 def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monkeypatch):
@@ -808,9 +808,9 @@ def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monke
     resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["design_a"]["available"] is False
-    assert body["design_b"]["available"] is False
-    assert "VM.Audit" in body["design_a"]["reason"]  # 403 -> a permissions hint
+    assert body["file_write"]["available"] is False
+    assert body["guest_exec"]["available"] is False
+    assert "VM.Audit" in body["file_write"]["reason"]  # 403 -> a permissions hint
 
 
 def test_restore_capabilities_degrades_on_connect_error(client, monkeypatch):
@@ -822,7 +822,7 @@ def test_restore_capabilities_degrades_on_connect_error(client, monkeypatch):
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", unreachable)
     resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
     assert resp.status_code == 200
-    assert "reach PVE" in resp.json()["design_a"]["reason"]
+    assert "reach PVE" in resp.json()["file_write"]["reason"]
 
 
 def _available_caps(**overrides):
@@ -832,8 +832,8 @@ def _available_caps(**overrides):
         agent_running=True,
         pve_version_ok=True,
         guest_os_family="windows",
-        design_a=guest_agent.PathAvailability(True),
-        design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
+        file_write=guest_agent.PathAvailability(True),
+        guest_exec=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
         verify_supported=False,
     )
     defaults.update(overrides)
@@ -893,7 +893,7 @@ def test_restore_blocked_when_capability_unavailable(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_a=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"))
+        return _available_caps(file_write=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.post("/api/restore", data=_restore_form())
@@ -919,7 +919,7 @@ def test_restore_bundle_submits_a_queued_job(client, monkeypatch):
     from backend import guest_agent, restore_jobs, restore_runner
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def never_runs(job, jobs):
         pass
@@ -952,7 +952,7 @@ def test_restore_bundle_passes_ownership_through_for_a_linux_guest(client, monke
     from backend import guest_agent, restore_jobs, restore_runner
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(guest_os_family="linux", design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_os_family="linux", guest_exec=guest_agent.PathAvailability(True))
 
     async def never_runs(job, jobs):
         pass
@@ -976,7 +976,7 @@ def test_restore_bundle_ownership_forced_false_for_a_windows_guest(client, monke
 
     async def fake_caps(session, guest_type, vmid):
         # guest_os_family defaults to "windows" in _available_caps()
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def never_runs(job, jobs):
         pass
@@ -1004,7 +1004,7 @@ def test_restore_bundle_tolerates_extra_fields_in_item_json(client, monkeypatch)
     from backend import guest_agent, restore_jobs, restore_runner
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def never_runs(job, jobs):
         pass
@@ -1023,15 +1023,15 @@ def test_restore_bundle_tolerates_extra_fields_in_item_json(client, monkeypatch)
     assert job.items[0].leaf is False
 
 
-def test_restore_bundle_checks_design_b_not_design_a(client, monkeypatch):
-    # A bundle restore always needs guest-exec - design_a availability
+def test_restore_bundle_checks_guest_exec_not_file_write(client, monkeypatch):
+    # A bundle restore always needs guest-exec - file_write availability
     # (the single-call fast path) is irrelevant to it.
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(
-            design_a=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"),
-            design_b=guest_agent.PathAvailability(True),
+            file_write=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"),
+            guest_exec=guest_agent.PathAvailability(True),
         )
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -1045,15 +1045,15 @@ def test_restore_bundle_checks_design_b_not_design_a(client, monkeypatch):
 
     monkeypatch.setattr(restore_runner, "run_restore", never_runs)
     resp = client.post("/api/restore", data=form)
-    assert resp.status_code == 200  # design_a being unavailable doesn't block a bundle restore
+    assert resp.status_code == 200  # file_write being unavailable doesn't block a bundle restore
     assert restore_jobs.manager.get(resp.json()["id"]) is not None
 
 
-def test_restore_bundle_blocked_without_design_b(client, monkeypatch):
+def test_restore_bundle_blocked_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     form = _restore_form(filepath=None, name=None)
@@ -1067,7 +1067,7 @@ def test_restore_bundle_rejects_invalid_item_json(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     form = _restore_form(filepath=None, name=None)
@@ -1093,12 +1093,12 @@ def test_restore_uses_posix_separator_for_non_windows_guest(client, monkeypatch)
     assert resp.json()["destination"] == "/etc/hosts"
 
 
-def test_restore_blocked_when_metadata_requested_without_design_b(client, monkeypatch):
+def test_restore_blocked_when_metadata_requested_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        # design_a available, design_b not - only FileWrite, no Unrestricted
-        return _available_caps(design_a=guest_agent.PathAvailability(True))
+        # file_write available, guest_exec not - only FileWrite, no Unrestricted
+        return _available_caps(file_write=guest_agent.PathAvailability(True))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.post("/api/restore", data=_restore_form(restore_metadata="true"))
@@ -1106,11 +1106,11 @@ def test_restore_blocked_when_metadata_requested_without_design_b(client, monkey
     assert "Unrestricted" in resp.json()["detail"]
 
 
-def test_restore_blocked_when_verify_requested_without_design_b(client, monkeypatch):
+def test_restore_blocked_when_verify_requested_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_a=guest_agent.PathAvailability(True))
+        return _available_caps(file_write=guest_agent.PathAvailability(True))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.post("/api/restore", data=_restore_form(verify="true"))
@@ -1122,7 +1122,7 @@ def test_restore_passes_metadata_verify_and_mtime_through_to_the_job(client, mon
 
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(
-            design_a=guest_agent.PathAvailability(True), design_b=guest_agent.PathAvailability(True)
+            file_write=guest_agent.PathAvailability(True), guest_exec=guest_agent.PathAvailability(True)
         )
 
     async def never_runs(job, jobs):
@@ -1141,11 +1141,11 @@ def test_restore_passes_metadata_verify_and_mtime_through_to_the_job(client, mon
     assert job.source_mtime == 1700000000
 
 
-def test_restore_blocked_when_ownership_requested_without_design_b(client, monkeypatch):
+def test_restore_blocked_when_ownership_requested_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_a=guest_agent.PathAvailability(True))
+        return _available_caps(file_write=guest_agent.PathAvailability(True))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.post("/api/restore", data=_restore_form(restore_ownership="true"))
@@ -1158,8 +1158,8 @@ def test_restore_passes_ownership_through_to_the_job_for_a_linux_guest(client, m
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(
             guest_os_family="linux",
-            design_a=guest_agent.PathAvailability(True),
-            design_b=guest_agent.PathAvailability(True),
+            file_write=guest_agent.PathAvailability(True),
+            guest_exec=guest_agent.PathAvailability(True),
         )
 
     async def never_runs(job, jobs):
@@ -1184,7 +1184,7 @@ def test_restore_ownership_forced_false_for_a_windows_guest_regardless_of_reques
     async def fake_caps(session, guest_type, vmid):
         # guest_os_family defaults to "windows" in _available_caps()
         return _available_caps(
-            design_a=guest_agent.PathAvailability(True), design_b=guest_agent.PathAvailability(True)
+            file_write=guest_agent.PathAvailability(True), guest_exec=guest_agent.PathAvailability(True)
         )
 
     async def never_runs(job, jobs):
@@ -1561,12 +1561,12 @@ def test_restore_browse_rejects_unknown_guest_type(client):
     assert resp.status_code == 400
 
 
-def test_restore_browse_blocked_without_design_b(client, monkeypatch):
+def test_restore_browse_blocked_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
         reason = "missing VM.GuestAgent.Unrestricted privilege"
-        return _available_caps(design_b=guest_agent.PathAvailability(False, reason))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, reason))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133"})
@@ -1578,7 +1578,7 @@ def test_restore_browse_returns_listing(client, monkeypatch):
     from backend import guest_agent, guest_browse
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True), guest_os_family="linux")
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True), guest_os_family="linux")
 
     async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         assert guest_os_family == "linux"
@@ -1597,7 +1597,7 @@ def test_restore_browse_unsafe_path_returns_400(client, monkeypatch):
     from backend import guest_agent, guest_browse
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         raise guest_browse.UnsafePathError("nope")
@@ -1612,7 +1612,7 @@ def test_restore_browse_listing_error_returns_502(client, monkeypatch):
     from backend import guest_agent, guest_browse
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         raise guest_browse.ListingError("No such file or directory")
@@ -1638,12 +1638,12 @@ def test_restore_original_path_rejects_containers(client):
     assert "container" in resp.json()["detail"].lower()
 
 
-def test_restore_original_path_blocked_without_design_b(client, monkeypatch):
+def test_restore_original_path_blocked_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
         reason = "missing VM.GuestAgent.Unrestricted privilege"
-        return _available_caps(design_b=guest_agent.PathAvailability(False, reason))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, reason))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.get("/api/restore-original-path", params={"type": "vm", "vmid": "133", "volume": "vol"})
@@ -1655,7 +1655,7 @@ def test_restore_original_path_returns_resolved_directory(client, monkeypatch):
     from backend import guest_agent, guest_original_location
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True), guest_os_family="linux", node="pve2")
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True), guest_os_family="linux", node="pve2")
 
     async def fake_resolve(session, vmid, guest_os_family, node, volume, crumbs):
         assert guest_os_family == "linux"
@@ -1679,7 +1679,7 @@ def test_restore_original_path_surfaces_unavailable_reason(client, monkeypatch):
     from backend import guest_agent, guest_original_location
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_resolve(session, vmid, guest_os_family, node, volume, crumbs):
         return guest_original_location.OriginalLocationResult(available=False, reason="not mounted")
@@ -2124,7 +2124,7 @@ def test_responses_forbid_framing():
     assert resp.headers["x-frame-options"] == "DENY"
 
 
-# --- Design C download endpoint (docs/plan.md §7.6, issue #22) -----------
+# --- Direct Network Transfer download endpoint (docs/plan.md §7.6, issue #22) --
 # Not yet reachable from a live restore - these exercise the endpoint
 # directly with a job created straight through the manager and a token
 # minted straight through restore_download, the way a future bootstrap

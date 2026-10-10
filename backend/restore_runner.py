@@ -421,9 +421,8 @@ async def _try_direct_network_transfer(
     dest_path: str | None = None,
     local_path: Path | None = None,
 ) -> bool:
-    """Direct Network Transfer (internally "Design C", docs/plan.md
-    §7.6, issue #22 - see that section for why the user-facing name
-    differs from the dev-doc name): the guest fetches its own file over
+    """Direct Network Transfer (docs/plan.md §7.6, issue #22): the
+    guest fetches its own file over
     its own NIC instead of this app chunking it over the slow
     QMP/virtio-serial channel. Attempted only as an alternative to the
     scratch-write+concat path (the caller only calls this when more than
@@ -803,10 +802,10 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
 
         job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
         caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
-        if not caps.design_b.available:
+        if not caps.guest_exec.available:
             jobs.mark_failed(
                 job.id,
-                caps.design_b.reason
+                caps.guest_exec.reason
                 or "Multi-file/directory restore needs guest-exec (VM.GuestAgent.Unrestricted), "
                 "which is not available for this guest.",
             )
@@ -907,8 +906,9 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         # thousands of individual agent/file-write round trips at
         # DEFAULT_CHUNK_SIZE_BYTES each. Confirmed live the same day this
         # was added: a ~1.5GB bundle's chunked write was projected at
-        # tens of thousands of chunks - Design B alone doesn't scale to
-        # bundle-sized payloads the way it does to modest single files.
+        # tens of thousands of chunks - the chunked guest-exec path
+        # alone doesn't scale to bundle-sized payloads the way it does
+        # to modest single files.
         # Silently unavailable (no configured data NIC, no usable fetch
         # tool, etc.) falls straight through to the chunked path below,
         # same contract as the single-file path's own use of this.
@@ -1100,16 +1100,16 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                 job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
                 await ensure_fresh_ticket(job.session)
                 caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
-                if needs_exec and not caps.design_b.available:
+                if needs_exec and not caps.guest_exec.available:
                     jobs.mark_failed(
                         job.id,
-                        caps.design_b.reason
+                        caps.guest_exec.reason
                         or "This restore needs guest-exec (restore metadata or verify was "
                         "requested), which is not available for this guest.",
                     )
                     return
                 guest_os_family = caps.guest_os_family
-                exec_available = caps.design_b.available
+                exec_available = caps.guest_exec.available
 
                 if exec_available:
                     pve_client.check_path_safe(job.destination)
@@ -1152,10 +1152,10 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                 job.log("Checking VM.GuestAgent.Unrestricted availability (needed for guest-exec).")
                 await ensure_fresh_ticket(job.session)
                 caps = await guest_agent.get_restore_capabilities(job.session, job.guest_type, job.vmid)
-                if not caps.design_b.available:
+                if not caps.guest_exec.available:
                     jobs.mark_failed(
                         job.id,
-                        caps.design_b.reason
+                        caps.guest_exec.reason
                         or "This restore needs guest-exec (large file, restore metadata, or verify was "
                         "requested), which is not available for this guest.",
                     )

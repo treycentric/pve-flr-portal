@@ -17,11 +17,12 @@ checked facts - never an OS-family guess:
   VM.GuestAgent.* at all, so restore is unavailable there regardless
   of the other three checks.
 
-Design A ("quick restore") needs only FileWrite. Design B ("full
-restore" - anything needing guest-exec: multi-chunk concatenation,
-metadata restore, checksum verify) needs Unrestricted. Reading
-agent/info itself needs Audit, so a caller with none of the five
-grants gets a clean "unavailable", not a bubbled-up 403.
+A single-shot `agent/file-write` ("quick restore") needs only
+FileWrite. Anything needing guest-exec (multi-chunk concatenation,
+metadata restore, checksum verify, directory browsing, bundle restore)
+needs Unrestricted. Reading agent/info itself needs Audit, so a caller
+with none of the five grants gets a clean "unavailable", not a
+bubbled-up 403.
 """
 from dataclasses import dataclass, replace
 
@@ -48,9 +49,9 @@ class RestoreCapabilities:
     agent_running: bool
     pve_version_ok: bool
     guest_os_family: str | None  # "windows" | "linux" | "bsd" | "macos" | None (unknown)
-    design_a: PathAvailability
-    design_b: PathAvailability
-    verify_supported: bool  # sha256-via-guest-exec verification available (implies design_b)
+    file_write: PathAvailability
+    guest_exec: PathAvailability
+    verify_supported: bool  # sha256-via-guest-exec verification available (implies guest_exec)
     # The guest's real PVE node (issue #51) - resolved once by
     # get_restore_capabilities() and carried here so callers (main.py's
     # /api/restore, /api/restore-browse) can pass it on to every
@@ -115,34 +116,34 @@ def parse_capabilities(
 
     if not pve_version_ok:
         reason = "PVE 8 has no granular VM.GuestAgent.* privileges (VM.Monitor is all-or-nothing)"
-        design_a = PathAvailability(False, reason)
-        design_b = PathAvailability(False, reason)
+        file_write = PathAvailability(False, reason)
+        guest_exec = PathAvailability(False, reason)
     elif not agent_running:
         reason = "qemu-guest-agent is not enabled or not responding for this guest"
-        design_a = PathAvailability(False, reason)
-        design_b = PathAvailability(False, reason)
+        file_write = PathAvailability(False, reason)
+        guest_exec = PathAvailability(False, reason)
     else:
         if not has_file_write:
-            design_a = PathAvailability(False, "missing VM.GuestAgent.FileWrite (or .Unrestricted) privilege")
+            file_write = PathAvailability(False, "missing VM.GuestAgent.FileWrite (or .Unrestricted) privilege")
         elif file_write_enabled is False:
-            design_a = PathAvailability(False, "guest-file-write is disabled in this guest's agent config")
+            file_write = PathAvailability(False, "guest-file-write is disabled in this guest's agent config")
         else:
-            design_a = PathAvailability(True)
+            file_write = PathAvailability(True)
 
         if not has_unrestricted:
-            design_b = PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege")
+            guest_exec = PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege")
         elif guest_exec_enabled is False:
-            design_b = PathAvailability(False, "guest-exec is disabled in this guest's agent config")
+            guest_exec = PathAvailability(False, "guest-exec is disabled in this guest's agent config")
         else:
-            design_b = PathAvailability(True)
+            guest_exec = PathAvailability(True)
 
     return RestoreCapabilities(
         agent_running=agent_running,
         pve_version_ok=pve_version_ok,
         guest_os_family=_guest_os_family(osinfo),
-        design_a=design_a,
-        design_b=design_b,
-        verify_supported=design_b.available,
+        file_write=file_write,
+        guest_exec=guest_exec,
+        verify_supported=guest_exec.available,
     )
 
 
@@ -173,8 +174,9 @@ def _extract_ip_addresses(network_interfaces: list[dict] | None) -> list[str]:
     """Flattens QGA's network-get-interfaces response (one entry per NIC,
     each with its own ip-addresses list) down to a plain list of address
     strings - loopback excluded, since it can never match a configured
-    data-NIC subnet and would just be noise for Design C's
-    select_data_nic() (docs/plan.md §7.6, issue #22) to skip over."""
+    data-NIC subnet and would just be noise for Direct Network
+    Transfer's select_data_nic() (docs/plan.md §7.6, issue #22) to skip
+    over."""
     addresses = []
     for iface in network_interfaces or []:
         for entry in iface.get("ip-addresses") or []:
@@ -187,9 +189,10 @@ def _extract_ip_addresses(network_interfaces: list[dict] | None) -> list[str]:
 async def get_guest_ip_addresses(
     session: SessionData, guest_type: str, vmid: str, *, node: str = "localhost"
 ) -> list[str]:
-    """Design C (docs/plan.md §7.6, issue #22): the guest's own reported
-    IP(s), via QGA's network-get-interfaces (already-wrapped QMP call, no
-    new PVE API surface) - used to pick which configured data NIC is
+    """Direct Network Transfer (docs/plan.md §7.6, issue #22): the
+    guest's own reported IP(s), via QGA's network-get-interfaces
+    (already-wrapped QMP call, no new PVE API surface) - used to pick
+    which configured data NIC is
     actually reachable from this guest's subnet. Same
     tolerate-failure-as-no-info pattern as agent/info and get-osinfo
     above: a guest that can't be asked (agent not running, caller lacks

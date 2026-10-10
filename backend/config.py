@@ -155,16 +155,16 @@ class Settings:
     # restore is observed crowding out other guest-agent users.
     guest_agent_min_command_gap_seconds: float
 
-    # Design C / "Direct Network Transfer" (docs/plan.md §7.6, issue #22,
-    # shipped v1.1.0): the data-plane NIC(s) a restore's network-pull
-    # download endpoint may be served from, one entry per non-routable subnet a
+    # Direct Network Transfer (docs/plan.md §7.6, issue #22, shipped
+    # v1.1.0): the data-plane NIC(s) a restore's network-pull download
+    # endpoint may be served from, one entry per non-routable subnet a
     # target guest might live in. Raw JSON here, parsed by
     # restore_network_pull.parse_data_nics() - kept as a plain string
     # rather than parsed eagerly so a malformed value fails where it's
     # used (with a clear error) instead of crashing the whole app at
     # import time over a feature most deployments won't configure.
-    # Empty by default - Design C is simply never offered until an admin
-    # opts in by setting this.
+    # Empty by default - Direct Network Transfer is simply never offered
+    # until an admin opts in by setting this.
     restore_data_nics_json: str
     # How long a single-use network-pull download token stays valid
     # before it's treated as expired - long enough for guest-exec to
@@ -185,9 +185,8 @@ class Settings:
     # [minimum, preferred] that the detected fetch tool can actually do
     # (curl/wget/python/Invoke-WebRequest/WinHttpRequest can skip-verify;
     # certutil/bitsadmin can't; bash /dev/tcp has no TLS at all). If none
-    # qualifies, `on_unmet` decides: `fallback` (use Design B - the
-    # chunked write over QMP, which never touches the data network) or
-    # `fail`.
+    # qualifies, `on_unmet` decides: `fallback` (use the chunked write
+    # over QMP, which never touches the data network) or `fail`.
     #
     # `verify` (the default): the guest validates the data-plane cert.
     # `install_ca` controls whether this app puts the cert into the
