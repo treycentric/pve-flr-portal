@@ -8,8 +8,8 @@ the two decoupled). For the underlying QGA/PVE API facts this mechanism
 is built on, see [`api-reference.md`](api-reference.md). For dated
 bug-investigation narrative, see [`archive/`](archive/).
 
-VM only — containers have no `qemu-guest-agent`, so `design_a`/`design_b`
-are always unavailable for a CT.
+VM only — containers have no `qemu-guest-agent`, so `file_write`/
+`guest_exec` are always unavailable for a CT.
 
 ## Capability detection
 
@@ -30,8 +30,8 @@ Response shape:
   "agent_running": true,
   "pve_version_ok": true,
   "guest_os_family": "linux",
-  "design_a": {"available": true, "reason": null},
-  "design_b": {"available": false, "reason": "guest-exec not enabled in qemu-guest-agent config"},
+  "file_write": {"available": true, "reason": null},
+  "guest_exec": {"available": false, "reason": "guest-exec not enabled in qemu-guest-agent config"},
   "verify_supported": false
 }
 ```
@@ -59,18 +59,19 @@ that specific signal is safe.
 minimum gap between this app's own consecutive commands on one guest,
 as a courtesy to other channel users during a long multi-chunk restore.
 
-## Design A / B — single file
+## Single file: single-shot write vs. chunked guest-exec concat
 
 The write mechanics decide the split, not a user-facing "quick vs.
 full" choice:
 
-- **Design A — quick restore.** The whole content fits in one
-  `agent/file-write` call (≤61440 bytes, see
+- **Single-shot write (`file_write`) — quick restore.** The whole
+  content fits in one `agent/file-write` call (≤61440 bytes, see
   [`api-reference.md`](api-reference.md)). No `guest-exec` anywhere —
   works even where exec is blocked. Needs only `VM.GuestAgent.FileWrite`.
   Lands `root:root`/SYSTEM, mode `0644`, fresh mtime.
-- **Design B — full restore.** Anything Design A can't do in one call:
-  larger content, or metadata/verify requested. Each chunk writes to
+- **Chunked write + guest-exec concat (`guest_exec`) — full restore.**
+  Anything the single-shot path can't do in one call: larger content,
+  or metadata/verify requested. Each chunk writes to
   its own file in a per-restore scratch directory (discovered per OS
   from `agent/info`'s reported guest OS — `%TEMP%` on Windows, `/tmp`
   or `$TMPDIR` on Linux/BSD), then one `guest-exec` concatenates them
@@ -145,12 +146,13 @@ behavior:**
   once, regardless of file size. A streaming sha256 digest covers
   verify without a second pass.
 
-## Design C — Direct Network Transfer
+## Direct Network Transfer (DNT)
 
-A third mechanism on top of A/B: the guest fetches the file itself over
-its own network, at normal throughput, instead of moving every byte
-over the QMP/virtio-serial control channel (Design B's real bottleneck
-— one sequential round-trip per ≤61440-byte chunk).
+A third mechanism on top of the two above: the guest fetches the file
+itself over its own network, at normal throughput, instead of moving
+every byte over the QMP/virtio-serial control channel (the chunked
+guest-exec path's real bottleneck — one sequential round-trip per
+≤61440-byte chunk).
 
 **Mechanism:**
 1. Backend writes a small bootstrap script into the guest via
@@ -159,7 +161,7 @@ over the QMP/virtio-serial control channel (Design B's real bottleneck
 2. `guest-exec` runs it. The guest fetches the file directly from the
    portal over its own NIC — not through PVE, not through QMP.
 3. A follow-up `guest-exec` fixes ownership/mode/mtime as requested,
-   same as Design B.
+   same as the chunked guest-exec path.
 
 **Auth:** a random, single-use token scoped to exactly one job's one
 file, short TTL (`RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS`), stored
@@ -171,8 +173,9 @@ consumes the token on first use or expiry. For a bundle (below), the
 token's `local_path` is set and the endpoint streams the already-built
 local bundle file instead of re-proxying from PVE.
 
-**Requires:** `VM.GuestAgent.Unrestricted` (same as Design B, plus "the
-guest can reach this app" as a new dependency); guest→portal IP
+**Requires:** `VM.GuestAgent.Unrestricted` (same as the chunked
+guest-exec path, plus "the guest can reach this app" as a new
+dependency); guest→portal IP
 reachability; a usable fetch tool in the guest; `guest-exec` unblocked.
 
 **Fetch-tool fallback chain**, probed via `guest-exec` (cheap
@@ -183,14 +186,15 @@ assumed:
   -urlcache -f` → `bitsadmin /transfer` → `cscript`/VBScript
   (`WinHttpRequest` COM object; **detected but not actually usable
   yet** — needs a staged `.vbs` file via `agent/file-write`, not wired
-  up, so a guest whose only tool is `cscript` falls back to Design B).
+  up, so a guest whose only tool is `cscript` falls back to the chunked
+  guest-exec path).
 - **Linux/BSD:** `curl` → `wget` → `python3`/`python`
   (`urllib.request`) → bash's `/dev/tcp` (hand-rolled raw HTTP GET, no
   external binary, but bash-specific — not reachable under a POSIX
   `/bin/sh` guest-exec shell).
-- If nothing on the list is available, Design C simply isn't offered —
-  the same silent fallback to Design B that happens when `Unrestricted`
-  isn't granted.
+- If nothing on the list is available, DNT simply isn't offered — the
+  same silent fallback to the chunked guest-exec path that happens when
+  `Unrestricted` isn't granted.
 
 **Network segmentation: one data-plane NIC per non-routable subnet.**
 The existing interface keeps serving the UI and outbound PVE calls
@@ -236,7 +240,7 @@ file bytes. HTTPS is on by default with a configurable security policy:
   `verify → insecure → plaintext` down to MINIMUM — clamped up to
   `insecure` when PREFERRED isn't `plaintext`, since there's no second
   plain-HTTP listener. `RESTORE_DATA_NIC_TLS_ON_UNMET` (`fallback` to
-  Design B, or `fail`) decides when nothing qualifies.
+  the chunked guest-exec path, or `fail`) decides when nothing qualifies.
   `RESTORE_DATA_NIC_TLS_MIN_VERSION` (`1.2`/`1.3`) sets the listener's
   TLS floor.
 - **Per-tool capability:** skip-verify (`insecure`) works for `curl -k`,
@@ -346,7 +350,8 @@ directory root already nests everything under it.
   `proxmox-backup-client map` + helper-VM workaround.
 - **`cscript`/VBScript fetch-tool support is detected but not wired
   up** — needs a staged `.vbs` script via `agent/file-write`, which
-  `_try_direct_network_transfer()` doesn't do. Falls back to Design B.
+  `_try_direct_network_transfer()` doesn't do. Falls back to the
+  chunked guest-exec path.
 - **"Original location" restore (issue #68) for a plain (non-LVM)
   partition is ordinal-position-only** — correlated to the running
   guest's own disk numbering purely by position in PVE's own
