@@ -274,7 +274,8 @@ file bytes. HTTPS is on by default with a configurable security policy:
 
 ## Multi-file / directory restore-to-guest
 
-Extends A/B/C to a multi-select or whole-directory restore, reusing
+Extends the single-file mechanisms above to a multi-select or
+whole-directory restore, reusing
 `/api/download-bundle`'s existing `item: list[{filepath, name, leaf}]`
 convention — no new PVE API surface. A directory selection already
 means the full recursive tree, since PVE's own zip encoding for a
