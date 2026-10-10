@@ -175,8 +175,7 @@ def _extract_ip_addresses(network_interfaces: list[dict] | None) -> list[str]:
     each with its own ip-addresses list) down to a plain list of address
     strings - loopback excluded, since it can never match a configured
     data-NIC subnet and would just be noise for Direct Network
-    Transfer's select_data_nic() (docs/plan.md §7.6, issue #22) to skip
-    over."""
+    Transfer's select_data_nic() (docs/push-to-guest.md) to skip over."""
     addresses = []
     for iface in network_interfaces or []:
         for entry in iface.get("ip-addresses") or []:
@@ -189,11 +188,10 @@ def _extract_ip_addresses(network_interfaces: list[dict] | None) -> list[str]:
 async def get_guest_ip_addresses(
     session: SessionData, guest_type: str, vmid: str, *, node: str = "localhost"
 ) -> list[str]:
-    """Direct Network Transfer (docs/plan.md §7.6, issue #22): the
-    guest's own reported IP(s), via QGA's network-get-interfaces
-    (already-wrapped QMP call, no new PVE API surface) - used to pick
-    which configured data NIC is
-    actually reachable from this guest's subnet. Same
+    """Direct Network Transfer (docs/push-to-guest.md): the guest's own
+    reported IP(s), via QGA's network-get-interfaces (already-wrapped
+    QMP call, no new PVE API surface) - used to pick which configured
+    data NIC is actually reachable from this guest's subnet. Same
     tolerate-failure-as-no-info pattern as agent/info and get-osinfo
     above: a guest that can't be asked (agent not running, caller lacks
     VM.GuestAgent.Audit, LXC container with no QGA at all) just gets an

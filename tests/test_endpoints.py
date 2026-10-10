@@ -2124,7 +2124,7 @@ def test_responses_forbid_framing():
     assert resp.headers["x-frame-options"] == "DENY"
 
 
-# --- Direct Network Transfer download endpoint (docs/plan.md §7.6, issue #22) --
+# --- Direct Network Transfer download endpoint (docs/push-to-guest.md) ---
 # Not yet reachable from a live restore - these exercise the endpoint
 # directly with a job created straight through the manager and a token
 # minted straight through restore_download, the way a future bootstrap

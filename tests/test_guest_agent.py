@@ -379,7 +379,7 @@ async def test_get_restore_capabilities_missing_path_key_means_no_privileges(ses
     assert not caps.guest_exec.available
 
 
-# --- get_guest_ip_addresses (Direct Network Transfer, docs/plan.md §7.6, issue #22) --
+# --- get_guest_ip_addresses (Direct Network Transfer, docs/push-to-guest.md) ---
 
 
 def test_extract_ip_addresses_flattens_and_skips_loopback():

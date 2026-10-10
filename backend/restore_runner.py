@@ -421,9 +421,9 @@ async def _try_direct_network_transfer(
     dest_path: str | None = None,
     local_path: Path | None = None,
 ) -> bool:
-    """Direct Network Transfer (docs/plan.md §7.6, issue #22): the
-    guest fetches its own file over
-    its own NIC instead of this app chunking it over the slow
+    """Direct Network Transfer (docs/push-to-guest.md): the guest
+    fetches its own file over its own NIC instead of this app chunking
+    it over the slow
     QMP/virtio-serial channel. Attempted only as an alternative to the
     scratch-write+concat path (the caller only calls this when more than
     one chunk would otherwise be needed), and only ever silently:

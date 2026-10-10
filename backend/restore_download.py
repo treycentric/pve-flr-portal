@@ -1,6 +1,5 @@
-"""Direct Network Transfer (docs/plan.md §7.6, issue #22): the
-single-use, short-TTL download token a bootstrap script fetches its
-file against.
+"""Direct Network Transfer (docs/push-to-guest.md): the single-use,
+short-TTL download token a bootstrap script fetches its file against.
 
 The guest must never see the operator's PVE ticket - that's a live
 credential, and the whole point of running restores through this app in

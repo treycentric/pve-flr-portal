@@ -921,7 +921,7 @@ async def test_unsafe_destination_fails_before_any_exec_call(manager, session_da
     assert "unsupported characters" in job.error.lower()
 
 
-# --- Direct Network Transfer (network-pull, docs/plan.md §7.6, issue #22) --
+# --- Direct Network Transfer (network-pull, docs/push-to-guest.md) ---
 
 
 def _with_data_nics(monkeypatch, raw_json: str):

@@ -1160,7 +1160,7 @@ async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.g
 
 @app.get("/api/restore-downloads/{token}")
 async def restore_download_fetch(token: str):
-    """Direct Network Transfer (docs/plan.md §7.6, issue #22). The
+    """Direct Network Transfer (docs/push-to-guest.md). The
     endpoint a restore's bootstrap `curl`/`Invoke-WebRequest`/
     etc. in the guest fetches its file from; `restore_runner.py`'s
     `_try_direct_network_transfer()` mints the token per eligible job.

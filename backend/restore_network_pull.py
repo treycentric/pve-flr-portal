@@ -1,7 +1,7 @@
-"""Direct Network Transfer (docs/plan.md §7.6, issue #22, shipped
-v1.1.0): the network-pull restore mechanism. This module holds
-the pure, fully-testable-without-a-live-guest logic the design depends
-on (`restore_runner._try_direct_network_transfer()` drives it):
+"""Direct Network Transfer (docs/push-to-guest.md): the network-pull
+restore mechanism. This module holds the pure,
+fully-testable-without-a-live-guest logic the design depends on
+(`restore_runner._try_direct_network_transfer()` drives it):
 
 - **Data-NIC selection.** With several mutually non-routable subnets, a
   bootstrap script's download URL only works if it points at the one
@@ -390,7 +390,7 @@ def build_fetch_command(
             raise ValueError(
                 "The bash /dev/tcp fetch fallback cannot speak TLS - it only works against a plain "
                 f"http:// download URL, got {url!r}. With a non-plaintext data-plane TLS mode this guest "
-                "falls back to the chunked write over QMP, per docs/plan.md §7.6.1."
+                "falls back to the chunked write over QMP, per docs/push-to-guest.md."
             )
         host = parts.hostname
         port = parts.port or 80
