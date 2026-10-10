@@ -1,7 +1,7 @@
-"""Design C / "Direct Network Transfer" (docs/plan.md §7.6, issue #22,
-shipped v1.1.0): the network-pull restore mechanism. This module holds
-the pure, fully-testable-without-a-live-guest logic the design depends
-on (`restore_runner._try_direct_network_transfer()` drives it):
+"""Direct Network Transfer (docs/push-to-guest.md): the network-pull
+restore mechanism. This module holds the pure,
+fully-testable-without-a-live-guest logic the design depends on
+(`restore_runner._try_direct_network_transfer()` drives it):
 
 - **Data-NIC selection.** With several mutually non-routable subnets, a
   bootstrap script's download URL only works if it points at the one
@@ -19,9 +19,9 @@ on (`restore_runner._try_direct_network_transfer()` drives it):
   tool via cheap guest-exec checks rather than assuming one, walking a
   priority list per guest OS family and returning the first that's
   actually present. `None` means "nothing usable" - callers should
-  treat that as Design C simply not being offered for this job, the
-  same silent fallback to Design B that already happens when
-  `VM.GuestAgent.Unrestricted` isn't granted.
+  treat that as Direct Network Transfer simply not being offered for
+  this job, the same silent fallback to the chunked guest-exec path
+  that already happens when `VM.GuestAgent.Unrestricted` isn't granted.
 """
 import ipaddress
 import json
@@ -64,10 +64,11 @@ class InvalidDataNicConfig(ValueError):
 def parse_data_nics(raw: str) -> list[DataNic]:
     """Parses RESTORE_DATA_NICS - a JSON array of {"cidr": ..., "local_ip":
     ..., "hostname"?: ...} objects, one per non-routable subnet a target
-    guest might live in. Empty/blank input means Design C is unconfigured
-    (not an error - the feature is opt-in); a non-empty value that fails
-    to parse is a real admin mistake and raises, rather than silently
-    disabling the feature the admin thought they'd just turned on."""
+    guest might live in. Empty/blank input means Direct Network Transfer
+    is unconfigured (not an error - the feature is opt-in); a non-empty
+    value that fails to parse is a real admin mistake and raises,
+    rather than silently disabling the feature the admin thought
+    they'd just turned on."""
     raw = (raw or "").strip()
     if not raw or raw == "[]":
         return []
@@ -88,8 +89,9 @@ def parse_data_nics(raw: str) -> list[DataNic]:
 def select_data_nic(guest_ips: list[str], data_nics: list[DataNic]) -> DataNic | None:
     """Picks the one configured data NIC whose subnet actually contains
     one of the guest's own reported IPs. Never guesses across subnets -
-    no match means Design C isn't offered for this job (falls back to
-    Design B), same capability-detection spirit as the rest of PH.5.
+    no match means Direct Network Transfer isn't offered for this job
+    (falls back to the chunked guest-exec path), same
+    capability-detection spirit as the rest of PH.5.
     Malformed guest-reported addresses are skipped, not fatal - QGA's
     reported interface list can include things like link-local/loopback
     entries this app doesn't need to understand."""
@@ -388,7 +390,7 @@ def build_fetch_command(
             raise ValueError(
                 "The bash /dev/tcp fetch fallback cannot speak TLS - it only works against a plain "
                 f"http:// download URL, got {url!r}. With a non-plaintext data-plane TLS mode this guest "
-                "falls back to Design B (chunked write over QMP), per docs/plan.md §7.6.1."
+                "falls back to the chunked write over QMP, per docs/push-to-guest.md."
             )
         host = parts.hostname
         port = parts.port or 80
@@ -412,8 +414,8 @@ async def detect_fetch_tool(exec_fn: ExecFn, guest_os_family: str | None) -> str
     than this module calling pve_client directly) so it's testable with
     a fake, the same pattern restore_runner.py's own `_exec` wrapper
     exists for. Returns None if nothing on the list is available (or
-    the OS family is unknown) - callers should treat that as "Design C
-    isn't offered for this job", never a hard failure."""
+    the OS family is unknown) - callers should treat that as "Direct
+    Network Transfer isn't offered for this job", never a hard failure."""
     for tool_name, probe_argv in _candidates_for(guest_os_family):
         try:
             exitcode, _out, _err = await exec_fn(probe_argv)

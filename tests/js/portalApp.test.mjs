@@ -45,14 +45,14 @@ test('_loadRestoreCapabilities stores the parsed response on success', async () 
   let requestedUrl = null;
   globalThis.fetch = async (url) => {
     requestedUrl = url;
-    return { ok: true, json: async () => ({ design_a: { available: true, reason: null } }) };
+    return { ok: true, json: async () => ({ file_write: { available: true, reason: null } }) };
   };
   try {
     await a._loadRestoreCapabilities();
     assert.ok(requestedUrl.startsWith('/api/restore-capabilities?'));
     assert.ok(requestedUrl.includes('type=qemu'));
     assert.ok(requestedUrl.includes('vmid=133'));
-    assert.deepEqual(a.restoreCaps, { design_a: { available: true, reason: null } });
+    assert.deepEqual(a.restoreCaps, { file_write: { available: true, reason: null } });
   } finally {
     globalThis.fetch = originalFetch;
   }

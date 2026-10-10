@@ -79,8 +79,8 @@ def _available_caps(**overrides):
         agent_running=True,
         pve_version_ok=True,
         guest_os_family="linux",
-        design_a=guest_agent.PathAvailability(True),
-        design_b=guest_agent.PathAvailability(True),
+        file_write=guest_agent.PathAvailability(True),
+        guest_exec=guest_agent.PathAvailability(True),
         verify_supported=True,
     )
     defaults.update(overrides)
@@ -114,7 +114,7 @@ async def test_small_file_no_flags_writes_directly_after_checking_capabilities(m
         written.update(path=path, content=content)
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing Unrestricted"))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, "missing Unrestricted"))
 
     monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -146,7 +146,7 @@ async def test_readonly_destination_is_cleared_before_write_when_available(manag
         assert any(c[0] == "powershell" for c in exec_calls)
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(guest_os_family="windows", design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_os_family="windows", guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
@@ -177,7 +177,7 @@ async def test_readonly_destination_is_cleared_on_linux_too(manager, session_dat
         assert ["chattr", "-i", "/etc/hosts"] in exec_calls
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(guest_os_family="linux", design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_os_family="linux", guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
@@ -205,7 +205,7 @@ async def test_readonly_clear_failure_does_not_fail_the_restore(manager, session
         written["called"] = True
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(guest_os_family="linux", design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_os_family="linux", guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         if argv[0] == "chattr":
@@ -228,7 +228,7 @@ async def test_job_on_a_non_localhost_node_threads_it_through_every_guest_call(m
     # Issue #51: a job for a guest on another cluster node must pass that
     # node - never the literal "localhost" - to every guest-scoped call
     # it makes (write_guest_file here; run_guest_exec is covered by the
-    # Design B / metadata / verify tests, all of which go through the
+    # guest-exec / metadata / verify tests, all of which go through the
     # same job.node-aware _exec() helper).
     job = _make_job(manager, session_data, node="pve2")
     _patch_download(monkeypatch, b"127.0.0.1 localhost")
@@ -238,7 +238,7 @@ async def test_job_on_a_non_localhost_node_threads_it_through_every_guest_call(m
         seen_nodes.append(kwargs.get("node"))
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing Unrestricted"))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, "missing Unrestricted"))
 
     monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -254,7 +254,7 @@ async def test_oversized_file_fails_with_clear_message_when_no_exec_available(ma
     _patch_download(monkeypatch, b"a" * (61440 + 1))
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
 
@@ -589,7 +589,7 @@ async def test_restore_metadata_without_mtime_is_a_no_op(manager, session_data, 
     _patch_download(monkeypatch, b"small")
 
     async def fake_caps(session, guest_type, vmid):
-        # design_b available since restore_metadata=True triggers the exec path
+        # guest_exec available since restore_metadata=True triggers the exec path
         return _available_caps(guest_os_family="linux")
 
     async def fake_write(session, guest_type, vmid, path, content, **kwargs):
@@ -921,16 +921,16 @@ async def test_unsafe_destination_fails_before_any_exec_call(manager, session_da
     assert "unsupported characters" in job.error.lower()
 
 
-# --- Design C (network-pull, docs/plan.md §7.6, issue #22) ----------------
+# --- Direct Network Transfer (network-pull, docs/push-to-guest.md) ---
 
 
 def _with_data_nics(monkeypatch, raw_json: str):
     monkeypatch.setattr(restore_runner, "settings", _replace(restore_runner.settings, restore_data_nics_json=raw_json))
 
 
-async def test_design_c_unconfigured_falls_back_to_design_b_without_any_extra_calls(manager, session_data, monkeypatch):
+async def test_dnt_unconfigured_falls_back_to_guest_exec_without_any_extra_calls(manager, session_data, monkeypatch):
     # No RESTORE_DATA_NICS set (the default, and the default test env) -
-    # _try_design_c must bail out before making any live-ish call at all.
+    # _try_direct_network_transfer must bail out before making any live-ish call at all.
     job = _make_job(manager, session_data, destination="/etc/hosts")
     content = b"a" * (61440 + 100)
     _patch_download(monkeypatch, content)
@@ -939,7 +939,9 @@ async def test_design_c_unconfigured_falls_back_to_design_b_without_any_extra_ca
         return _available_caps(guest_os_family="linux")
 
     async def fail_if_called(*a, **kw):
-        raise AssertionError("Design C is unconfigured - should never probe the guest's network or a fetch tool")
+        raise AssertionError(
+            "Direct Network Transfer is unconfigured - should never probe the guest's network or a fetch tool"
+        )
 
     async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         pass
@@ -957,13 +959,13 @@ async def test_design_c_unconfigured_falls_back_to_design_b_without_any_extra_ca
 
     await run_restore(job, manager)
     assert job.status == RestoreStatus.DONE
-    # Went through the ordinary Design B path (mkdir, sh -c cat ..., test -f).
+    # Went through the ordinary guest-exec path (mkdir, sh -c cat ..., test -f).
     assert any(c[:2] == ["sh", "-c"] for c in exec_calls)
     # ...and said why, rather than silently grinding (issue #47 live testing).
     assert any("Direct Network Transfer is not configured" in line for line in job.log_lines)
 
 
-async def test_design_c_no_subnet_match_falls_back_to_design_b(manager, session_data, monkeypatch):
+async def test_dnt_no_subnet_match_falls_back_to_guest_exec(manager, session_data, monkeypatch):
     job = _make_job(manager, session_data, destination="/etc/hosts")
     content = b"a" * (61440 + 100)
     _patch_download(monkeypatch, content)
@@ -991,11 +993,11 @@ async def test_design_c_no_subnet_match_falls_back_to_design_b(manager, session_
 
     await run_restore(job, manager)
     assert job.status == RestoreStatus.DONE
-    assert any(c[:2] == ["sh", "-c"] for c in exec_calls)  # Design B's concat, not a fetch command
+    assert any(c[:2] == ["sh", "-c"] for c in exec_calls)  # guest-exec concat, not a fetch command
     assert any("no configured data NIC matches" in line for line in job.log_lines)
 
 
-async def test_design_c_no_fetch_tool_falls_back_to_design_b(manager, session_data, monkeypatch):
+async def test_dnt_no_fetch_tool_falls_back_to_guest_exec(manager, session_data, monkeypatch):
     job = _make_job(manager, session_data, destination="/etc/hosts")
     content = b"a" * (61440 + 100)
     _patch_download(monkeypatch, content)
@@ -1026,11 +1028,11 @@ async def test_design_c_no_fetch_tool_falls_back_to_design_b(manager, session_da
     await run_restore(job, manager)
     assert job.status == RestoreStatus.DONE
     assert any("no usable fetch tool found" in line for line in job.log_lines)
-    # Still ends up doing the real Design B concat (a "cat ... > dest" call, not just probes).
+    # Still ends up doing the real guest-exec concat (a "cat ... > dest" call, not just probes).
     assert any(c[:2] == ["sh", "-c"] and "cat" in c[2] for c in exec_calls)
 
 
-async def test_design_c_used_when_nic_and_tool_are_both_available(manager, session_data, monkeypatch):
+async def test_dnt_used_when_nic_and_tool_are_both_available(manager, session_data, monkeypatch):
     job = _make_job(manager, session_data, destination="/etc/hosts")
     content = b"a" * (61440 + 100)
     _patch_download(monkeypatch, content)
@@ -1051,7 +1053,7 @@ async def test_design_c_used_when_nic_and_tool_are_both_available(manager, sessi
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         exec_calls.append(argv)
         if argv[:2] == ["mkdir", "-p"]:
-            return 0, "", ""  # _ensure_destination_dir, runs before Design C is even attempted
+            return 0, "", ""  # _ensure_destination_dir, runs before Direct Network Transfer is even attempted
         if argv[:2] == ["sh", "-c"] and "command -v curl" in argv[2]:
             return 0, "/usr/bin/curl", ""  # curl is available - first POSIX candidate
         if argv[0] == "curl":
@@ -1059,7 +1061,7 @@ async def test_design_c_used_when_nic_and_tool_are_both_available(manager, sessi
             return 0, "", ""  # the actual fetch
         if argv[:2] == ["test", "-f"]:
             return 0, "", ""  # _verify_destination_exists
-        raise AssertionError(f"unexpected exec call once Design C should have taken over: {argv}")
+        raise AssertionError(f"unexpected exec call once Direct Network Transfer should have taken over: {argv}")
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
@@ -1084,7 +1086,7 @@ async def test_design_c_used_when_nic_and_tool_are_both_available(manager, sessi
     assert next(iter(restore_download._tokens.values())).job_id == job.id
 
 
-async def test_design_c_with_verify_hashes_the_drained_stream_correctly(manager, session_data, monkeypatch):
+async def test_dnt_with_verify_hashes_the_drained_stream_correctly(manager, session_data, monkeypatch):
     # Direct Network Transfer never writes the source bytes anywhere
     # itself (the guest fetches them independently) - this confirms the
     # checksum still gets computed correctly by hashing the stream while
@@ -1129,10 +1131,11 @@ async def test_design_c_with_verify_hashes_the_drained_stream_correctly(manager,
     assert any("Checksum verified" in line for line in job.log_lines)
 
 
-async def test_design_c_fetch_failure_fails_the_job_rather_than_falling_back(manager, session_data, monkeypatch):
-    # Once Design C has been confidently offered (a NIC and a tool were
-    # both found), a real failure during the fetch itself should be a
-    # clear job failure, never a silent retry via Design B.
+async def test_dnt_fetch_failure_fails_the_job_rather_than_falling_back(manager, session_data, monkeypatch):
+    # Once Direct Network Transfer has been confidently offered (a NIC
+    # and a tool were both found), a real failure during the fetch
+    # itself should be a clear job failure, never a silent retry via
+    # the chunked guest-exec path.
     job = _make_job(manager, session_data, destination="/etc/hosts")
     content = b"a" * (61440 + 100)
     _patch_download(monkeypatch, content)
@@ -1207,7 +1210,7 @@ async def _run_dnt_with_curl(manager, session_data, monkeypatch, curl_argv_sink)
     return job
 
 
-async def test_design_c_default_mode_is_verify_over_https(manager, session_data, monkeypatch):
+async def test_dnt_default_mode_is_verify_over_https(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch)  # defaults: preferred=verify, minimum=insecure, install_ca=never
     argv: list[str] = []
     job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
@@ -1240,7 +1243,7 @@ async def _run_dnt_curl_seq(manager, session_data, monkeypatch, curl_results):
         if argv[0] == "curl":
             calls.append(argv)
             return curl_results[min(len(calls) - 1, len(curl_results) - 1)]
-        return 0, "", ""  # mkdir, test -f, Design B concat, etc.
+        return 0, "", ""  # mkdir, test -f, guest-exec concat, etc.
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     monkeypatch.setattr(guest_agent, "get_guest_ip_addresses", fake_ips)
@@ -1253,7 +1256,7 @@ async def _run_dnt_curl_seq(manager, session_data, monkeypatch, curl_results):
 _CERT_ERR = (60, "", "curl: (60) SSL certificate problem: self-signed certificate")
 
 
-async def test_design_c_verify_untrusted_cert_steps_down_to_insecure(manager, session_data, monkeypatch):
+async def test_dnt_verify_untrusted_cert_steps_down_to_insecure(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch)  # verify / insecure / fallback
     job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR, (0, "", "")])
     assert job.status == RestoreStatus.DONE
@@ -1262,17 +1265,17 @@ async def test_design_c_verify_untrusted_cert_steps_down_to_insecure(manager, se
     assert any("retrying as 'insecure'" in line for line in job.log_lines)
 
 
-async def test_design_c_verify_untrusted_and_insecure_also_fails_falls_back_to_design_b(
+async def test_dnt_verify_untrusted_and_insecure_also_fails_falls_back_to_guest_exec(
     manager, session_data, monkeypatch
 ):
     _dnt_settings(monkeypatch)  # on_unmet=fallback
     job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR, _CERT_ERR])
-    assert job.status == RestoreStatus.DONE  # completed via Design B
+    assert job.status == RestoreStatus.DONE  # completed via the chunked guest-exec path
     assert len(calls) == 2
     assert any("falling back to the chunked write path" in line for line in job.log_lines)
 
 
-async def test_design_c_verify_untrusted_no_step_down_and_on_unmet_fail(manager, session_data, monkeypatch):
+async def test_dnt_verify_untrusted_no_step_down_and_on_unmet_fail(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch, restore_data_nic_tls_minimum="verify", restore_data_nic_tls_on_unmet="fail")
     job, calls = await _run_dnt_curl_seq(manager, session_data, monkeypatch, [_CERT_ERR])
     assert job.status == RestoreStatus.FAILED
@@ -1280,7 +1283,7 @@ async def test_design_c_verify_untrusted_no_step_down_and_on_unmet_fail(manager,
     assert "Direct Network Transfer failed" in job.error
 
 
-async def test_design_c_preferred_insecure_adds_skip_verify(manager, session_data, monkeypatch):
+async def test_dnt_preferred_insecure_adds_skip_verify(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch, restore_data_nic_tls_preferred="insecure", restore_data_nic_tls_minimum="insecure")
     argv: list[str] = []
     job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
@@ -1289,7 +1292,7 @@ async def test_design_c_preferred_insecure_adds_skip_verify(manager, session_dat
     assert any("TLS: insecure" in line for line in job.log_lines)
 
 
-async def test_design_c_preferred_plaintext_keeps_http_and_no_skip_verify(manager, session_data, monkeypatch):
+async def test_dnt_preferred_plaintext_keeps_http_and_no_skip_verify(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch, restore_data_nic_tls_preferred="plaintext", restore_data_nic_tls_minimum="plaintext")
     argv: list[str] = []
     job = await _run_dnt_with_curl(manager, session_data, monkeypatch, argv)
@@ -1326,16 +1329,16 @@ async def _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls):
     return job
 
 
-async def test_design_c_bash_only_guest_falls_back_to_design_b_under_tls(manager, session_data, monkeypatch):
+async def test_dnt_bash_only_guest_falls_back_to_guest_exec_under_tls(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch)  # insecure floor; bash can't do TLS at all
     exec_calls: list[list[str]] = []
     job = await _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls)
     assert job.status == RestoreStatus.DONE
     assert any("no data-plane TLS mode" in line and "bash" in line for line in job.log_lines)
-    assert any(c[:2] == ["sh", "-c"] and "cat" in c[2] for c in exec_calls)  # Design B concat ran
+    assert any(c[:2] == ["sh", "-c"] and "cat" in c[2] for c in exec_calls)  # guest-exec concat ran
 
 
-async def test_design_c_on_unmet_fail_fails_the_job_when_no_tls_mode_qualifies(manager, session_data, monkeypatch):
+async def test_dnt_on_unmet_fail_fails_the_job_when_no_tls_mode_qualifies(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch, restore_data_nic_tls_on_unmet="fail")
     exec_calls: list[list[str]] = []
     job = await _run_dnt_bash_only(manager, session_data, monkeypatch, exec_calls)
@@ -1397,7 +1400,7 @@ async def _run_dnt_verify_ca(manager, session_data, monkeypatch, *, update_exit=
     return job, curl_argv, written
 
 
-async def test_design_c_verify_installs_the_ca_then_fetches_with_verification(manager, session_data, monkeypatch):
+async def test_dnt_verify_installs_the_ca_then_fetches_with_verification(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")
     job, curl_argv, written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=0)
     assert job.status == RestoreStatus.DONE
@@ -1406,7 +1409,7 @@ async def test_design_c_verify_installs_the_ca_then_fetches_with_verification(ma
     assert any("Installed the data-plane CA" in line for line in job.log_lines)
 
 
-async def test_design_c_verify_ca_install_failure_steps_down_to_insecure(manager, session_data, monkeypatch):
+async def test_dnt_verify_ca_install_failure_steps_down_to_insecure(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")  # minimum stays `insecure`
     job, curl_argv, _written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, update_exit=1)
     assert job.status == RestoreStatus.DONE
@@ -1414,7 +1417,7 @@ async def test_design_c_verify_ca_install_failure_steps_down_to_insecure(manager
     assert any("Continuing this transfer with TLS: insecure" in line for line in job.log_lines)
 
 
-async def test_design_c_verify_ca_install_failure_fails_when_minimum_is_verify(manager, session_data, monkeypatch):
+async def test_dnt_verify_ca_install_failure_fails_when_minimum_is_verify(manager, session_data, monkeypatch):
     _dnt_settings(
         monkeypatch,
         restore_data_nic_tls_install_ca="always",
@@ -1426,7 +1429,7 @@ async def test_design_c_verify_ca_install_failure_fails_when_minimum_is_verify(m
     assert "Direct Network Transfer required but unavailable" in job.error
 
 
-async def test_design_c_ca_anchor_is_chmodded_644_after_the_write(manager, session_data, monkeypatch):
+async def test_dnt_ca_anchor_is_chmodded_644_after_the_write(manager, session_data, monkeypatch):
     # Issue #136: agent/file-write creates the anchor 0666.
     _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")
     exec_log: list[list[str]] = []
@@ -1436,7 +1439,7 @@ async def test_design_c_ca_anchor_is_chmodded_644_after_the_write(manager, sessi
     assert exec_log.index(["chmod", "644", anchor]) < exec_log.index(["update-ca-certificates"])
 
 
-async def test_design_c_ca_anchor_chmod_failure_removes_it_and_steps_down(manager, session_data, monkeypatch):
+async def test_dnt_ca_anchor_chmod_failure_removes_it_and_steps_down(manager, session_data, monkeypatch):
     _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")
     exec_log: list[list[str]] = []
     job, curl_argv, _written = await _run_dnt_verify_ca(
@@ -1450,7 +1453,7 @@ async def test_design_c_ca_anchor_chmod_failure_removes_it_and_steps_down(manage
     assert any("Could not set permissions on the data-plane CA anchor" in line for line in job.log_lines)
 
 
-async def test_design_c_existing_ca_anchor_is_repaired_not_just_trusted(manager, session_data, monkeypatch):
+async def test_dnt_existing_ca_anchor_is_repaired_not_just_trusted(manager, session_data, monkeypatch):
     # An anchor from an earlier version is already there (0666): if-missing
     # must fix its mode instead of returning early.
     _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="if-missing")
@@ -1471,7 +1474,7 @@ async def _run_quick_restore(manager, session_data, monkeypatch, *, family="linu
     exec_log: list[list[str]] = []
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(guest_os_family=family, design_b=guest_agent.PathAvailability(exec_ok, "no exec"))
+        return _available_caps(guest_os_family=family, guest_exec=guest_agent.PathAvailability(exec_ok, "no exec"))
 
     async def fake_write(session, guest_type, vmid, path, content, **kwargs):
         exec_log.append(["<write>", path])
@@ -1595,7 +1598,7 @@ async def test_pve_error_during_write_marks_failed(manager, session_data, monkey
     _patch_download(monkeypatch, b"small")
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing Unrestricted"))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, "missing Unrestricted"))
 
     async def fake_write_guest_file(session, guest_type, vmid, path, content, **kwargs):
         raise httpx.HTTPStatusError(
@@ -2090,11 +2093,11 @@ async def test_bundle_restore_uses_direct_network_transfer_when_available(manage
     assert minted.local_path is not None
 
 
-async def test_bundle_restore_blocked_without_design_b(manager, session_data, monkeypatch):
+async def test_bundle_restore_blocked_without_guest_exec(manager, session_data, monkeypatch):
     job = _bundle_job(manager, session_data)
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
 

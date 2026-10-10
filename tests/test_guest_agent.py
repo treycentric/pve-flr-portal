@@ -18,9 +18,9 @@ def test_pve8_blocks_both_designs_regardless_of_everything_else():
         pve_version_major=8,
     )
     assert not caps.pve_version_ok
-    assert not caps.design_a.available
-    assert not caps.design_b.available
-    assert "VM.Monitor" in caps.design_a.reason
+    assert not caps.file_write.available
+    assert not caps.guest_exec.available
+    assert "VM.Monitor" in caps.file_write.reason
 
 
 def test_agent_not_running_blocks_both_designs():
@@ -31,23 +31,23 @@ def test_agent_not_running_blocks_both_designs():
         pve_version_major=9,
     )
     assert not caps.agent_running
-    assert not caps.design_a.available
-    assert not caps.design_b.available
+    assert not caps.file_write.available
+    assert not caps.guest_exec.available
 
 
-def test_design_a_available_with_file_write_priv_and_running_agent():
+def test_file_write_available_with_filewrite_priv_and_running_agent():
     caps = parse_capabilities(
         vm_config={"agent": "1"},
         agent_info={"supported_commands": [{"name": "guest-file-write", "enabled": True}]},
         permissions={"VM.GuestAgent.FileWrite": 1},
         pve_version_major=9,
     )
-    assert caps.design_a.available
-    assert not caps.design_b.available
-    assert caps.design_b.reason == "missing VM.GuestAgent.Unrestricted privilege"
+    assert caps.file_write.available
+    assert not caps.guest_exec.available
+    assert caps.guest_exec.reason == "missing VM.GuestAgent.Unrestricted privilege"
 
 
-def test_unrestricted_privilege_alone_covers_design_a_too():
+def test_unrestricted_privilege_alone_covers_file_write_too():
     # Per the Proxmox privilege docs: Unrestricted covers "arbitrary"
     # commands, so it satisfies file-write's gate as well as exec's.
     caps = parse_capabilities(
@@ -56,50 +56,50 @@ def test_unrestricted_privilege_alone_covers_design_a_too():
         permissions={"VM.GuestAgent.Unrestricted": 1},
         pve_version_major=9,
     )
-    assert caps.design_a.available
-    assert caps.design_b.available
+    assert caps.file_write.available
+    assert caps.guest_exec.available
 
 
-def test_missing_file_write_privilege_blocks_design_a_only():
+def test_missing_file_write_privilege_blocks_file_write_only():
     caps = parse_capabilities(
         vm_config={"agent": "1"},
         agent_info={"supported_commands": []},
         permissions={"VM.GuestAgent.Unrestricted": 1},
         pve_version_major=9,
     )
-    assert caps.design_a.available  # Unrestricted covers it
-    assert caps.design_b.available
+    assert caps.file_write.available  # Unrestricted covers it
+    assert caps.guest_exec.available
 
 
-def test_guest_exec_disabled_in_agent_config_blocks_design_b():
+def test_guest_exec_disabled_in_agent_config_blocks_it():
     caps = parse_capabilities(
         vm_config={"agent": "1"},
         agent_info={"supported_commands": [{"name": "guest-exec", "enabled": False}]},
         permissions={"VM.GuestAgent.Unrestricted": 1},
         pve_version_major=9,
     )
-    assert not caps.design_b.available
-    assert "disabled" in caps.design_b.reason
+    assert not caps.guest_exec.available
+    assert "disabled" in caps.guest_exec.reason
 
 
-def test_file_write_disabled_in_agent_config_blocks_design_a():
+def test_file_write_disabled_in_agent_config_blocks_it():
     caps = parse_capabilities(
         vm_config={"agent": "1"},
         agent_info={"supported_commands": [{"name": "guest-file-write", "enabled": False}]},
         permissions={"VM.GuestAgent.FileWrite": 1},
         pve_version_major=9,
     )
-    assert not caps.design_a.available
+    assert not caps.file_write.available
 
 
-def test_verify_supported_mirrors_design_b():
+def test_verify_supported_mirrors_guest_exec():
     caps = parse_capabilities(
         vm_config={"agent": "1"},
         agent_info={"supported_commands": [{"name": "guest-exec", "enabled": True}]},
         permissions={"VM.GuestAgent.Unrestricted": 1},
         pve_version_major=9,
     )
-    assert caps.verify_supported == caps.design_b.available
+    assert caps.verify_supported == caps.guest_exec.available
 
 
 def test_unreported_command_is_treated_as_present_not_blocked():
@@ -111,7 +111,7 @@ def test_unreported_command_is_treated_as_present_not_blocked():
         permissions={"VM.GuestAgent.FileWrite": 1},
         pve_version_major=9,
     )
-    assert caps.design_a.available
+    assert caps.file_write.available
 
 
 def test_guest_os_family_detected_from_osinfo():
@@ -154,7 +154,7 @@ async def test_get_restore_capabilities_degrades_cleanly_when_agent_info_403s(se
     # agent/info failed -> agent_running is False (can't confirm QGA is
     # actually responding), so nothing is offered - but no exception raised.
     assert not caps.agent_running
-    assert not caps.design_a.available
+    assert not caps.file_write.available
 
 
 async def _fake_sleep(*_args, **_kwargs):
@@ -280,8 +280,8 @@ async def test_get_restore_capabilities_happy_path(session_data):
     caps = await get_restore_capabilities(session_data, "vm", "133")
     assert caps.agent_running
     assert caps.pve_version_ok
-    assert caps.design_a.available
-    assert caps.design_b.available
+    assert caps.file_write.available
+    assert caps.guest_exec.available
     assert caps.guest_os_family == "linux"
     assert caps.node == "localhost"
 
@@ -307,7 +307,7 @@ async def test_get_restore_capabilities_targets_the_guests_real_node(session_dat
 
     caps = await get_restore_capabilities(session_data, "vm", "133")
     assert caps.node == "pve2"
-    assert caps.design_a.available
+    assert caps.file_write.available
 
 
 @respx.mock
@@ -321,7 +321,7 @@ async def test_get_restore_capabilities_lxc_skips_agent_calls(session_data):
 
     caps = await get_restore_capabilities(session_data, "ct", "133")
     assert not caps.agent_running
-    assert not caps.design_a.available
+    assert not caps.file_write.available
 
 
 @respx.mock
@@ -355,8 +355,8 @@ async def test_get_restore_capabilities_unwraps_permissions_nested_under_path(se
     )
 
     caps = await get_restore_capabilities(session_data, "vm", "133")
-    assert caps.design_a.available  # has FileWrite on /vms/133
-    assert not caps.design_b.available  # Unrestricted was only granted on /vms/999
+    assert caps.file_write.available  # has FileWrite on /vms/133
+    assert not caps.guest_exec.available  # Unrestricted was only granted on /vms/999
 
 
 @respx.mock
@@ -375,11 +375,11 @@ async def test_get_restore_capabilities_missing_path_key_means_no_privileges(ses
     )
 
     caps = await get_restore_capabilities(session_data, "vm", "133")
-    assert not caps.design_a.available
-    assert not caps.design_b.available
+    assert not caps.file_write.available
+    assert not caps.guest_exec.available
 
 
-# --- get_guest_ip_addresses (Design C, docs/plan.md §7.6, issue #22) ----
+# --- get_guest_ip_addresses (Direct Network Transfer, docs/push-to-guest.md) ---
 
 
 def test_extract_ip_addresses_flattens_and_skips_loopback():

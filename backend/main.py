@@ -743,7 +743,7 @@ async def _annotate_windows_drive_letters(session: SessionData, volume: str, cru
         return
     try:
         caps = await guest_agent.get_restore_capabilities(session, "vm", vmid)
-        if caps.guest_os_family != "windows" or not caps.design_b.available:
+        if caps.guest_os_family != "windows" or not caps.guest_exec.available:
             return
         disk_number = await guest_original_location.resolve_windows_disk_number(
             session, vmid, caps.node, volume, disk_label
@@ -914,8 +914,8 @@ async def restore_capabilities(
             agent_running=False,
             pve_version_ok=False,
             guest_os_family=None,
-            design_a=unavailable,
-            design_b=unavailable,
+            file_write=unavailable,
+            guest_exec=unavailable,
             verify_supported=False,
         )
     return JSONResponse(dataclasses.asdict(caps))
@@ -973,12 +973,12 @@ async def restore(
     if is_bundle:
         # A bundle restore always needs guest-exec (write + extract +
         # verify) - there's no Design-A-equivalent single-call fast path
-        # for more than one item, so this checks design_b unconditionally
+        # for more than one item, so this checks guest_exec unconditionally
         # rather than only when restore_metadata/verify were requested.
-        if not caps.design_b.available:
+        if not caps.guest_exec.available:
             raise HTTPException(
                 status_code=403,
-                detail=caps.design_b.reason or "Multi-file/directory restore needs VM.GuestAgent.Unrestricted",
+                detail=caps.guest_exec.reason or "Multi-file/directory restore needs VM.GuestAgent.Unrestricted",
             )
         try:
             # Extracts only the fields BundleItem needs, same as
@@ -1015,14 +1015,14 @@ async def restore(
             restore_ownership=restore_ownership and caps.guest_os_family != "windows",
         )
     else:
-        if not caps.design_a.available:
+        if not caps.file_write.available:
             raise HTTPException(
-                status_code=403, detail=caps.design_a.reason or "Restore is not available for this guest"
+                status_code=403, detail=caps.file_write.reason or "Restore is not available for this guest"
             )
-        if (restore_metadata or verify or restore_ownership) and not caps.design_b.available:
+        if (restore_metadata or verify or restore_ownership) and not caps.guest_exec.available:
             raise HTTPException(
                 status_code=403,
-                detail=caps.design_b.reason or "Restoring metadata/verifying needs VM.GuestAgent.Unrestricted",
+                detail=caps.guest_exec.reason or "Restoring metadata/verifying needs VM.GuestAgent.Unrestricted",
             )
 
         sep = "\\" if caps.guest_os_family == "windows" else "/"
@@ -1160,8 +1160,8 @@ async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.g
 
 @app.get("/api/restore-downloads/{token}")
 async def restore_download_fetch(token: str):
-    """Design C / "Direct Network Transfer" (docs/plan.md §7.6, issue
-    #22). The endpoint a restore's bootstrap `curl`/`Invoke-WebRequest`/
+    """Direct Network Transfer (docs/push-to-guest.md). The
+    endpoint a restore's bootstrap `curl`/`Invoke-WebRequest`/
     etc. in the guest fetches its file from; `restore_runner.py`'s
     `_try_direct_network_transfer()` mints the token per eligible job.
     Deliberately **not** gated by
@@ -1219,15 +1219,15 @@ async def restore_browse(
     """PH.5 (docs/plan.md §7.5): lists subdirectories inside the guest via
     guest-exec, so the restore destination can be browsed rather than
     typed blind. Needs VM.GuestAgent.Unrestricted - there's no dedicated
-    QGA directory-listing command - so this is gated on design_b, same as
+    QGA directory-listing command - so this is gated on guest_exec, same as
     metadata restore/verify, and re-checked here regardless of what the
     capabilities response already showed."""
     if type not in ("vm", "ct"):
         raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
     caps = await guest_agent.get_restore_capabilities(session, type, vmid)
-    if not caps.design_b.available:
+    if not caps.guest_exec.available:
         raise HTTPException(
-            status_code=403, detail=caps.design_b.reason or "Browsing this guest's filesystem is not available"
+            status_code=403, detail=caps.guest_exec.reason or "Browsing this guest's filesystem is not available"
         )
     try:
         result = await guest_browse.list_directories(
@@ -1252,11 +1252,11 @@ async def restore_original_path(
     for the item(s) currently browsed - VM guests only, since push-to-
     guest restore (and therefore this whole modal) is never available
     for a container at all (guest_original_location's module docstring).
-    Needs the same guest-exec channel/grant as Browse mode (design_b),
+    Needs the same guest-exec channel/grant as Browse mode (guest_exec),
     re-checked here regardless of what the capabilities response already
     showed, same convention as /api/restore-browse above. Never raises
     for a plain "couldn't figure it out" case - that comes back as a
-    normal 200 with available=false, same shape as design_a/design_b, so
+    normal 200 with available=false, same shape as file_write/guest_exec, so
     the frontend can disable the option with a reason instead of
     surfacing an error."""
     if type not in ("vm", "ct"):
@@ -1267,9 +1267,9 @@ async def restore_original_path(
             detail="Original-location restore is not available for containers (no qemu-guest-agent)",
         )
     caps = await guest_agent.get_restore_capabilities(session, type, vmid)
-    if not caps.design_b.available:
+    if not caps.guest_exec.available:
         raise HTTPException(
-            status_code=403, detail=caps.design_b.reason or "Browsing this guest's filesystem is not available"
+            status_code=403, detail=caps.guest_exec.reason or "Browsing this guest's filesystem is not available"
         )
     result = await guest_original_location.resolve_original_directory(
         session, vmid, caps.guest_os_family, caps.node, volume, json.loads(crumbs)

@@ -25,7 +25,8 @@ live-testing log.
   extractable format (`.zip`/`.tar.gz`) when the guest can't.
 - **`build_extract_command()`/`build_verify_command()`** - the actual
   guest-exec commands per bundle format, mirroring
-  `restore_network_pull.build_fetch_command()`'s role for Design C.
+  `restore_network_pull.build_fetch_command()`'s role for Direct
+  Network Transfer.
 - **`build_bundle()`** - the actual builder: downloads each selected
   item to its own local temp file (streamed, never a whole item in
   memory) and adds it to the output bundle one item at a time, deleting

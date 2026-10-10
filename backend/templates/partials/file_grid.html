@@ -16,13 +16,13 @@
       type="button"
       class="btn-outline"
       disabled
-      x-show="count > 0 && restoreCaps && !(isSingleFile ? restoreCaps.design_a.available : restoreCaps.design_b.available)"
-      :title="(isSingleFile ? restoreCaps.design_a.reason : restoreCaps.design_b.reason) || 'Restore is not available for this guest'">Restore</button>
+      x-show="count > 0 && restoreCaps && !(isSingleFile ? restoreCaps.file_write.available : restoreCaps.guest_exec.available)"
+      :title="(isSingleFile ? restoreCaps.file_write.reason : restoreCaps.guest_exec.reason) || 'Restore is not available for this guest'">Restore</button>
     <button
       type="button"
       class="btn-outline"
-      x-show="count > 0 && restoreCaps && (isSingleFile ? restoreCaps.design_a.available : restoreCaps.design_b.available)"
-      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime, restoreCaps.design_b.available, crumbs)">Restore</button>
+      x-show="count > 0 && restoreCaps && (isSingleFile ? restoreCaps.file_write.available : restoreCaps.guest_exec.available)"
+      @click="openRestore(guest.type, guest.vmid, guest.label, selectedSnapshotTime, restoreCaps.guest_exec.available, crumbs)">Restore</button>
 
     <button type="button" class="btn-outline" disabled x-show="count === 0">Download</button>
 
