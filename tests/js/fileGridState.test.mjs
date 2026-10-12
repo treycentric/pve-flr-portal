@@ -151,7 +151,7 @@ test('startRestore is a no-op without any selection, dest dir, and confirmed ove
     assert.equal(s.restoreSubmitted, false);
 
     // Unlike single-file-only restore before multi-file restore existed
-    // (docs/plan.md §7.7, issue #24), more than one selection is now
+    // (docs/push-to-guest.md, issue #24), more than one selection is now
     // valid, not a no-op - only a genuinely empty selection is.
     s.$refs.tbody.querySelectorAll = () => [];
     s.restoreDestDir = '/etc';

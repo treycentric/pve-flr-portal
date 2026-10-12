@@ -1,8 +1,8 @@
-"""PH.6 (issue #109 re-scope, docs/plan.md §6): a lazily-populated
+"""PH.6 (issue #109 re-scope, docs/architecture.md): a lazily-populated
 on-disk cache for `file-restore/list` results.
 
 Keyed by `(username, volume, path)` - **not** just `(volume, path)` as
-originally sketched in docs/plan.md §6, matching
+originally sketched in docs/architecture.md, matching
 `pve_client.list_path()`'s existing in-flight-call-coalescing threat
 model: file-restore access is permission-gated per PVE ticket, so
 sharing a cached listing across users without keying by username would

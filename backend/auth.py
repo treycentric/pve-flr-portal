@@ -1,6 +1,6 @@
 """PH.4 per-user auth: PVE ticket login replacing the old shared API tokens.
 
-Pattern borrowed from PVE's own web UI (docs/plan.md §7.1): POST
+Pattern borrowed from PVE's own web UI (docs/architecture.md): POST
 credentials to /access/ticket once, then keep the session alive by
 re-POSTing the *current* ticket in place of a password well before its
 ~2h expiry, rather than forcing a full re-login. Our backend does this
@@ -254,7 +254,7 @@ async def ensure_fresh_ticket(session: SessionData) -> None:
     """Public wrapper around the same staleness check get_session() applies
     to interactive requests, exposed for callers that hold a SessionData
     outside the request/response cycle - namely PH.5's background restore
-    jobs (docs/plan.md §7.5). A restore can run long past any single HTTP
+    jobs (docs/push-to-guest.md). A restore can run long past any single HTTP
     request, so a job needs to refresh its own ticket on this same policy
     rather than only ever refreshing on the next browser request (which
     may not come for a while, or ever, if the job was fire-and-forget)."""
@@ -281,7 +281,7 @@ async def _resolve_session(request: Request, *, touch: bool) -> SessionData:
     # Only genuine user activity resets the idle clock. Background polls
     # (the restore-jobs list + log pollers) pass touch=False, so a tab
     # left open on an otherwise-idle session still times out on schedule
-    # (issue #27, docs/plan.md §7.2) - the poll's own next 401 is then
+    # (issue #27, docs/architecture.md) - the poll's own next 401 is then
     # what bounces the browser to /login.
     if touch:
         session.last_activity_at = now

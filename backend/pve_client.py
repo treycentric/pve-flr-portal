@@ -1,11 +1,12 @@
 """Client for the PVE file-restore API and, as of PH.4, backup content
-listing - everything the app needs now comes from PVE alone (docs/plan.md
-§7.1). Auth is per-request: every call takes the caller's `SessionData`
+listing - everything the app needs now comes from PVE alone
+(docs/architecture.md). Auth is per-request: every call takes the
+caller's `SessionData`
 (PH.4 ticket-auth session) and sends it as PVE expects
 (`Cookie: PVEAuthCookie=...` + `CSRFPreventionToken`), rather than a
 static service-account token.
 
-Contract confirmed in docs/plan.md §3: storage-scoped calls
+Contract confirmed in docs/api-reference.md: storage-scoped calls
 (file-restore/*, storage/{id}/content, storage list) always use the
 literal node segment "localhost" - PVE proxies those cluster-wide
 regardless of which node actually holds the guest, so this is correct
@@ -35,7 +36,7 @@ from .config import settings
 from .guest_agent_lock import call_with_retries, guest_agent_command
 
 # Issue #20/#26: the zstd frame magic number - PVE's file-restore/
-# download?tar=1 output is confirmed live (docs/plan.md §7.5/§7.7,
+# download?tar=1 output is confirmed live (docs/push-to-guest.md,
 # 2026-09-28) to be inconsistently formatted - sometimes a genuine
 # plain tar, sometimes zstd-framed (.tar.zst) - for the same endpoint/
 # parameter. Detect via this rather than assuming either way.
@@ -63,7 +64,7 @@ def _file_restore_base(volume: str) -> str:
 # browse call, or a user-typed destination directory that this same
 # check gates before it ever reaches a shell-interpreted guest-exec
 # command (concatenation, metadata restore) - never arbitrary external
-# input (docs/plan.md §7.5).
+# input (docs/push-to-guest.md).
 _UNSAFE_PATH_CHARS = re.compile(r"[\"'`;&|$<>\r\n]")
 
 
@@ -77,7 +78,7 @@ def check_path_safe(path: str) -> None:
 
 # App-internal guest type ("vm"/"ct", the second volid path segment - see
 # the docstring above) vs. PVE's actual API node-path segment ("qemu"/
-# "lxc", confirmed live against a real guest - docs/plan.md §7.5). PH.5's
+# "lxc", confirmed live against a real guest - docs/push-to-guest.md). PH.5's
 # guest-agent calls hit /nodes/{node}/{qemu|lxc}/{vmid}/... directly,
 # so every such call needs this translated first - everywhere else in the
 # app (grouping, the task picker, display) stays in "vm"/"ct" throughout.
@@ -200,8 +201,8 @@ async def _list_backup_archives_one(client: httpx.AsyncClient, session: SessionD
 async def list_backup_archives(session: SessionData) -> "BackupListing":
     """All backup archives across every configured storage, straight from PVE
     (GET /nodes/localhost/storage/{storage}/content?content=backup) -
-    replaces the old direct-to-PBS admin API calls entirely (docs/plan.md
-    §7.1). Confirmed response shape against the real environment
+    replaces the old direct-to-PBS admin API calls entirely
+    (docs/architecture.md). Confirmed response shape against the real environment
     (2026-08-30): one entry per archive, e.g.
 
         {"vmid": 133, "size": ..., "volid": "pbs:backup/vm/133/<iso>Z",
@@ -259,7 +260,7 @@ _inflight_list_calls: dict[tuple[str, str, str], "asyncio.Task[list[dict]]"] = {
 async def list_path(session: SessionData, volume: str, filepath: str = "/") -> list[dict]:
     """Issue #60: a cold `file-restore/list` call boots an ephemeral
     helper VM on the PVE node, and PVE exposes no API to cap or tear
-    those down directly (docs/plan.md §9.1 "Helper-VM stampede") - so
+    those down directly (docs/architecture.md "Helper-VM stampede") - so
     this throttles/coalesces the calls this app makes instead:
       - PH.6 (issue #109): a persistent `dir_cache` hit skips all of the
         below entirely - a backup snapshot is immutable, so once this
@@ -331,7 +332,7 @@ def clear_list_path_state() -> None:
 async def write_guest_file(
     session: SessionData, guest_type: str, vmid: str, path: str, content: str, *, node: str = "localhost"
 ) -> None:
-    """One `agent/file-write` call (PH.5, docs/plan.md §7.5) - a genuine
+    """One `agent/file-write` call (PH.5, docs/push-to-guest.md) - a genuine
     one-shot: no handle/offset, truncates and overwrites whatever was at
     `path`. `content` must already be the wire-ready string
     (`restore_chunking.py`'s Latin-1 mapping of raw bytes, confirmed live
@@ -487,7 +488,7 @@ def decompress_zstd_prefix(buf: bytes) -> bytes:
 
 async def fetch_source_metadata(session: SessionData, volume: str, filepath: str) -> tuple[int, int, int, int] | None:
     """Issue #20/#26: `file-restore/list`'s JSON never exposes uid/gid/
-    mode (only mtime/size, docs/plan.md §7.5) - but `file-restore/
+    mode (only mtime/size, docs/push-to-guest.md) - but `file-restore/
     download?tar=1` wraps even a single file's content in a real tar
     archive whose header carries the original uid/gid/mode *and* mtime,
     confirmed live 2026-09-28 against a real Turnkey Linux guest

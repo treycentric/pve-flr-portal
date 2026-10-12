@@ -1,6 +1,6 @@
 """PH.5: browse a guest's filesystem via `guest-exec`, so a restore
 destination directory can be picked rather than typed blind
-(docs/plan.md §7.5). There is no dedicated QGA directory-listing
+(docs/push-to-guest.md). There is no dedicated QGA directory-listing
 command - only `guest-exec` running a platform listing tool - so this
 needs `VM.GuestAgent.Unrestricted`, the same gate as metadata restore
 and verify.

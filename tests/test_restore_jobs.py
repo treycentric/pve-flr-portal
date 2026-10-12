@@ -41,7 +41,7 @@ def test_create_assigns_id_and_queued_status(manager, session_data):
 def test_create_defaults_items_to_none_for_an_ordinary_single_file_job(manager, session_data):
     # None (not an empty list) is the signal restore_runner.py's
     # dispatcher checks - every job created before this field existed
-    # behaves identically (docs/plan.md §7.7).
+    # behaves identically (docs/push-to-guest.md).
     job = _make(manager, session_data)
     assert job.items is None
 

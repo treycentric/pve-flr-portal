@@ -127,7 +127,7 @@ class Settings:
     pve_verify_ssl: object
 
     # PH.4: per-user PVE ticket auth replaces the old shared PVE/PBS API
-    # tokens (docs/plan.md §7.1) - no PBS credentials or static PVE token
+    # tokens (docs/architecture.md) - no PBS credentials or static PVE token
     # exist anymore, everything goes through the logged-in user's own
     # PVE session.
     session_idle_timeout_minutes: int
@@ -143,7 +143,7 @@ class Settings:
 
     # PH.5: minimum gap this app waits between the *end* of one
     # guest-agent command and the *start* of its own next one, on the
-    # same guest (docs/plan.md §7.5). guest_agent_lock.py already
+    # same guest (docs/push-to-guest.md). guest_agent_lock.py already
     # prevents this app's own commands from overlapping (correctness);
     # this is about not monopolizing the channel once it's free - a
     # scheduled PBS backup's fs-freeze or another admin's `qm agent`
@@ -178,8 +178,8 @@ class Settings:
     # kernels. Set it explicitly to share the port if your setup allows.
     restore_data_nic_port: int
 
-    # Direct Network Transfer data-plane TLS (issue #47, docs/plan.md
-    # §7.6.1). `plaintext` = HTTP listener (pre-#47 behaviour);
+    # Direct Network Transfer data-plane TLS (issue #47,
+    # docs/push-to-guest.md). `plaintext` = HTTP listener (pre-#47 behaviour);
     # `insecure`/`verify` = HTTPS listener. The ladder: per guest,
     # resolve the strongest mode in
     # [minimum, preferred] that the detected fetch tool can actually do
@@ -255,7 +255,7 @@ class Settings:
 
     # Issue #60: caps how many `file-restore/list` calls this app has
     # in flight to PVE at once. Each cold call boots an ephemeral helper
-    # VM on the PVE node (~3s, docs/plan.md §3) - Proxmox exposes no API
+    # VM on the PVE node (~3s, docs/api-reference.md) - Proxmox exposes no API
     # to list or stop those VMs directly (they're not visible as regular
     # guests and self-terminate on PVE's own internal idle timeout), so
     # the only lever this app has is limiting how many it triggers.

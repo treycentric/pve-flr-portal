@@ -1,6 +1,6 @@
-"""PH.5: in-memory registry of background restore jobs (docs/plan.md
-§7.5). A restore (stream source -> N chunk writes -> optional concat ->
-optional metadata -> optional verify) can run well past a reasonable
+"""PH.5: in-memory registry of background restore jobs
+(docs/push-to-guest.md). A restore (stream source -> N chunk writes ->
+optional concat -> optional metadata -> optional verify) can run well past a reasonable
 HTTP request lifetime, so `POST /api/restore` submits a job and returns
 immediately; the actual work runs as a tracked asyncio task here.
 
@@ -68,7 +68,7 @@ class RestoreJob:
     task_name: str
     snapshot_time: str  # "restore ver." - the backup snapshot this restores from
     source_volume: str  # backup volid, for re-fetching the content to restore
-    source_filepath: str  # opaque file-restore filepath token (docs/plan.md §3) - unused for a bundle job
+    source_filepath: str  # opaque file-restore filepath token (docs/api-reference.md) - unused for a bundle job
     source: str  # display path within the backup, or "N item(s)" for a bundle job
     destination: str  # single-file job: dest_dir + filename. Bundle job: the target directory itself.
     # The guest's real PVE node (issue #51) - every guest-scoped call this
@@ -77,7 +77,7 @@ class RestoreJob:
     # the guest's own. Defaults to "localhost" so an unresolved/single-node
     # setup keeps working exactly as before.
     node: str = "localhost"
-    # Multi-file/directory restore (docs/plan.md §7.7, issue #24). None
+    # Multi-file/directory restore (docs/push-to-guest.md, issue #24). None
     # (the default, and every job created before this existed) means an
     # ordinary single-file job - source_filepath/source/destination keep
     # their original single-file meaning and restore_runner.py's
@@ -85,18 +85,18 @@ class RestoreJob:
     # means a bundle job instead: source_filepath is unused,
     # destination is the target directory the bundle extracts into, and
     # restore_runner.py runs an entirely separate bundle-restore path -
-    # see docs/plan.md §7.7 for why (a list of BundleItem, not a single
+    # see docs/push-to-guest.md for why (a list of BundleItem, not a single
     # filepath, drives what actually gets fetched from PVE).
     items: list[BundleItem] | None = None
     # Independent opt-ins, not a "quick vs full" choice - the content
     # write path (single call vs chunk+concat) is decided automatically
     # from size; whether guest-exec ends up needed follows from that PLUS
     # either of these being requested, whenever the guest/privileges
-    # support it (docs/plan.md §7.5).
+    # support it (docs/push-to-guest.md).
     restore_metadata: bool = False
     verify: bool = False
     # Issue #20: original uid/gid/mode, fetched from a second file-
-    # restore/download(tar=1) call at restore time (docs/plan.md §7.5's
+    # restore/download(tar=1) call at restore time (docs/push-to-guest.md's
     # 2026-09-28 finding - PVE's tar output carries this, the JSON
     # file-restore/list API never has). Linux/BSD only - a no-op when
     # guest_os_family == "windows" (NTFS has no uid/gid/mode concept;
@@ -104,7 +104,7 @@ class RestoreJob:
     restore_ownership: bool = False
     # The source file's original mtime (from file-restore/list, which is
     # the only piece of metadata that API actually exposes - no uid/gid/
-    # mode field exists on any PVE version, docs/plan.md §7.5). Only
+    # mode field exists on any PVE version, docs/push-to-guest.md). Only
     # meaningful when restore_metadata is set; None if the frontend
     # didn't have an mtime to send (e.g. a directory entry).
     source_mtime: int | None = None

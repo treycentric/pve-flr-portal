@@ -879,7 +879,7 @@ async def restore_capabilities(
     vmid: str,
     session: SessionData = Depends(auth.get_session),
 ):
-    """PH.5 (docs/plan.md §7.5): what push-to-guest restore this specific
+    """PH.5 (docs/push-to-guest.md): what push-to-guest restore this specific
     user can actually use on this specific guest, right now. A caller
     lacking even VM.Audit on the guest (so /config itself 403s) degrades
     to "nothing available" rather than a 500 - restore is opt-in extra
@@ -902,7 +902,7 @@ async def restore_capabilities(
                 reason = (
                     f"PVE returned {code} for {path} - on a cluster this can mean the guest's real node "
                     "couldn't be resolved (needs Sys.Audit on / for /cluster/resources; falls back to "
-                    "'localhost', which 500s for a guest on another node - issue #51, docs/plan.md §9)"
+                    "'localhost', which 500s for a guest on another node - issue #51, docs/architecture.md)"
                 )
             else:
                 reason = f"could not read this guest's configuration/permissions (HTTP {code} from {path})"
@@ -940,7 +940,7 @@ async def restore(
     source_size: int | None = Form(None),
     session: SessionData = Depends(auth.get_session),
 ):
-    """PH.5 restore (docs/plan.md §7.5): submits a background job and
+    """PH.5 restore (docs/push-to-guest.md): submits a background job and
     returns immediately - the actual write (plus, when needed, multi-
     chunk assembly / metadata restore / verify) runs out-of-band
     (restore_runner.run_restore), independent of this request's
@@ -949,7 +949,7 @@ async def restore(
     it. `guest_type` is the app-internal "vm"/"ct" value - see
     restore_capabilities() above.
 
-    Multi-file/directory restore (docs/plan.md §7.7, issue #24): pass
+    Multi-file/directory restore (docs/push-to-guest.md, issue #24): pass
     one or more `item` fields - the same JSON `{filepath, name, leaf}`
     shape `download_bundle()` already uses for multi-select - instead
     of `filepath`/`name`. Exactly one of (`filepath` + `name`) or
@@ -967,7 +967,7 @@ async def restore(
 
     # Re-checked server-side regardless of what the UI already showed -
     # the capability response is a UI convenience, never trusted for the
-    # actual write (docs/plan.md §7.5).
+    # actual write (docs/push-to-guest.md).
     caps = await guest_agent.get_restore_capabilities(session, guest_type, vmid)
 
     if is_bundle:
@@ -1056,7 +1056,7 @@ async def restore_jobs_list(
     scope: str | None = Query(None),
     session: SessionData = Depends(auth.get_session_keepalive),
 ):
-    """PH.5 (docs/plan.md §7.5): the running-jobs indicator's data source,
+    """PH.5 (docs/push-to-guest.md): the running-jobs indicator's data source,
     polled from the top bar every few seconds. Jobs were originally
     visible to any logged-in user unconditionally - a single-admin tool
     with one shared task list - and still are by default; issue #122
@@ -1173,7 +1173,7 @@ async def restore_download_fetch(token: str):
     one restore_runner.py already uses for the rest of that job's work -
     never the requester's, since the requester is the guest, not a
     logged-in user. Except for a bundle restore's already-built local
-    bundle file (docs/plan.md §7.7, issue #24) - `token.local_path`, set
+    bundle file (docs/push-to-guest.md, issue #24) - `token.local_path`, set
     only in that case - which is streamed straight off local disk
     instead, since a bundle isn't something PVE's file-restore API can
     hand back as one item."""
@@ -1216,7 +1216,7 @@ async def restore_browse(
     path: str = "",
     session: SessionData = Depends(auth.get_session),
 ):
-    """PH.5 (docs/plan.md §7.5): lists subdirectories inside the guest via
+    """PH.5 (docs/push-to-guest.md): lists subdirectories inside the guest via
     guest-exec, so the restore destination can be browsed rather than
     typed blind. Needs VM.GuestAgent.Unrestricted - there's no dedicated
     QGA directory-listing command - so this is gated on guest_exec, same as

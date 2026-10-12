@@ -328,7 +328,7 @@ async def test_get_restore_capabilities_lxc_skips_agent_calls(session_data):
 async def test_get_restore_capabilities_unwraps_permissions_nested_under_path(session_data):
     # Regression test: /access/permissions?path=/vms/{vmid} nests the
     # privilege dict under the path key itself - confirmed live against a
-    # real guest (docs/plan.md §7.5) - not a flat {"VM.GuestAgent...": 1}.
+    # real guest (docs/push-to-guest.md) - not a flat {"VM.GuestAgent...": 1}.
     # A response that also carries an unrelated path must not leak its
     # privileges onto this guest either.
     _mock_cluster_node()

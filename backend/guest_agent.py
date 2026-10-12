@@ -1,5 +1,5 @@
 """PH.5: capability detection for push-to-guest restore
-(docs/plan.md §7.5). Answers "which restore paths can this guest and
+(docs/push-to-guest.md). Answers "which restore paths can this guest and
 this user actually use right now" from four independent, empirically-
 checked facts - never an OS-family guess:
 
@@ -238,7 +238,7 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
             f"{_API_ROOT}/access/permissions", params={"path": f"/vms/{vmid}"}, headers=headers
         )
         perms_resp.raise_for_status()
-        # Confirmed live (docs/plan.md §7.5): the response nests the
+        # Confirmed live: the response nests the
         # privilege dict under the path key itself, even with a single
         # `path` filter given - e.g. {"/vms/202": {"VM.GuestAgent...": 1}},
         # not a flat {"VM.GuestAgent...": 1}. Unwrap it here so
