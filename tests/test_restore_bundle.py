@@ -100,7 +100,7 @@ async def test_probe_tar_zst_support_false_on_nonzero_exit():
 async def test_probe_tar_zst_support_false_on_unexpected_output():
     # Exit code 0 but wrong content - shouldn't happen with a real tar,
     # but the probe shouldn't trust exit code alone (same lesson as
-    # copy /b's unreliable exit code, docs/plan.md §7.5).
+    # copy /b's unreliable exit code, docs/push-to-guest.md).
     async def fake_write(path, content):
         pass
 
@@ -204,7 +204,7 @@ class _FakeBundleClient:
 
 def _fake_directory_zip(files: dict[str, bytes], prefix: str = "") -> bytes:
     """A real, valid zip - what PVE's own default directory encoding
-    would hand back (docs/plan.md §7.7's correction: no tar=1 needed).
+    would hand back (docs/push-to-guest.md's correction: no tar=1 needed).
     `prefix`, when given, roots every entry under it - PVE's own zip for
     a directory already roots every entry under the directory's own name
     (confirmed live 2026-09-02 by a doubled `Downloads/Downloads/` when

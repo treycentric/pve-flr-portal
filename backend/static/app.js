@@ -75,8 +75,8 @@ function restoreJobsWidget() {
     scope: 'all',
     canSeeAll: true,
     selectedId: null,
-    // Drag offset for the modal (docs/plan.md §7.5's UI section) - an
-    // inline transform on the modal box, reset only on a fresh page
+    // Drag offset for the modal - an inline transform on the modal
+    // box, reset only on a fresh page
     // load so the position persists across repeated opens/closes.
     dragX: 0,
     dragY: 0,
@@ -333,7 +333,7 @@ function fileGridState() {
     sortKey: 'name',
     sortDir: 'asc',
 
-    // --- PH.5 restore modal (docs/plan.md §7.5) ---
+    // --- PH.5 restore modal (docs/push-to-guest.md) ---
     restoreOpen: false,
     restoreDestDir: '',
     restoreOverwrite: false,
@@ -353,7 +353,7 @@ function fileGridState() {
     restoreError: null,
     restoreSubmitted: false,
     // Browsing the guest filesystem needs VM.GuestAgent.Unrestricted
-    // (guest-exec, no dedicated QGA listing command - docs/plan.md §7.5),
+    // (guest-exec, no dedicated QGA listing command - docs/push-to-guest.md),
     // so it's only offered when that's available; otherwise restoreDestDir
     // stays a plain typed field.
     restoreBrowseAvailable: false,
@@ -539,7 +539,7 @@ function fileGridState() {
         body.set('restore_ownership', this.restoreOwnership ? 'true' : 'false');
         if (this.isSingleFile) {
           // Single-leaf-file restore - unchanged from before multi-file
-          // restore existed (docs/plan.md §7.7, issue #24).
+          // restore existed (docs/push-to-guest.md, issue #24).
           body.set('filepath', sel[0].filepath);
           body.set('name', sel[0].name);
           body.set('restore_metadata', this.restoreMetadata ? 'true' : 'false');
@@ -702,7 +702,7 @@ function portalApp(rawSnapshots, guest) {
     history: [],
     historyIndex: -1,
 
-    // --- PH.5 restore state (docs/plan.md §7.5) ---
+    // --- PH.5 restore state (docs/push-to-guest.md) ---
     // {type, vmid, label} for the currently-viewed guest - static for the
     // whole page load (switching guest is a full navigation, see taskPicker's
     // confirm()), so capabilities are fetched once here rather than on every

@@ -12,9 +12,12 @@ top of Proxmox's existing API, without modifying Proxmox itself.
 
 ![The main screen: a guest's file tree and grid on top, a scrubbable snapshot timeline along the bottom](docs/images/main-screen.png)
 
-See [`docs/plan.md`](docs/plan.md) for the full architecture/reference
-doc, [`TODO.md`](TODO.md) for open work, and
-[`CHANGELOG.md`](CHANGELOG.md) for what's shipped in each release.
+See [`docs/architecture.md`](docs/architecture.md) for the system
+design, [`docs/api-reference.md`](docs/api-reference.md) for the PVE/QGA
+API contracts this app depends on, and
+[`docs/push-to-guest.md`](docs/push-to-guest.md) for the restore-to-guest
+feature's mechanism. [`TODO.md`](TODO.md) covers open work, and
+[`CHANGELOG.md`](CHANGELOG.md) what's shipped in each release.
 Also check [GitHub issues](https://github.com/treycentric/pve-flr-portal/issues) for outstanding work items.
 
 ## Features
@@ -144,7 +147,7 @@ pveum role add FileRestoreReader -privs "Datastore.AllocateSpace,VM.Backup,VM.Au
 `Datastore.AllocateSpace` + `VM.Backup` are what PVE's file-restore API
 actually requires to read a backup volume (`Datastore.Audit` alone is
 not enough); `VM.Audit` lets the portal resolve guest names for display.
-See `docs/plan.md` §3 if you want the full "why" behind that specific
+See `docs/api-reference.md` if you want the full "why" behind that specific
 privilege set.
 
 **2. Grant it to each user:**
@@ -178,7 +181,7 @@ a storage a user has no access to is simply skipped, not an error.
 ### Restore to Guest
 
 Restoring a file directly back into a *running* guest via
-`qemu-guest-agent` (see `docs/plan.md` §7.5–§7.7) is a **separate,
+`qemu-guest-agent` (see `docs/push-to-guest.md`) is a **separate,
 deliberate** grant — a user who can browse a backup should not
 automatically be able to write into the live guest. It's never folded
 into `FileRestoreReader`.
@@ -237,7 +240,7 @@ pveum acl modify /vms/<vmid> --users <user>@<realm> --roles FileRestoreOperator
 
 The portal detects per-guest which of these the calling user actually
 holds (plus what the guest agent itself allows) and only offers the
-restore options that check out — see `docs/plan.md` §7.5.
+restore options that check out — see `docs/push-to-guest.md`.
 
 **Windows ACLs can't be restored through this app.** The NTFS Security
 Descriptor survives fine *inside* a PBS backup (PBS backs up a VM as a
@@ -247,8 +250,8 @@ restore that loses it: Proxmox's `file-restore` API only ever hands
 back individual files as a `tar`/`zip`, and neither archive format has
 a field capable of representing a Windows Security Descriptor — so
 it's dropped in that one extraction step, a confirmed upstream Proxmox
-limitation (see `docs/plan.md` §7.5), not something this app can work
-around. A full VM/disk restore doesn't go through that lossy step at
+limitation (see `docs/push-to-guest.md`'s "Known gaps"), not something
+this app can work around. A full VM/disk restore doesn't go through that lossy step at
 all and preserves ACLs completely — if you need exact ACL fidelity,
 that's the path, not this app's file-level browser. Linux/BSD
 ownership and permissions don't have this problem and restore
@@ -329,7 +332,7 @@ is normally a couple of clicks, not a new client registration). Without
 this, SSO login fails at the identity provider with something like
 "invalid redirect URI" before it ever gets back to the portal.
 
-See `docs/plan.md` §7.1.1 for the full flow this drives (PVE's
+See `docs/architecture.md` for the full flow this drives (PVE's
 `auth-url`/`login` OpenID endpoints, and why no public-URL setting is
 needed on the portal's own side).
 
@@ -350,8 +353,8 @@ tagged release, installs the app, and starts it as a systemd service
 (`pve-flr-portal`). Override `CTID`/`STORAGE`/`BRIDGE`/`MEMORY_MB`/etc.
 via environment variables - see the top of the script. Already have a
 container? Run `deploy/install.sh` inside it instead. Rationale for LXC
-over a Debian package on the host or a full VM/OVA is in docs/plan.md
-§10.
+over a Debian package on the host or a full VM/OVA is in
+`docs/archive/design-rationale.md`.
 
 **Updating**:
 
@@ -361,14 +364,15 @@ update to the latest release, `bash deploy/update.sh v1.4.0` (or
 unreleased/bleeding-edge work. Reinstalls dependencies if
 `requirements.txt` changed and restarts the service; refuses to run if
 the install directory has local/uncommitted changes rather than
-discarding them. See docs/plan.md §10 for how this maps onto the
-project's SemVer-tagged release channel.
+discarding them. See `docs/archive/design-rationale.md` for how this
+maps onto the project's SemVer-tagged release channel.
 
 The systemd unit's `StateDirectory=` puts the app-state dir
 (`PFR_DATA_DIR`) at `/var/lib/pve-flr-portal`, created and owned by the
 service user. It survives `update.sh` redeploys and container reboots,
-but not a container recreate - see docs/plan.md §10 for what to
-preserve when moving/rebuilding the container.
+but not a container recreate - see "Persistence, and backing up the
+portal itself" below for what to preserve when moving/rebuilding the
+container.
 
 ### Docker Image for Deployment
 
@@ -417,8 +421,8 @@ rebuild. This is how the download-format (.zip/.tar.gz/.tar.zst) and
 login flows got exercised on both Python 3.14 (dev machine) and a
 clean Python 3.11 (the deploy target) during development.
 
-Testing Direct Network Transfer (the network-pull restore path,
-docs/plan.md §7.6; internally "Design C")? `RESTORE_DATA_NICS`' address
+Testing Direct Network Transfer (the network-pull restore path, see
+`docs/push-to-guest.md`)? `RESTORE_DATA_NICS`' address
 needs to be one the container can actually bind to, which Docker's
 default bridge networking won't give you (a container never has the
 host's real LAN IP under it). Use the `hostnet` profile instead, which
@@ -426,7 +430,7 @@ gives the container the host's real interfaces directly (on Windows/Mac
 this needs Docker Desktop's "Enable host networking" setting on first):
 `docker compose --profile hostnet up --build pve-flr-portal-hostnet`.
 
-**Data-plane TLS (docs/plan.md §7.6.1).** Once
+**Data-plane TLS (see `docs/push-to-guest.md`).** Once
 `RESTORE_DATA_NICS` is set, the download route is served over **HTTPS**,
 and `RESTORE_DATA_NIC_TLS_PREFERRED` defaults to **`verify`** (the guest
 validates the cert). A self-signed data-plane cert with the right IP
@@ -450,6 +454,38 @@ SAN; the portal won't touch an admin-supplied cert, it only logs a
 "does not cover" warning and `verify` clients then reject it. (The main
 UI cert is unaffected — it's keyed to `PVE_HOST`/`localhost`, not the
 container IP.)
+
+### Persistence, and backing up the portal itself
+
+**What lives only on the deployment's own disk** (LXC rootfs / Docker
+volumes), i.e. what a fresh install or a container *recreate* loses:
+
+| Path | What | Rebuildable? |
+|---|---|---|
+| `.env` | config (no credentials — per-user PVE login, see `docs/architecture.md`) | yes, from `.env.example` |
+| `certs/` (`/…/certs`, or the `certs` bind mount) | the HTTPS cert + **private key** | yes — regenerated self-signed on next start, or drop your own back in |
+| `PFR_DATA_DIR` (`/var/lib/pve-flr-portal` under systemd, the `pve-flr-data` Docker volume) | `dir_cache.sqlite3` (directory-listing cache) and `job_history.sqlite` (restore job history/logs) | yes — both are pure caches/history, safe to discard; the app rebuilds `dir_cache` on demand and starts `job_history` empty |
+
+Not persisted anywhere by design: the in-memory session store
+(`backend/auth.py`) — a backend restart or container reboot logs
+everyone out (accepted tradeoff, issue #14).
+
+**Can the portal's own LXC be backed up with PBS?** Yes — PBS backs up
+LXC (CT) guests as well as VMs, and this container is nothing special.
+Notes:
+
+- No system of record and no state that needs quiescing, so a
+  crash-consistent backup (PBS `snapshot` or `stop` mode) is perfectly
+  fine. The worst a `snapshot`-mode backup can catch mid-write is a
+  half-written cache/history row in one of the two SQLite files above —
+  both are designed to be safe to discard and rebuild.
+- The backup will contain `certs/` — including the TLS **private key**.
+  For the default self-signed cert this is low-stakes, but if
+  you install a real CA-issued key, treat that backup (and the PBS
+  datastore holding it) accordingly.
+- Pointing this portal at the **same** PBS/PVE that backs up its own
+  container is fine — the dependency is only "PVE API reachable at
+  request time", there's no bootstrapping loop.
 
 ## Tests
 

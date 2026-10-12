@@ -2169,7 +2169,7 @@ def test_restore_download_fetch_requires_no_auth_but_a_valid_token(session_data,
 
 
 def test_restore_download_fetch_serves_local_file_for_a_bundle_restore(session_data, monkeypatch, tmp_path):
-    # 2026-09-02, docs/plan.md §7.7: a bundle's Direct Network Transfer
+    # 2026-09-02, docs/push-to-guest.md: a bundle's Direct Network Transfer
     # mints a token with local_path set - the endpoint must stream that
     # file straight off disk, never touching PVE at all.
     from backend import restore_download

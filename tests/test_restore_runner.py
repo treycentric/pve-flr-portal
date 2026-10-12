@@ -45,7 +45,8 @@ class FakeDownloadResponse:
         # Deliberately not what run_restore() should call anymore -
         # buffering the whole file (even just once) is exactly what got
         # a memory-constrained deployment OOM-killed on a real large
-        # file (docs/plan.md §7.6's 2026-09-01 finding). Raising here
+        # file (docs/archive/push-to-guest-findings.md's 2026-09-01
+        # finding). Raising here
         # means any regression back to whole-file buffering fails loudly
         # in every test that exercises a download, not just a dedicated
         # one.
@@ -319,7 +320,7 @@ async def test_concat_chunks_windows_uses_powershell_not_cmd_copy(manager, sessi
     # cmd.exe's handling of multiple embedded double-quoted segments on
     # one /c line is the same unreliable pattern already found and
     # fixed for _ensure_destination_dir()/_verify_destination_exists()
-    # (docs/plan.md §7.5), just never migrated to this function too.
+    # (docs/push-to-guest.md), just never migrated to this function too.
     job = _make_job(manager, session_data, destination="C:\\TestRestore\\hosts")
     exec_calls = []
 
@@ -1655,7 +1656,7 @@ async def test_scratch_cleanup_failure_does_not_mask_a_successful_restore(manage
     assert job.status == RestoreStatus.DONE
 
 
-# --- multi-file/directory bundle restore (docs/plan.md §7.7, issue #24) ---
+# --- multi-file/directory bundle restore (docs/push-to-guest.md, issue #24) ---
 
 
 def _bundle_job(manager, session_data, **overrides):
@@ -2008,7 +2009,7 @@ async def test_bundle_restore_progress_stays_none_without_content_length(manager
 
 
 async def test_bundle_restore_uses_direct_network_transfer_when_available(manager, session_data, monkeypatch, tmp_path):
-    # 2026-09-02, docs/plan.md §7.7: bundle restore now tries Direct
+    # 2026-09-02, docs/push-to-guest.md: bundle restore now tries Direct
     # Network Transfer first (same as single-file) instead of always
     # taking the chunked guest-agent-write path - confirmed live that a
     # several-thousand-chunk bundle write was impractically slow.

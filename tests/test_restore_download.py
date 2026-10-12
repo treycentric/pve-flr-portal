@@ -48,7 +48,7 @@ def test_local_path_defaults_to_none_for_the_ordinary_single_file_case():
 
 
 def test_local_path_is_carried_through_for_a_bundle_restore():
-    # 2026-09-02, docs/plan.md §7.7: a bundle's Direct Network Transfer
+    # 2026-09-02, docs/push-to-guest.md: a bundle's Direct Network Transfer
     # mints a token carrying the already-built local bundle path, so the
     # download endpoint can serve it directly instead of re-proxying
     # from PVE (which can't hand back a synthesized bundle as one item).

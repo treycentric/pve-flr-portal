@@ -17,8 +17,8 @@ services:
       - pve-flr-data:/app/data
     restart: unless-stopped
 
-  # Design C (docs/plan.md §7.6, issue #22) local testing only - not
-  # needed for ordinary use of the app. RESTORE_DATA_NICS' local_ip has
+  # Direct Network Transfer (docs/push-to-guest.md, issue #22) local
+  # testing only - not needed for ordinary use of the app. RESTORE_DATA_NICS' local_ip has
   # to be an address the container can actually bind to from inside its
   # own network namespace; the default service above uses Docker's
   # bridge/NAT networking, which never gives a container the host's real

@@ -1,4 +1,4 @@
-"""HTTPS-by-default bootstrap (docs/plan.md §7.3): generates a self-signed
+"""HTTPS-by-default bootstrap (docs/architecture.md): generates a self-signed
 cert/key pair on first run so the app never has to serve plain HTTP once
 real login credentials are involved.
 

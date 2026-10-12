@@ -272,7 +272,7 @@ def build_fetch_command(
     (typically via `restore_chunking.scratch_dir_path`/a job-scoped
     filename) since only it knows the job's scratch directory.
 
-    **Unverified live** (docs/plan.md §7.6): none of these have been
+    **Unverified live** (docs/push-to-guest.md): none of these have been
     tested against a real guest yet - same caution this project already
     applies elsewhere (certutil's hash-output shape, `copy /b`'s exit
     code) before trusting a Windows/POSIX command's exact behavior.

@@ -6,7 +6,9 @@ stories worth knowing before touching `backend/static/app.js`'s
 timeline code) is archived at
 [`docs/archive/plan-phases-0-4.md`](docs/archive/plan-phases-0-4.md).
 Current architecture/reference docs live in
-[`docs/plan.md`](docs/plan.md).
+[`docs/architecture.md`](docs/architecture.md),
+[`docs/api-reference.md`](docs/api-reference.md), and
+[`docs/push-to-guest.md`](docs/push-to-guest.md).
 
 ## PH.5 — Push-to-guest — SHIPPED (v1.1.0, #5/#22/#24)
 
@@ -20,11 +22,12 @@ multi-file/directory bundle restore with an embedded, guest-side-verified
 checksum manifest (issue #24). Live-verified against a real Linux CT
 (multi-item bundle via Direct Network Transfer) and a real Windows VM
 (single-directory restore, zip-fallback + chunked write). Full
-design/build/live-testing history is in `docs/plan.md` §7.5–§7.7 — each
-real bug found along the way (directory double-nesting, disk exhaustion,
-misleading progress display, timeouts, memory blow-ups, Windows quoting)
-has its own "Real-world finding" entry there with the fix, test, and
-commit.
+design/build/live-testing history is in `docs/push-to-guest.md`
+(mechanism) and `docs/archive/push-to-guest-findings.md` (bug history)
+— each real bug found along the way (directory double-nesting, disk
+exhaustion, misleading progress display, timeouts, memory blow-ups,
+Windows quoting) has its own "Real-world finding" entry in the latter,
+with the fix, test, and commit.
 
 ### Push-to-guest follow-ons (open, not blockers)
 
@@ -38,8 +41,8 @@ commit.
   "Restore original owner/permissions" checkbox, sourced from a second
   `file-restore/download?tar=1` call (confirmed live 2026-09-28 that
   PVE's tar output carries real uid/gid/mode, unlike the JSON listing
-  API — docs/plan.md §7.5). **Windows ACLs confirmed infeasible** via
-  any Proxmox-exposed API (investigated 2026-09-28, docs/plan.md §7.5)
+  API — docs/push-to-guest.md). **Windows ACLs confirmed infeasible** via
+  any Proxmox-exposed API (investigated 2026-09-28, docs/push-to-guest.md)
   — neither tar nor zip has a field for an NTFS Security Descriptor,
   and no other Proxmox API surfaces it either; the checkbox is disabled
   for a Windows guest for exactly this reason. A real upstream Proxmox
@@ -69,7 +72,8 @@ commit.
   too), self-signed data-plane cert with IP SANs, HTTPS data listener,
   per-fetch-tool skip-verify, per-NIC `hostname`, minimum TLS version,
   automatic guest CA install, `PREFERRED` default `verify`, `curl.exe`
-  preferred on Windows. Design + shakeout log: `docs/plan.md` §7.6.1.
+  preferred on Windows. Design: `docs/push-to-guest.md`; shakeout log:
+  `docs/archive/push-to-guest-findings.md`.
   Deferred follow-ups: `openssl s_client` POSIX candidate;
   `UNINSTALL_CA_AFTER`; `bitsadmin` over HTTPS.
 - #52 — bake certbot + a DNS-01 plugin into the LXC/Docker build, with a
@@ -78,7 +82,7 @@ commit.
 ## PH.6 — Directory-listing cache — SHIPPED (issue #109)
 
 A lazily-populated SQLite `dir_cache`, written on `/api/browse`
-cache-miss (schema in `docs/plan.md` §6, `backend/dir_cache.py`). Keyed
+cache-miss (schema in `docs/architecture.md`, `backend/dir_cache.py`). Keyed
 by `(username, volume, path)` — not just `(volid, path)` as originally
 sketched, matching `pve_client.list_path()`'s existing per-user
 authorization threat model (a cache shared across users would let one
@@ -127,16 +131,16 @@ requirement folded into the retention ticket:
   style bypass (`JOB_ADMIN_PRIVILEGE`, default `Sys.Audit`, checked via
   PVE's own `cap["dc"]` bucket — a privilege granted at the bare root
   path `/`, not scoped to any particular storage/VM). See
-  `docs/plan.md` §7.5's "Job visibility scoping" subsection and
-  README's "Provisioning access" → "Restore Job Visibility".
+  `docs/architecture.md`'s "Auth & sessions" section and README's
+  "Provisioning access" → "Restore Job Visibility".
 - #123 — **SHIPPED.** `POST /api/restore-jobs/{id}/cancel` now checks
   `job.requested_by == session.username` or `auth.is_job_admin(session)`
   (reusing #122's exact bypass check, not a separate privilege) before
   honoring a cancel — previously any logged-in user could cancel any
   job regardless of who submitted it. A non-owner, non-admin gets 403.
   The job list's per-job dicts also gained `can_cancel` so the UI can
-  grey out the Cancel button proactively. See `docs/plan.md` §7.5's
-  "Cancel ownership" subsection.
+  grey out the Cancel button proactively. See `docs/architecture.md`'s
+  "Auth & sessions" section.
 - #124 — **SHIPPED.** Persisted job + log history in a dedicated
   `job_history.sqlite` under `PFR_DATA_DIR` (separate from PH.6's
   `dir_cache.sqlite3`), with a configurable retention window
@@ -149,8 +153,8 @@ requirement folded into the retention ticket:
   instead of leaving it looking perpetually in-progress.
   `GET /api/restore-jobs`/the detail endpoint merge this process's
   live, in-memory jobs with persisted rows from previous processes,
-  within the retention window. See `docs/plan.md` §7.5's "Persisted job
-  history + restart reconciliation" subsection.
+  within the retention window. See `docs/architecture.md`'s "Data
+  model" section.
 
 ## Server-side per-user preferences store (follow-up to #29)
 
@@ -163,7 +167,7 @@ no service" shape as PH.6). The storage *location* is now sorted:
 `PFR_DATA_DIR` (#30). Remaining is the feature itself — a
 `preferences.json` under `config.ensure_data_dir()`, read at page
 render and written from a small `POST /api/preferences` (or similar),
-and the `docs/plan.md` §4 note that state is actually being written.
+and the `docs/architecture.md` note that state is actually being written.
 Deferred out of #29 deliberately to keep that change small.
 **Still needs its own GitHub issue.**
 
@@ -186,7 +190,7 @@ adopt by re-implementing/cherry-picking, not merging.
 
 ## Known limitations / tech debt
 
-Detailed in `docs/plan.md` §9.1 ("Scaling & limits") — condensed here
+Detailed in `docs/architecture.md` ("Scaling & limits") — condensed here
 as an actionable list. None of these are correctness bugs; they're
 ceilings the single-admin/single-worker design hits under load it
 wasn't built for.
@@ -240,4 +244,4 @@ wasn't built for.
   username/realm/challenge as hidden fields - no server-side pending-
   login state needed. Covers TOTP and recovery keys (PVE accepts either
   the same way here); WebAuthn is out of scope (needs browser
-  credential-API JS, real additional work). See `docs/plan.md` §7.1.
+  credential-API JS, real additional work). See `docs/architecture.md`.

@@ -1,9 +1,9 @@
-"""Entrypoint that serves the portal over HTTPS by default (docs/plan.md
-§7.3). Cert bootstrap has to happen before uvicorn binds its SSL
-context, which is too late to do from a FastAPI startup event - hence a
-small script instead of `uvicorn backend.main:app` directly.
+"""Entrypoint that serves the portal over HTTPS by default
+(docs/architecture.md). Cert bootstrap has to happen before uvicorn
+binds its SSL context, which is too late to do from a FastAPI startup
+event - hence a small script instead of `uvicorn backend.main:app` directly.
 
-Direct Network Transfer (docs/plan.md §7.6, issue #22, step 5): when
+Direct Network Transfer (docs/push-to-guest.md, issue #22, step 5): when
 RESTORE_DATA_NICS is configured, this also binds one additional listener
 per distinct configured data-NIC IP, for the network-pull download route
 (`GET /api/restore-downloads/{token}`). Those listeners have to run in
@@ -22,7 +22,7 @@ skipped with a clear log line and the main portal runs normally - DNT
 just isn't offered for that subnet (guests there fall back to the
 chunked write path).
 
-Data-plane TLS (issue #47, docs/plan.md §7.6.1): those data listeners
+Data-plane TLS (issue #47, docs/push-to-guest.md): those data listeners
 are plain HTTP when RESTORE_DATA_NIC_TLS_PREFERRED is `plaintext`
 (unchanged from before #47) and HTTPS otherwise, using a dedicated
 self-signed data-plane cert (IP SANs for the configured NICs) unless the

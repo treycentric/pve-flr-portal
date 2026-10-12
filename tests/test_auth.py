@@ -287,9 +287,9 @@ async def test_get_session_keepalive_still_evicts_on_idle_timeout(session_data):
 
 @respx.mock
 async def test_ensure_fresh_ticket_refreshes_when_stale(session_data):
-    """The standalone helper background restore jobs use (docs/plan.md
-    §7.5) - same policy as get_session()'s inline check, callable without
-    a request/session-store round trip."""
+    """The standalone helper background restore jobs use
+    (docs/push-to-guest.md) - same policy as get_session()'s inline
+    check, callable without a request/session-store round trip."""
     route = respx.post(f"{API}/access/ticket").mock(
         return_value=httpx.Response(
             200,
