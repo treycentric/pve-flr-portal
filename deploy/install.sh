@@ -30,9 +30,8 @@ CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-rfc2136}"
 # root shell's git still tripped this against a root-owned clone. --system
 # (not --global) so this holds regardless of which user runs git here -
 # root today, but also $APP_USER after the chown below changes this
-# directory's actual owner, and either way for every future `git pull`
-# a redeploy (`cd $APP_DIR && git pull && systemctl restart
-# pve-flr-portal`) would otherwise trip the exact same error on.
+# directory's actual owner, and either way every future `deploy/update.sh`
+# run (issue #89) would otherwise trip the exact same error on.
 git config --system --add safe.directory "$APP_DIR"
 
 echo "==> Installing OS packages"
@@ -83,3 +82,5 @@ systemctl --no-pager status "$SERVICE_NAME" || true
 echo
 echo "Edit $APP_DIR/.env (PVE_HOST, PVE_STORAGE) then:"
 echo "  systemctl restart $SERVICE_NAME"
+echo
+echo "To update later, run: bash $APP_DIR/deploy/update.sh"

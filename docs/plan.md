@@ -2851,9 +2851,9 @@ options given the hard PVE dependency. Considered:
   for a companion app that doesn't need to run *on* the hypervisor.
 - **VM / OVA.** Correct but heaviest option for what is a single tiny
   stateless Python process (no DB) — full guest-OS overhead, a slower
-  build/update pipeline (rebuild an image vs. `git pull && restart`),
-  and "runs on any hypervisor" isn't a real benefit here since the
-  target audience is, by definition, already running Proxmox.
+  build/update pipeline (rebuild an image vs. a git-based update), and
+  "runs on any hypervisor" isn't a real benefit here since the target
+  audience is, by definition, already running Proxmox.
 - **LXC container (chosen, primary path).** PVE-native, minimal
   overhead, matches how the Proxmox homelab community already ships
   companion tools (the common `pct create` + install-script pattern,
@@ -2867,6 +2867,82 @@ options given the hard PVE dependency. Considered:
   Docker host) rather than wanting another PVE guest, and doubles as
   the fastest local dev/test loop. See `Dockerfile` /
   `docker-compose.yml` at the repo root.
+- **`.deb` package / apt repo.** Investigated and rejected (issue #89
+  background research, 2026-09-29): Debian bookworm's packaged
+  fastapi/uvicorn/cryptography are too stale to depend on directly, the
+  only sound vendoring route (`dh-virtualenv`) is itself orphaned in
+  Debian, and a real `.deb` would need a maintained signed apt repo —
+  exactly the "extra service" this project's philosophy avoids. The
+  LXC container already serves as the disposable, isolated install
+  unit a `.deb` would otherwise buy.
+
+### Installing and updating a specific version (issue #89)
+
+`deploy/lxc-create.sh` (fresh installs) and `deploy/update.sh` (existing
+installs) both target the project's existing release channel — SemVer
+git tags (`vX.Y.Z`) + GitHub Releases, cut by `scripts/release.py`
+per `docs/dev/versioning.md` — instead of floating on whatever commit
+happens to be on `main`:
+
+- A fresh `lxc-create.sh` run clones the full repo (not `--depth 1`, so
+  tag history is present) and checks out the latest `vX.Y.Z` tag before
+  running `install.sh`, rather than leaving the checkout on `main` HEAD.
+- `deploy/update.sh <version>` moves an existing install to a specific
+  tagged release (`v1.4.0` or `1.4.0`), to `latest`, or to `main` for
+  bleeding-edge/unreleased work — `git fetch --tags`, checkout,
+  reinstall `requirements.txt`, re-chown, restart the systemd unit.
+  Refuses if the app directory has local/uncommitted changes rather
+  than silently discarding them.
+
+This replaces the old undocumented `git pull && systemctl restart`
+update path (still what `update.sh` does under the hood for `main`,
+just now a supported, named command instead of an ad hoc incantation)
+with something that can pin to, or roll back to, a version that
+actually shipped and passed CI — while adding no new service, no
+packaging step, and no dependency beyond git, which install already
+requires.
+
+### Guided install (issue #91)
+
+`deploy/lxc-create.sh` is interactive at a real terminal — inspired by
+community-scripts.org's (Proxmox VE Helper-Scripts) guided-install UX,
+but deliberately a much lighter version of it: colored status lines and
+a Basic/Advanced whiptail flow, not their full multi-file `build.func`
+framework (no SDN vnets, GPU passthrough, cluster-wide CTID validation,
+or save-defaults diffing — overkill for a single-app tool; see the "no
+extra services"/"simplest thing that works" rule in `CLAUDE.md`).
+Getting pve-flr-portal actually *listed* on community-scripts.org is
+tracked separately as issue #92 — that requires a completely different,
+purpose-built script pair (root-run, `uv`-based, tarball-deployed, no
+dedicated service user) submitted to their own intake repo, not a
+retrofit of anything in `deploy/`; see that issue for the specific
+conflicts with this project's architecture.
+
+Every prompt is env-var-first (already-set variables skip their
+question entirely) and every prompt is skipped outright with no TTY
+attached, falling back silently to its default — so a fully scripted/
+piped invocation behaves exactly as before this issue, and `whiptail`
+(auto-installed via apt if missing) degrades to plain `read -rp`
+prompts if unavailable. Basic questions (CTID, hostname, network,
+container storage, and which PBS storage to browse) are asked
+regardless, since they're unavoidable per-install choices; Advanced
+(off by default) adds resource sizing, Direct Network Transfer + its
+TLS policy, and an inline Let's Encrypt setup step (issue #52) that
+runs `certbot-setup.sh` once the DNS plugin's credentials file is in
+place. Resolved answers are written straight into the container's
+`.env` (via a small Python patch script pushed in with `pct push`,
+rather than hand-rolled `sed`, so JSON values like `RESTORE_DATA_NICS`
+never need shell-delimiter escaping) instead of leaving that as a
+manual post-install edit.
+
+A companion `deploy/uninstall.sh` is tracked as issue #93 — container
+teardown plus an opt-in cleanup of the `FileRestoreReader`/
+`FileRestoreOperator` PVE roles and every ACL grant using them (safe to
+find via `pveum acl list` precisely because those role names are unique
+to this project; there's no recorded "what this install granted" to
+replay otherwise, since roles/ACLs are a manual `pveum` step, not
+something the app itself tracks — no database, per the top-level "no
+database" rule).
 
 ### Persistence, and backing up the portal itself
 
