@@ -139,12 +139,55 @@ app's browse/tree/download code is already gated on `== "vm"` for
 every disk/LVM-specific code path (`_apply_lvm_view`,
 `_is_partition_listing`, etc.) — "not vm" already means "flat pxar
 tree," so a `host` volid should get CT-like treatment for free, with
-no VM-specific logic ever applying to it. **Not yet confirmed against
-real traffic** - this section is reasoned from Proxmox's published
-source (`pve-storage`/`pve-access-control`, current HEAD as of
-2026-10), not a packet capture, unlike the rest of this doc. Replace
-this note with a live-traffic confirmation (or correction) once tested
-against a real `host` backup, per this doc's own standard.
+no VM-specific logic ever applying to it. This part is still reasoned
+from source, not confirmed live - see the much bigger, now-confirmed
+blocker below, which has to be fixed before any of this can even be
+exercised against real traffic.
+
+**Confirmed live (2026-10): PVE's own storage-listing code drops
+`host` backups unconditionally, before any permission check runs -
+not a permissions issue at all.** `PVE::Storage::PBSPlugin::list_volumes`
+(`pve-storage.git`, `src/PVE/Storage/PBSPlugin.pm`) hardcodes:
+
+```perl
+next if !($btype eq 'vm' || $btype eq 'ct');
+```
+
+This is the function behind both PVE's own "Backups" content-tab
+listing and this app's `pve_client.list_backup_archives()` (via
+`GET /nodes/localhost/storage/{storage}/content?content=backup`) -
+there is no other PVE API surface this app is willing to use instead
+(CLAUDE.md's "never talks to PBS directly"). Live-tested: granting
+`root@pam`-equivalent access does not help - root can't see a host
+backup in PVE's own GUI either, because this filter runs before any
+ACL check, for anyone. The permission analysis below is accurate for
+what `file-restore/list`/`download` themselves require once a volid
+is known, but nothing reaches that code at all without first fixing
+*this* - which the PVE API offers no way to do. History: the filter
+dates to the original `list_volumes` patch (pve-storage, July 2019),
+which predates PBS's `--backup-type host` feature - almost certainly
+an oversight from never being revisited, not a deliberate exclusion;
+no mailing-list thread or bug report arguing either way was found.
+
+**The fix: `deploy/patch-pve-host-backups.sh`** (CLAUDE.md's "last
+resort" patching exception) - an opt-in, exact-match-or-refuse,
+one-line patch to the line above (adds `|| $btype eq 'host'`),
+installed with a dpkg hook so it survives `pve-storage` package
+updates. Needs to run on every node in a cluster - the content-listing
+call can be served by any node. See that script's own header for the
+full rationale and risk tradeoffs, and README's "Browse Host Backups"
+for the user-facing setup flow.
+
+**Separately, PBS has its own ACL layer the PVE storage entry's own
+credential has to clear too.** Confirmed live: a PVE storage entry
+whose PBS-side user/token only holds `DatastoreBackup` on the
+datastore can't see *any* backups it didn't itself create - including
+ones from a different PBS identity (e.g. a separate service account
+doing host backups directly via `proxmox-backup-client`) - because
+`DatastoreBackup` is ownership-scoped on the PBS side, not purely
+namespace-scoped the way its ACL-inheritance might suggest. Needs
+`DatastoreReader` (or broader) granted on PBS's own Permissions page
+for that namespace, independent of anything in PVE.
 
 **Permissions: no narrower grant than `Datastore.Allocate` exists for
 this.** Traced through `PVE::Storage::check_volume_access`

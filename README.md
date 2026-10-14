@@ -180,6 +180,17 @@ a storage a user has no access to is simply skipped, not an error.
 
 ### Browse Host Backups
 
+**Requires a PVE-side patch first — this alone won't make host backups
+appear, no matter how permissions are configured.** PVE's own
+`PVE::Storage::PBSPlugin::list_volumes` drops `host`-type backups from
+every storage content listing unconditionally, before any permission
+check ever runs — confirmed live: even `root@pam` can't see one in
+PVE's own GUI. There's no supported PVE API path around this. Run
+`deploy/patch-pve-host-backups.sh` on every PVE node first (opt-in,
+explained in full there and offered during `lxc-create.sh`) — only
+once that's done does the rest of this section's permission setup
+actually matter. See `docs/api-reference.md` for the full trace.
+
 A `host`-type backup (`proxmox-backup-client backup --backup-type
 host`, e.g. a PVE node backing up its own `/`, or any other machine
 backed up the same way — PBS has no fourth "generic file-level backup"
@@ -193,6 +204,17 @@ to the one remaining path, `Datastore.Allocate` — full admin rights on
 that storage (create/delete backups, modify the storage definition),
 not a read-only grant. There is no narrower privilege in PVE's own
 access-control model for this.
+
+**PBS has its own, separate ACL system too.** The PVE storage entry
+authenticates to PBS using its own stored PBS user/token (configured
+when the storage was added) — that credential needs its own read
+access on the PBS side to the namespace in question, independent of
+anything granted in PVE. A PBS role like `DatastoreBackup` is
+*ownership-scoped* — it only covers backups that same PBS identity
+created — so if a different identity (e.g. a separate service account)
+made the host backups, the PVE storage entry's own PBS credential
+needs `DatastoreReader` (or broader) on that namespace too, granted on
+PBS's own Permissions page, or it'll see nothing there either.
 
 **Recommendation: give host backups their own PBS namespace (and PVE
 storage entry), separate from any storage holding VM/CT backups.**

@@ -32,9 +32,36 @@ BRIDGE="${BRIDGE:-vmbr0}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"   # or e.g. "10.0.0.50/24,gw=10.0.0.1"
 VLAN_TAG="${VLAN_TAG:-}"        # optional, e.g. "100" - leave unset for no tag
 REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
+ENABLE_HOST_BACKUPS="${ENABLE_HOST_BACKUPS:-}"  # "true"/"false" to skip the prompt below
 
 echo "==> pve-flr-portal LXC setup"
 echo "    CTID=$CTID  HOSTNAME=$CT_HOSTNAME  STORAGE=$STORAGE  DISK=${DISK_GB}G  MEM=${MEMORY_MB}MB"
+
+# Issue #155: opt-in only, and only asked interactively - a non-interactive
+# run (no ENABLE_HOST_BACKUPS override, no tty) defaults to "false" rather
+# than hanging on `read` or silently patching a Proxmox-owned file. See
+# deploy/patch-pve-host-backups.sh's header for what this actually does.
+if [ -z "$ENABLE_HOST_BACKUPS" ]; then
+  if [ -t 0 ]; then
+    echo
+    echo "Host backups (proxmox-backup-client --backup-type host) need a"
+    echo "one-line patch to PVE's own PBSPlugin.pm - PVE drops them from"
+    echo "every storage listing unconditionally, before any permission"
+    echo "check, and there is no supported PVE API path around that"
+    echo "(docs/api-reference.md). The patch is opt-in, exact-match-or-"
+    echo "refuse (never guesses at a changed PVE version), and reapplies"
+    echo "itself after pve-storage updates via a dpkg hook - but it is"
+    echo "NOT officially supported by Proxmox. See"
+    echo "deploy/patch-pve-host-backups.sh for the exact change."
+    read -r -p "Enable host-backup support now? [y/N] " _reply || _reply=""
+    case "$_reply" in
+      [yY]*) ENABLE_HOST_BACKUPS=true ;;
+      *) ENABLE_HOST_BACKUPS=false ;;
+    esac
+  else
+    ENABLE_HOST_BACKUPS=false
+  fi
+fi
 
 # TEMPLATE can still be overridden explicitly (TEMPLATE=debian-12-standard_...
 # bash deploy/lxc-create.sh) for a pinned/offline/reproducible run - but the
@@ -117,6 +144,18 @@ pct exec "$CTID" -- bash -c "
 # run failed with "failed to open ./install.sh for reading".
 pct exec "$CTID" -- bash /opt/pve-flr-portal/deploy/install.sh
 
+if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
+  echo "==> Enabling host-backup support on this PVE node"
+  # Runs on the PVE HOST, not inside the container - this script patches
+  # a file that only exists on the host (issue #155). Same local-clone-
+  # vs-curl-piped fallback install.sh above already has to handle.
+  if [ -f "$(dirname "$0")/patch-pve-host-backups.sh" ]; then
+    bash "$(dirname "$0")/patch-pve-host-backups.sh"
+  else
+    bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/patch-pve-host-backups.sh)"
+  fi
+fi
+
 CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
 echo
 echo "==> Done. pve-flr-portal is running in CT $CTID."
@@ -124,3 +163,7 @@ echo "    https://${CT_IP}:8008/"
 echo "    Edit /opt/pve-flr-portal/.env inside the container for PVE_HOST/PVE_STORAGE,"
 echo "    then: pct exec $CTID -- systemctl restart pve-flr-portal"
 echo "    To update later: pct exec $CTID -- bash /opt/pve-flr-portal/deploy/update.sh"
+if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
+  echo "    Host-backup support patched on THIS node only - on a cluster,"
+  echo "    also run deploy/patch-pve-host-backups.sh on every other node."
+fi

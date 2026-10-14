@@ -31,8 +31,24 @@ Companion docs, kept separate on purpose:
   above, or a fresh dated entry in the matching archive file.
 
 ## Hard constraints
-- This is a separate companion app. Do not attempt to patch or embed into
-  the Proxmox VE web UI — it has no plugin system.
+- This is a separate companion app, not an embedded plugin — Proxmox VE's
+  web UI has no plugin system to embed into. Best effort first to design
+  using baseline PVE capabilities; only reach for a patched/injected
+  change to PVE/PBS's own files as a last resort, when nothing in PVE's
+  published or undocumented-but-stable API surface can do it (issue
+  #155's host-backup support is the first and so far only case — PVE's
+  own `PBSPlugin.pm::list_volumes` hardcodes `vm`/`ct` and drops `host`
+  backups before any permission check runs, confirmed live, not fixable
+  from this app's side at all). When a patch is genuinely the only path:
+  it must be **opt-in** (never applied silently), it must **refuse to
+  apply rather than guess** when the target code doesn't match exactly
+  what it expects (a PVE/PBS update changed something), and it needs its
+  own re-apply-after-upgrade story (e.g. a dpkg hook) — this is a
+  well-established pattern in the wider Proxmox community (several
+  third-party PVE plugins patch core files and reapply after updates the
+  same way), not something novel to this project, but it's still a
+  meaningfully bigger commitment than anything else this app does and
+  should stay rare.
 - **PBS is required.** Everything hangs off Proxmox's File Restore
   feature, which per Proxmox is PBS-only — plain `vzdump` backups on
   dir/NFS/CIFS storage cannot be browsed via any API and are out of
