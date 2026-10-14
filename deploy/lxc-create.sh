@@ -21,7 +21,7 @@
 # a prompt nobody can answer.
 #
 # Override any of these via environment variables before running, e.g.
-# STORAGE=local-zfs BRIDGE=vmbr1 bash deploy/lxc-create.sh
+# STORAGE=local-zfs BRIDGE=vmbr1 VLAN_TAG=100 bash deploy/lxc-create.sh
 set -euo pipefail
 
 # ---------------------------------------------------------------------
@@ -193,6 +193,7 @@ while IFS= read -r line; do
   BRIDGE_CHOICES+=("$line")
 done < <(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}')
 ask_menu BRIDGE "Network bridge" "vmbr0" "${BRIDGE_CHOICES[@]}"
+ask_value VLAN_TAG "VLAN tag (leave blank for none)" ""
 
 ask_yesno USE_STATIC_IP "Use a static IP instead of DHCP?" "no"
 if [ "$USE_STATIC_IP" = "yes" ] && [ -z "${IP_CONFIG:-}" ]; then
@@ -269,7 +270,7 @@ echo
 msg_info "Settings:"
 echo "    CTID=$CTID  HOSTNAME=$CT_HOSTNAME"
 echo "    Container storage=$STORAGE  Disk=${DISK_GB}G  Mem=${MEMORY_MB}MB  Cores=$CORES"
-echo "    Bridge=$BRIDGE  IP=$IP_CONFIG"
+echo "    Bridge=$BRIDGE  IP=$IP_CONFIG${VLAN_TAG:+  VLAN=$VLAN_TAG}"
 echo "    PVE_STORAGE=$PVE_STORAGE  PVE_HOST=${PVE_HOST:-<default: this host>}"
 [ "$ENABLE_DNT" = "yes" ] && echo "    Direct Network Transfer: $RESTORE_DATA_NICS_JSON (TLS $TLS_MINIMUM..$TLS_PREFERRED)"
 ACME_SERVER_LABEL="$ACME_SERVER"
@@ -316,6 +317,11 @@ if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
   pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 fi
 
+NET0="name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG}"
+if [ -n "$VLAN_TAG" ]; then
+  NET0="${NET0},tag=${VLAN_TAG}"
+fi
+
 msg_info "Creating container $CTID"
 pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --hostname "$CT_HOSTNAME" \
@@ -325,7 +331,7 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --memory "$MEMORY_MB" \
   --swap 512 \
   --rootfs "${STORAGE}:${DISK_GB}" \
-  --net0 "name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG}" \
+  --net0 "$NET0" \
   --onboot 1 \
   --start 1
 msg_ok "Created container $CTID"
