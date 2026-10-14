@@ -151,7 +151,18 @@ not a permissions issue at all.** `PVE::Storage::PBSPlugin::list_volumes`
 
 ```perl
 next if !($btype eq 'vm' || $btype eq 'ct');
+next if $bid !~ m/^\d+$/;
 ```
+
+**Two separate lines, not one** - an easy trap, confirmed the hard way:
+patching only the first line (an earlier revision of this doc/the patch
+script did exactly that) still leaves host backups invisible, because
+the second line independently requires the backup-id to be purely
+numeric - and a host backup's id is always a hostname, never numeric,
+regardless of the first check. Both have to be patched together, and
+`deploy/patch-pve-host-backups.sh` does both atomically (all-or-
+nothing - if either target line isn't found exactly once, neither is
+touched).
 
 This is the function behind both PVE's own "Backups" content-tab
 listing and this app's `pve_client.list_backup_archives()` (via
@@ -159,15 +170,29 @@ listing and this app's `pve_client.list_backup_archives()` (via
 there is no other PVE API surface this app is willing to use instead
 (CLAUDE.md's "never talks to PBS directly"). Live-tested: granting
 `root@pam`-equivalent access does not help - root can't see a host
-backup in PVE's own GUI either, because this filter runs before any
+backup in PVE's own GUI either, because both filters run before any
 ACL check, for anyone. The permission analysis below is accurate for
 what `file-restore/list`/`download` themselves require once a volid
 is known, but nothing reaches that code at all without first fixing
-*this* - which the PVE API offers no way to do. History: the filter
-dates to the original `list_volumes` patch (pve-storage, July 2019),
-which predates PBS's `--backup-type host` feature - almost certainly
-an oversight from never being revisited, not a deliberate exclusion;
-no mailing-list thread or bug report arguing either way was found.
+*both of these* - which the PVE API offers no way to do. History: the
+first filter dates to the original `list_volumes` patch (pve-storage,
+July 2019), which predates PBS's `--backup-type host` feature -
+almost certainly an oversight from never being revisited, not a
+deliberate exclusion; no mailing-list thread or bug report arguing
+either way was found. Not separately dated when the `$bid` numeric
+check was added.
+
+A few lines further down, `list_volumes` also sets `vmid => int($bid)`
+and `subtype => $btype eq 'vm' ? 'qemu' : 'lxc'` for every entry -
+for a `host` backup these come out as `vmid => 0` and `subtype =>
+'lxc'`, both wrong (a hostname isn't 0, and a host backup isn't a
+container). `deploy/patch-pve-host-backups.sh` does not touch
+either of these - this app parses guest type from the `volid` itself,
+never `subtype` (see `file-restore/list` above), so it's unaffected;
+PVE's own GUI may show a host backup mislabeled as an LXC with vmid 0
+as a result. Cosmetic only, left alone to keep the patch's footprint
+minimal - worth revisiting if that mislabeling turns out to matter in
+practice.
 
 **The fix: `deploy/patch-pve-host-backups.sh`** (CLAUDE.md's "last
 resort" patching exception) - an opt-in, exact-match-or-refuse,

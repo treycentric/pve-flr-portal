@@ -16,21 +16,26 @@
 #
 # WHY THIS EXISTS (CLAUDE.md's "last resort" patching guidance, issue
 # #155): PVE::Storage::PBSPlugin::list_volumes - the code behind both
-# this app's and PVE's own "Backups" content listing - hardcodes
-# `next if !($btype eq 'vm' || $btype eq 'ct');`, dropping host backups
-# unconditionally, before any permission/ACL check ever runs. Confirmed
-# live: even root can't see a host backup in PVE's own GUI. There is no
-# supported PVE API path around this (docs/api-reference.md) - the only
-# fix is this one-line patch, which is NOT officially supported by
-# Proxmox and will be reverted by every pve-storage package update
-# (the dpkg hook below reapplies it automatically after that happens).
+# this app's and PVE's own "Backups" content listing - drops host
+# backups via TWO separate lines, not one: a `$btype` check restricted
+# to vm/ct, and (confirmed live 2026-10 - the first patch alone wasn't
+# enough, host backups still didn't list even after it) a `$bid`
+# numeric-only check right after it, which a host backup's hostname-
+# shaped id always fails regardless of the first check. Neither check
+# runs after any permission/ACL check - both run before it, so no
+# amount of PVE role/ACL configuration can route around either one.
+# There is no supported PVE API path around this (docs/api-reference.md)
+# - the only fix is this two-line patch, NOT officially supported by
+# Proxmox, reverted by every pve-storage package update (the dpkg hook
+# below reapplies it automatically after that happens).
 #
-# Safety: this only ever does an EXACT, literal string replacement of
-# the one line above. If a future PVE version has reworded/refactored
-# it, the match naturally fails and this refuses to touch the file at
-# all rather than guessing at a fuzzy match - re-run this script (it'll
-# tell you) once docs/api-reference.md has been updated for whatever
-# changed.
+# Safety: this only ever does EXACT, literal string replacements of the
+# two lines above, applied atomically (if either target isn't found
+# exactly once, NEITHER is changed). If a future PVE version has
+# reworded/refactored either one, the match naturally fails and this
+# refuses to touch the file at all rather than guessing at a fuzzy
+# match - re-run this script (it'll tell you) once docs/api-reference.md
+# has been updated for whatever changed.
 set -euo pipefail
 
 PBS_PLUGIN_PATH="${PBS_PLUGIN_PATH:-/usr/share/perl5/PVE/Storage/PBSPlugin.pm}"
@@ -52,19 +57,41 @@ _patch_py() {
 import sys
 
 path, mode = sys.argv[1], sys.argv[2]
-old = "next if !($btype eq 'vm' || $btype eq 'ct');"
-new = "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');"
-search, replace = (old, new) if mode == "apply" else (new, old)
+# Order matters for readability only, not correctness - applied as one
+# atomic batch regardless.
+pairs = [
+    (
+        "next if !($btype eq 'vm' || $btype eq 'ct');",
+        "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');",
+    ),
+    (
+        r"next if $bid !~ m/^\d+$/;",
+        r"next if $btype ne 'host' && $bid !~ m/^\d+$/;",
+    ),
+]
+if mode == "remove":
+    pairs = [(new, old) for old, new in pairs]
 
 text = open(path, encoding="utf-8").read()
-if replace in text and search not in text:
+
+if all(new in text for _, new in pairs):
     print("NOOP")
     sys.exit(0)
-count = text.count(search)
-if count != 1:
-    print(f"MISMATCH: expected exactly 1 occurrence of the {mode!r} target line, found {count}", file=sys.stderr)
+if not all(old in text for old, _ in pairs):
+    print(
+        "MISMATCH: file is in a mixed state - some but not all target lines "
+        "found as expected. Not touching anything.",
+        file=sys.stderr,
+    )
     sys.exit(1)
-open(path, "w", encoding="utf-8").write(text.replace(search, replace, 1))
+for old, _ in pairs:
+    count = text.count(old)
+    if count != 1:
+        print(f"MISMATCH: expected exactly 1 occurrence of {old!r}, found {count}", file=sys.stderr)
+        sys.exit(1)
+for old, new in pairs:
+    text = text.replace(old, new, 1)
+open(path, "w", encoding="utf-8").write(text)
 print("CHANGED")
 PYEOF
 }

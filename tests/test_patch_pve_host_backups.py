@@ -19,8 +19,10 @@ SCRIPT = ROOT / "deploy" / "patch-pve-host-backups.sh"
 _GIT_BASH = Path(r"C:\Program Files\Git\usr\bin\bash.exe")
 BASH = str(_GIT_BASH) if _GIT_BASH.is_file() else "bash"
 
-OLD_LINE = "next if !($btype eq 'vm' || $btype eq 'ct');"
-NEW_LINE = "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');"
+OLD_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct');"
+NEW_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');"
+OLD_LINE_2 = "next if $bid !~ m/^\\d+$/;"
+NEW_LINE_2 = "next if $btype ne 'host' && $bid !~ m/^\\d+$/;"
 
 
 def _extract_patch_py() -> str:
@@ -51,14 +53,20 @@ def test_script_is_valid_bash():
     assert result.returncode == 0, result.stderr
 
 
+def _fixture_text(line1: str, line2: str) -> str:
+    return f"sub list_volumes {{\n    {line1}\n    {line2}\n}}\n"
+
+
 def test_patch_py_apply_then_idempotent_reapply(tmp_path):
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text(f"sub list_volumes {{\n    {OLD_LINE}\n}}\n", encoding="utf-8")
+    fixture.write_text(_fixture_text(OLD_LINE_1, OLD_LINE_2), encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "CHANGED"
-    assert NEW_LINE in fixture.read_text(encoding="utf-8")
+    text = fixture.read_text(encoding="utf-8")
+    assert NEW_LINE_1 in text
+    assert NEW_LINE_2 in text
 
     result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 0, result.stderr
@@ -67,19 +75,21 @@ def test_patch_py_apply_then_idempotent_reapply(tmp_path):
 
 def test_patch_py_remove_reverts_exactly(tmp_path):
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text(f"sub list_volumes {{\n    {NEW_LINE}\n}}\n", encoding="utf-8")
+    fixture.write_text(_fixture_text(NEW_LINE_1, NEW_LINE_2), encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "remove")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "CHANGED"
     text = fixture.read_text(encoding="utf-8")
-    assert OLD_LINE in text
-    assert NEW_LINE not in text
+    assert OLD_LINE_1 in text
+    assert OLD_LINE_2 in text
+    assert NEW_LINE_1 not in text
+    assert NEW_LINE_2 not in text
 
 
 def test_patch_py_remove_on_never_patched_is_a_noop(tmp_path):
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text(f"sub list_volumes {{\n    {OLD_LINE}\n}}\n", encoding="utf-8")
+    fixture.write_text(_fixture_text(OLD_LINE_1, OLD_LINE_2), encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "remove")
     assert result.returncode == 0, result.stderr
@@ -87,14 +97,28 @@ def test_patch_py_remove_on_never_patched_is_a_noop(tmp_path):
 
 
 def test_patch_py_refuses_rather_than_guesses_on_a_changed_line(tmp_path):
-    # Simulates a future PVE version rewording the target line.
+    # Simulates a future PVE version rewording a target line.
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text("sub list_volumes {\n    next if 0;\n}\n", encoding="utf-8")
+    fixture.write_text("sub list_volumes {\n    next if 0;\n    next if 0;\n}\n", encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 1
     assert "MISMATCH" in result.stderr
-    assert fixture.read_text(encoding="utf-8") == "sub list_volumes {\n    next if 0;\n}\n"
+    assert fixture.read_text(encoding="utf-8") == "sub list_volumes {\n    next if 0;\n    next if 0;\n}\n"
+
+
+def test_patch_py_refuses_on_a_mixed_half_patched_state(tmp_path):
+    # Only the first of the two lines got patched somehow (e.g. a prior
+    # partial run, or hand-editing) - must refuse rather than silently
+    # patching just the second, which would leave an inconsistent file.
+    fixture = tmp_path / "PBSPlugin.pm"
+    fixture.write_text(_fixture_text(NEW_LINE_1, OLD_LINE_2), encoding="utf-8")
+
+    result = _run_patch_py(tmp_path, "apply")
+    assert result.returncode == 1
+    assert "MISMATCH" in result.stderr
+    assert "mixed state" in result.stderr
+    assert fixture.read_text(encoding="utf-8") == _fixture_text(NEW_LINE_1, OLD_LINE_2)
 
 
 def test_script_requires_root():
