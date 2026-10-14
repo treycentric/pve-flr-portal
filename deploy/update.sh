@@ -19,6 +19,11 @@ APP_USER="pveflr"
 SERVICE_NAME="pve-flr-portal"
 TARGET="${1:-latest}"
 
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Must be run as root (chown and the systemd unit need it)." >&2
+  exit 1
+fi
+
 cd "$APP_DIR"
 
 # Same "dubious ownership" issue install.sh works around - harmless to
@@ -77,6 +82,14 @@ chown -R "$APP_USER":"$APP_USER" "$APP_DIR/certs"
 chmod 750 "$APP_DIR/certs"
 chown root:"$APP_USER" "$APP_DIR/.env"
 chmod 640 "$APP_DIR/.env"
+
+check_owner() { [ "$(stat -c '%U:%G' "$1")" = "$2" ] || { echo "Expected $1 to be owned by $2, got $(stat -c '%U:%G' "$1")" >&2; exit 1; }; }
+check_mode() { [ "$(stat -c '%a' "$1")" = "$2" ] || { echo "Expected $1 to be mode $2, got $(stat -c '%a' "$1")" >&2; exit 1; }; }
+check_owner "$APP_DIR/requirements.txt" "root:root"
+check_owner "$APP_DIR/certs" "$APP_USER:$APP_USER"
+check_mode "$APP_DIR/certs" "750"
+check_owner "$APP_DIR/.env" "root:$APP_USER"
+check_mode "$APP_DIR/.env" "640"
 
 echo "==> Refreshing systemd unit"
 # Previously only install.sh wrote this file, so a unit-template change

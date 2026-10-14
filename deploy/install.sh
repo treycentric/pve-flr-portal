@@ -13,6 +13,11 @@ APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_USER="pveflr"
 SERVICE_NAME="pve-flr-portal"
 
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Must be run as root (apt-get, useradd, chown, and the systemd unit all need it)." >&2
+  exit 1
+fi
+
 # Git's "dubious ownership" safety check (CVE-2022-24765) rejects git
 # commands against a repo it doesn't consider safely owned - confirmed
 # live 2026-09-01 under an unprivileged LXC container, where a `pct exec`
@@ -46,6 +51,16 @@ chown -R "$APP_USER":"$APP_USER" "$APP_DIR/certs"
 chmod 750 "$APP_DIR/certs"
 chown root:"$APP_USER" "$APP_DIR/.env"
 chmod 640 "$APP_DIR/.env"
+
+# Verify the above actually took effect (e.g. a filesystem that doesn't
+# support ownership changes would silently no-op chown without this).
+check_owner() { [ "$(stat -c '%U:%G' "$1")" = "$2" ] || { echo "Expected $1 to be owned by $2, got $(stat -c '%U:%G' "$1")" >&2; exit 1; }; }
+check_mode() { [ "$(stat -c '%a' "$1")" = "$2" ] || { echo "Expected $1 to be mode $2, got $(stat -c '%a' "$1")" >&2; exit 1; }; }
+check_owner "$APP_DIR/requirements.txt" "root:root"
+check_owner "$APP_DIR/certs" "$APP_USER:$APP_USER"
+check_mode "$APP_DIR/certs" "750"
+check_owner "$APP_DIR/.env" "root:$APP_USER"
+check_mode "$APP_DIR/.env" "640"
 
 echo "==> Installing systemd unit"
 sed "s#__APP_DIR__#${APP_DIR}#g; s#__APP_USER__#${APP_USER}#g" \

@@ -81,6 +81,24 @@ def test_update_refreshes_the_systemd_unit_and_reloads_the_daemon():
     assert "systemctl daemon-reload" in text
 
 
+def test_install_and_update_require_root():
+    for name in ("install.sh", "update.sh"):
+        text = _script(name)
+        assert re.search(r'\[\s*"\$\(id -u\)"\s*-ne\s*0\s*\]', text), f"{name}: missing a root check"
+
+
+def test_install_and_update_verify_ownership_and_mode_took_effect():
+    for name in ("install.sh", "update.sh"):
+        text = _script(name)
+        for target, owner in (
+            ("certs", "$APP_USER:$APP_USER"),
+            (".env", "root:$APP_USER"),
+        ):
+            assert f'check_owner "$APP_DIR/{target}" "{owner}"' in text, f"{name}: missing ownership check for {target}"
+        assert 'check_mode "$APP_DIR/certs" "750"' in text, f"{name}: missing mode check for certs/"
+        assert 'check_mode "$APP_DIR/.env" "640"' in text, f"{name}: missing mode check for .env"
+
+
 def test_unit_template_grants_write_access_to_certs_only():
     text = (DEPLOY / "pve-flr-portal.service.template").read_text(encoding="utf-8")
     match = re.search(r"^ReadWritePaths=(.+)$", text, re.MULTILINE)
