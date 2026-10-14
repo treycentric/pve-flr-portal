@@ -66,7 +66,24 @@ echo "==> Installing dependencies"
 "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
 "$APP_DIR/.venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
 
-chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+# Re-applies install.sh's root-owned-app-dir/certs-only layout (#137),
+# migrating an existing install. Note: an install from before #137 needs
+# this script run twice - the checkout above updates the file on disk,
+# but the process already running this update is still the old version
+# that doesn't do any of this. Or just run install.sh once instead.
+chown -R root:root "$APP_DIR"
+mkdir -p "$APP_DIR/certs"
+chown -R "$APP_USER":"$APP_USER" "$APP_DIR/certs"
+chmod 750 "$APP_DIR/certs"
+chown root:"$APP_USER" "$APP_DIR/.env"
+chmod 640 "$APP_DIR/.env"
+
+echo "==> Refreshing systemd unit"
+# Previously only install.sh wrote this file, so a unit-template change
+# (like #137's ReadWritePaths narrowing) could leave an update's unit stale.
+sed "s#__APP_DIR__#${APP_DIR}#g; s#__APP_USER__#${APP_USER}#g" \
+  "$APP_DIR/deploy/pve-flr-portal.service.template" > "/etc/systemd/system/${SERVICE_NAME}.service"
+systemctl daemon-reload
 
 echo "==> Restarting $SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"

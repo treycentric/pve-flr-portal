@@ -16,11 +16,7 @@ SERVICE_NAME="pve-flr-portal"
 # Git's "dubious ownership" safety check (CVE-2022-24765) rejects git
 # commands against a repo it doesn't consider safely owned - confirmed
 # live 2026-09-01 under an unprivileged LXC container, where a `pct exec`
-# root shell's git still tripped this against a root-owned clone. --system
-# (not --global) so this holds regardless of which user runs git here -
-# root today, but also $APP_USER after the chown below changes this
-# directory's actual owner, and either way every future `deploy/update.sh`
-# run (issue #89) would otherwise trip the exact same error on.
+# root shell's git still tripped this against a root-owned clone.
 git config --system --add safe.directory "$APP_DIR"
 
 echo "==> Installing OS packages"
@@ -42,17 +38,24 @@ if [ ! -f "$APP_DIR/.env" ]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"
 fi
 
-chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+# App dir is root-owned and read-only to the service (#137); certs/ is
+# the one subtree it can write, .env readable only by root + the service.
+chown -R root:root "$APP_DIR"
+mkdir -p "$APP_DIR/certs"
+chown -R "$APP_USER":"$APP_USER" "$APP_DIR/certs"
+chmod 750 "$APP_DIR/certs"
+chown root:"$APP_USER" "$APP_DIR/.env"
+chmod 640 "$APP_DIR/.env"
 
 echo "==> Installing systemd unit"
-# The unit's StateDirectory=pve-flr-portal makes systemd create + own
-# /var/lib/pve-flr-portal (PFR_DATA_DIR, issue #30) on first start - no
-# mkdir/chown needed here, and `systemctl enable --now` below triggers it.
 sed "s#__APP_DIR__#${APP_DIR}#g; s#__APP_USER__#${APP_USER}#g" \
   "$APP_DIR/deploy/pve-flr-portal.service.template" > "/etc/systemd/system/${SERVICE_NAME}.service"
 
 systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
+# enable (idempotent) + restart, not `enable --now` - `--now` won't
+# restart an already-running unit, so a reinstall would keep stale code.
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
 
 echo
 echo "==> Installed. Service status:"
