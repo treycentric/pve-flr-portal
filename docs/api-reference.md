@@ -184,15 +184,18 @@ check was added.
 
 A few lines further down, `list_volumes` also sets `vmid => int($bid)`
 and `subtype => $btype eq 'vm' ? 'qemu' : 'lxc'` for every entry -
-for a `host` backup these come out as `vmid => 0` and `subtype =>
-'lxc'`, both wrong (a hostname isn't 0, and a host backup isn't a
-container). `deploy/patch-pve-host-backups.sh` does not touch
-either of these - this app parses guest type from the `volid` itself,
-never `subtype` (see `file-restore/list` above), so it's unaffected;
-PVE's own GUI may show a host backup mislabeled as an LXC with vmid 0
-as a result. Cosmetic only, left alone to keep the patch's footprint
-minimal - worth revisiting if that mislabeling turns out to matter in
-practice.
+wrong for a `host` backup (a hostname isn't a vmid, and a host backup
+isn't a container), and confirmed live to be more than cosmetic:
+`int()` on a non-numeric `$bid` prints `Argument "<hostname>" isn't
+numeric in int` to stderr on *every single listing query* once the
+two lines above let host entries through at all. This app itself was
+never affected either way - it parses guest type from the `volid`
+itself, never `subtype` (see `file-restore/list` above) - but the
+stderr noise on every query was reason enough to patch these two as
+well, same exact-match-or-refuse approach, via
+`deploy/patch-pve-host-backups.sh`: `vmid` becomes `undef` and
+`subtype` becomes `undef` for a `host` entry, `vm`/`ct` behavior
+unchanged.
 
 **The fix: `deploy/patch-pve-host-backups.sh`** (CLAUDE.md's "last
 resort" patching exception) - an opt-in, exact-match-or-refuse,

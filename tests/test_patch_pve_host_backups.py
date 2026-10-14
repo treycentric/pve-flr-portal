@@ -23,6 +23,12 @@ OLD_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct');"
 NEW_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');"
 OLD_LINE_2 = "next if $bid !~ m/^\\d+$/;"
 NEW_LINE_2 = "next if $btype ne 'host' && $bid !~ m/^\\d+$/;"
+OLD_LINE_3 = "vmid => int($bid),"
+NEW_LINE_3 = "vmid => ($btype eq 'host' ? undef : int($bid)),"
+OLD_LINE_4 = "subtype => $btype eq 'vm' ? 'qemu' : 'lxc',"
+NEW_LINE_4 = "subtype => $btype eq 'vm' ? 'qemu' : $btype eq 'ct' ? 'lxc' : undef,"
+ALL_OLD = [OLD_LINE_1, OLD_LINE_2, OLD_LINE_3, OLD_LINE_4]
+ALL_NEW = [NEW_LINE_1, NEW_LINE_2, NEW_LINE_3, NEW_LINE_4]
 
 
 def _extract_patch_py() -> str:
@@ -53,20 +59,21 @@ def test_script_is_valid_bash():
     assert result.returncode == 0, result.stderr
 
 
-def _fixture_text(line1: str, line2: str) -> str:
-    return f"sub list_volumes {{\n    {line1}\n    {line2}\n}}\n"
+def _fixture_text(*lines: str) -> str:
+    body = "\n    ".join(lines)
+    return f"sub list_volumes {{\n    {body}\n}}\n"
 
 
 def test_patch_py_apply_then_idempotent_reapply(tmp_path):
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text(_fixture_text(OLD_LINE_1, OLD_LINE_2), encoding="utf-8")
+    fixture.write_text(_fixture_text(*ALL_OLD), encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "CHANGED"
     text = fixture.read_text(encoding="utf-8")
-    assert NEW_LINE_1 in text
-    assert NEW_LINE_2 in text
+    for new_line in ALL_NEW:
+        assert new_line in text
 
     result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 0, result.stderr
@@ -75,21 +82,20 @@ def test_patch_py_apply_then_idempotent_reapply(tmp_path):
 
 def test_patch_py_remove_reverts_exactly(tmp_path):
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text(_fixture_text(NEW_LINE_1, NEW_LINE_2), encoding="utf-8")
+    fixture.write_text(_fixture_text(*ALL_NEW), encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "remove")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "CHANGED"
     text = fixture.read_text(encoding="utf-8")
-    assert OLD_LINE_1 in text
-    assert OLD_LINE_2 in text
-    assert NEW_LINE_1 not in text
-    assert NEW_LINE_2 not in text
+    for old_line, new_line in zip(ALL_OLD, ALL_NEW):
+        assert old_line in text
+        assert new_line not in text
 
 
 def test_patch_py_remove_on_never_patched_is_a_noop(tmp_path):
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text(_fixture_text(OLD_LINE_1, OLD_LINE_2), encoding="utf-8")
+    fixture.write_text(_fixture_text(*ALL_OLD), encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "remove")
     assert result.returncode == 0, result.stderr
@@ -99,42 +105,44 @@ def test_patch_py_remove_on_never_patched_is_a_noop(tmp_path):
 def test_patch_py_refuses_rather_than_guesses_on_a_changed_line(tmp_path):
     # Simulates a future PVE version rewording a target line.
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text("sub list_volumes {\n    next if 0;\n    next if 0;\n}\n", encoding="utf-8")
+    broken = _fixture_text("next if 0;", "next if 0;", "next if 0;", "next if 0;")
+    fixture.write_text(broken, encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 1
     assert "MISMATCH" in result.stderr
-    assert fixture.read_text(encoding="utf-8") == "sub list_volumes {\n    next if 0;\n    next if 0;\n}\n"
+    assert fixture.read_text(encoding="utf-8") == broken
 
 
-def test_patch_py_resumes_when_only_one_line_was_patched_before(tmp_path):
+def test_patch_py_resumes_when_only_some_lines_were_patched_before(tmp_path):
     # Real scenario hit live (#155): an earlier version of this script
-    # only patched the first line. Re-running the current version must
-    # finish the second line, not treat "line 1 already new, line 2
-    # still old" as an error - that's the normal resume case, not a
-    # mismatch.
+    # only patched the first two lines. Re-running the current version
+    # must finish the remaining two, not treat "some lines already new,
+    # some still old" as an error - that's the normal resume case, not
+    # a mismatch.
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text(_fixture_text(NEW_LINE_1, OLD_LINE_2), encoding="utf-8")
+    fixture.write_text(_fixture_text(NEW_LINE_1, NEW_LINE_2, OLD_LINE_3, OLD_LINE_4), encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "CHANGED"
     text = fixture.read_text(encoding="utf-8")
-    assert NEW_LINE_1 in text
-    assert NEW_LINE_2 in text
+    for new_line in ALL_NEW:
+        assert new_line in text
 
 
 def test_patch_py_refuses_whole_batch_if_one_line_is_genuinely_unrecognized(tmp_path):
     # One line matches neither its expected old nor new form (e.g. PVE
-    # reworded it) while the other is still perfectly normal - must
-    # still refuse the whole file, not patch just the recognizable line.
+    # reworded it) while the others are still perfectly normal - must
+    # still refuse the whole file, not patch just the recognizable lines.
     fixture = tmp_path / "PBSPlugin.pm"
-    fixture.write_text(_fixture_text("next if 0;", OLD_LINE_2), encoding="utf-8")
+    broken = _fixture_text("next if 0;", OLD_LINE_2, OLD_LINE_3, OLD_LINE_4)
+    fixture.write_text(broken, encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 1
     assert "MISMATCH" in result.stderr
-    assert fixture.read_text(encoding="utf-8") == _fixture_text("next if 0;", OLD_LINE_2)
+    assert fixture.read_text(encoding="utf-8") == broken
 
 
 def test_script_requires_root():

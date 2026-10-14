@@ -25,14 +25,24 @@
 # runs after any permission/ACL check - both run before it, so no
 # amount of PVE role/ACL configuration can route around either one.
 # There is no supported PVE API path around this (docs/api-reference.md)
-# - the only fix is this two-line patch, NOT officially supported by
-# Proxmox, reverted by every pve-storage package update (the dpkg hook
-# below reapplies it automatically after that happens).
+# - the only fix is this patch, NOT officially supported by Proxmox,
+# reverted by every pve-storage package update (the dpkg hook below
+# reapplies it automatically after that happens).
+#
+# Two more lines (also confirmed live, once the two above let host
+# entries through at all) set `vmid => int($bid)` and `subtype =>
+# 'lxc'` unconditionally for every entry - wrong for a host backup
+# (whose id is a hostname, not a vmid) and noisy: int() on a non-
+# numeric string prints "Argument ... isn't numeric in int" to stderr
+# on every single listing query. Patched too, same way, even though
+# this app itself doesn't read either field (it parses guest type from
+# the volid - see docs/api-reference.md).
 #
 # Safety: this only ever does EXACT, literal string replacements of the
-# two lines above, applied atomically (if either target isn't found
-# exactly once, NEITHER is changed). If a future PVE version has
-# reworded/refactored either one, the match naturally fails and this
+# four lines above, applied atomically (if any target isn't found
+# exactly once, NONE are changed - see the script body for the exact
+# per-line resume/mismatch rules). If a future PVE version has
+# reworded/refactored one of them, the match naturally fails and this
 # refuses to touch the file at all rather than guessing at a fuzzy
 # match - re-run this script (it'll tell you) once docs/api-reference.md
 # has been updated for whatever changed.
@@ -65,6 +75,20 @@ pairs = [
     (
         r"next if $bid !~ m/^\d+$/;",
         r"next if $btype ne 'host' && $bid !~ m/^\d+$/;",
+    ),
+    (
+        # Confirmed live 2026-10: int() on a hostname-shaped $bid prints
+        # "Argument ... isn't numeric in int" to stderr on every single
+        # listing query once the two lines above let host entries
+        # through - cosmetic (this app reads guest type from the volid,
+        # never vmid/subtype), but worth silencing rather than spamming
+        # the journal indefinitely.
+        "vmid => int($bid),",
+        "vmid => ($btype eq 'host' ? undef : int($bid)),",
+    ),
+    (
+        "subtype => $btype eq 'vm' ? 'qemu' : 'lxc',",
+        "subtype => $btype eq 'vm' ? 'qemu' : $btype eq 'ct' ? 'lxc' : undef,",
     ),
 ]
 if mode == "remove":
