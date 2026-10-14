@@ -57,8 +57,6 @@ _patch_py() {
 import sys
 
 path, mode = sys.argv[1], sys.argv[2]
-# Order matters for readability only, not correctness - applied as one
-# atomic batch regardless.
 pairs = [
     (
         "next if !($btype eq 'vm' || $btype eq 'ct');",
@@ -74,23 +72,27 @@ if mode == "remove":
 
 text = open(path, encoding="utf-8").read()
 
-if all(new in text for _, new in pairs):
+# Each line is judged independently - already-applied-for-this-line is
+# not a mismatch, it's the normal case for resuming after an earlier,
+# older version of this script only patched some of the lines (#155).
+# A real mismatch (a line that's neither the expected search nor its
+# already-applied replacement) still aborts the whole batch before
+# writing anything - this pass is read-only until every line checks out.
+to_apply = []
+for search, replace in pairs:
+    if replace in text and search not in text:
+        continue  # already applied for this specific line
+    count = text.count(search)
+    if count != 1:
+        print(f"MISMATCH: expected exactly 1 occurrence of {search!r}, found {count}", file=sys.stderr)
+        sys.exit(1)
+    to_apply.append((search, replace))
+
+if not to_apply:
     print("NOOP")
     sys.exit(0)
-if not all(old in text for old, _ in pairs):
-    print(
-        "MISMATCH: file is in a mixed state - some but not all target lines "
-        "found as expected. Not touching anything.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-for old, _ in pairs:
-    count = text.count(old)
-    if count != 1:
-        print(f"MISMATCH: expected exactly 1 occurrence of {old!r}, found {count}", file=sys.stderr)
-        sys.exit(1)
-for old, new in pairs:
-    text = text.replace(old, new, 1)
+for search, replace in to_apply:
+    text = text.replace(search, replace, 1)
 open(path, "w", encoding="utf-8").write(text)
 print("CHANGED")
 PYEOF

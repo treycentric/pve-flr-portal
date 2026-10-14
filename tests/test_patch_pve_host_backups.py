@@ -107,18 +107,34 @@ def test_patch_py_refuses_rather_than_guesses_on_a_changed_line(tmp_path):
     assert fixture.read_text(encoding="utf-8") == "sub list_volumes {\n    next if 0;\n    next if 0;\n}\n"
 
 
-def test_patch_py_refuses_on_a_mixed_half_patched_state(tmp_path):
-    # Only the first of the two lines got patched somehow (e.g. a prior
-    # partial run, or hand-editing) - must refuse rather than silently
-    # patching just the second, which would leave an inconsistent file.
+def test_patch_py_resumes_when_only_one_line_was_patched_before(tmp_path):
+    # Real scenario hit live (#155): an earlier version of this script
+    # only patched the first line. Re-running the current version must
+    # finish the second line, not treat "line 1 already new, line 2
+    # still old" as an error - that's the normal resume case, not a
+    # mismatch.
     fixture = tmp_path / "PBSPlugin.pm"
     fixture.write_text(_fixture_text(NEW_LINE_1, OLD_LINE_2), encoding="utf-8")
 
     result = _run_patch_py(tmp_path, "apply")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "CHANGED"
+    text = fixture.read_text(encoding="utf-8")
+    assert NEW_LINE_1 in text
+    assert NEW_LINE_2 in text
+
+
+def test_patch_py_refuses_whole_batch_if_one_line_is_genuinely_unrecognized(tmp_path):
+    # One line matches neither its expected old nor new form (e.g. PVE
+    # reworded it) while the other is still perfectly normal - must
+    # still refuse the whole file, not patch just the recognizable line.
+    fixture = tmp_path / "PBSPlugin.pm"
+    fixture.write_text(_fixture_text("next if 0;", OLD_LINE_2), encoding="utf-8")
+
+    result = _run_patch_py(tmp_path, "apply")
     assert result.returncode == 1
     assert "MISMATCH" in result.stderr
-    assert "mixed state" in result.stderr
-    assert fixture.read_text(encoding="utf-8") == _fixture_text(NEW_LINE_1, OLD_LINE_2)
+    assert fixture.read_text(encoding="utf-8") == _fixture_text("next if 0;", OLD_LINE_2)
 
 
 def test_script_requires_root():
