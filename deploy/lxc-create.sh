@@ -10,7 +10,7 @@
 #   bash deploy/lxc-create.sh
 #
 # Override any of these via environment variables before running, e.g.
-# STORAGE=local-zfs BRIDGE=vmbr1 bash deploy/lxc-create.sh
+# STORAGE=local-zfs BRIDGE=vmbr1 VLAN_TAG=100 bash deploy/lxc-create.sh
 set -euo pipefail
 
 CTID="${CTID:-$(pvesh get /cluster/nextid)}"
@@ -30,6 +30,7 @@ MEMORY_MB="${MEMORY_MB:-512}"
 CORES="${CORES:-1}"
 BRIDGE="${BRIDGE:-vmbr0}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"   # or e.g. "10.0.0.50/24,gw=10.0.0.1"
+VLAN_TAG="${VLAN_TAG:-}"        # optional, e.g. "100" - leave unset for no tag
 REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
 
 echo "==> pve-flr-portal LXC setup"
@@ -63,6 +64,11 @@ if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
   pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 fi
 
+NET0="name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG}"
+if [ -n "$VLAN_TAG" ]; then
+  NET0="${NET0},tag=${VLAN_TAG}"
+fi
+
 echo "==> Creating container $CTID"
 pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --hostname "$CT_HOSTNAME" \
@@ -72,7 +78,7 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --memory "$MEMORY_MB" \
   --swap 512 \
   --rootfs "${STORAGE}:${DISK_GB}" \
-  --net0 "name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG}" \
+  --net0 "$NET0" \
   --onboot 1 \
   --start 1
 
