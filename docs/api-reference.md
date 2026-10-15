@@ -122,7 +122,7 @@ GET /api2/json/nodes/{node}/storage/{storage}/file-restore/download
   Descriptor either — a confirmed upstream gap, not something fixable
   from this app).
 
-## `host`-type backups (issue #155)
+## `host`-type backups
 
 PBS's `backup-type` has exactly three values — `vm`, `ct`, `host` — no
 fourth "generic file-level backup" type exists; `host` is already the
