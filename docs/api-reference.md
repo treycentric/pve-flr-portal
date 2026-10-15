@@ -138,11 +138,14 @@ tool description, which handles `pxar.didx` (containers, hosts) and
 app's browse/tree/download code is already gated on `== "vm"` for
 every disk/LVM-specific code path (`_apply_lvm_view`,
 `_is_partition_listing`, etc.) — "not vm" already means "flat pxar
-tree," so a `host` volid should get CT-like treatment for free, with
-no VM-specific logic ever applying to it. This part is still reasoned
-from source, not confirmed live - see the much bigger, now-confirmed
-blocker below, which has to be fixed before any of this can even be
-exercised against real traffic.
+tree," so a `host` volid gets CT-like treatment for free, with no
+VM-specific logic ever applying to it. **Confirmed live (2026-10,
+once the listing blocker below was fixed)**: browse and download both
+work exactly as reasoned here, no app-code changes needed - including
+through an encrypted host backup, with the encryption key uploaded to
+the PVE storage entry's own Encryption Key tab (README's "Browse Host
+Backups") - PVE decrypts transparently during file-restore, same as
+for any other encrypted backup.
 
 **Confirmed live (2026-10): PVE's own storage-listing code drops
 `host` backups unconditionally, before any permission check runs -
