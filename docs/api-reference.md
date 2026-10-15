@@ -122,6 +122,107 @@ GET /api2/json/nodes/{node}/storage/{storage}/file-restore/download
   Descriptor either — a confirmed upstream gap, not something fixable
   from this app).
 
+## `host`-type backups
+
+A `host`-type backup (`proxmox-backup-client backup --backup-type
+host`) is PBS's generic file-level backup type — `backup-type` has
+exactly three values (`vm`, `ct`, `host`), no fourth type exists. Its
+volid is `<storage-id>:backup/host/<hostname>/<ISO8601 timestamp>Z` —
+same shape as `vm`/`ct`, with a hostname in place of a numeric vmid.
+It's stored as a `pxar.didx` archive, the same format `ct` backups
+use (not an `img.fidx` disk image like `vm`). This app's browse/tree/
+download code is gated on `== "vm"` for every disk/LVM-specific code
+path (`_apply_lvm_view`, `_is_partition_listing`, etc.), so a `host`
+volid gets the same flat-pxar-tree treatment as a `ct` backup, with
+no VM-specific logic ever applying to it — browse and download work
+with no app-code changes, including through an encrypted host backup
+(encryption key uploaded to the PVE storage entry's own Encryption
+Key tab, README's "Browse Host Backups") — PVE decrypts transparently
+during file-restore, same as for any other encrypted backup.
+
+**PVE's own `PVE::Storage::PBSPlugin::list_volumes`
+(`pve-storage.git`, `src/PVE/Storage/PBSPlugin.pm`) drops `host`
+backups from every storage content listing before any permission
+check runs:**
+
+```perl
+next if !($btype eq 'vm' || $btype eq 'ct');
+next if $bid !~ m/^\d+$/;
+```
+
+Both lines gate independently — the first restricts the type, the
+second separately requires the backup-id to be numeric, which a
+hostname never is — so both have to be patched together. This is the
+function behind both PVE's own "Backups" content-tab listing and this
+app's `pve_client.list_backup_archives()` (via `GET /nodes/localhost/
+storage/{storage}/content?content=backup`) — there is no other PVE
+API surface this app is willing to use instead (CLAUDE.md's "never
+talks to PBS directly"). Neither line runs after any ACL check, so no
+permission grant, for any caller including `root@pam`, routes around
+either one.
+
+A few lines further down, `list_volumes` also sets `vmid =>
+int($bid)` and `subtype => $btype eq 'vm' ? 'qemu' : 'lxc'` for every
+entry — wrong for a `host` backup (a hostname isn't a vmid, a host
+backup isn't a container), and `int()` on a non-numeric `$bid` prints
+a warning to stderr on every listing query. This app doesn't read
+either field (it parses guest type from the `volid` itself, never
+`subtype`), but both are patched anyway to keep PVE's own output
+clean.
+
+**The fix: `deploy/patch-pve-host-backups.sh`** (CLAUDE.md's "last
+resort" patching exception) — an opt-in, exact-match-or-refuse patch
+to the lines above, installed with a dpkg hook so it survives
+`pve-storage` package updates. Needs to run on every node in a cluster
+— the content-listing call can be served by any node. See that
+script's own header for the full rationale, and README's "Browse Host
+Backups" for the user-facing setup flow. The patch also unlocks host
+backups in PVE's own native "Backups" tab and File Restore button,
+not just this app — it's the same underlying endpoints either way.
+
+**Known rough edge, left as-is:** PVE's "Backups" grid renders the
+same row actions for every backup regardless of type — `Restore`,
+`Show Configuration`, and `Change Protection` all assume a VM/CT guest
+behind the entry, none of which exist for a `host` backup, and none of
+the three work correctly on one. `File Restore` is the one that
+matters here and it works fine. Fixing the other three would mean
+patching PVE's own frontend to recognize `host`-type rows — out of
+scope for this app.
+
+**Permissions: `Datastore.Allocate` + `Datastore.Audit`, no narrower
+grant exists.** Traced through `PVE::Storage::check_volume_access`
+(`pve-storage.git`, `src/PVE/Storage.pm`): for a `backup`-type volid it
+only takes the `Datastore.AllocateSpace` + `VM.Backup`-on-`/vms/{vmid}`
+path (what `FileRestoreReader` grants) when `$ownervm` is defined —
+and `PBSPlugin.pm`'s `parse_volname` only ever sets `$ownervm` when
+`$btype` is `vm` or `ct` *and* the id is digits-only. For `host`,
+`$ownervm` is always `undef`, so that branch never matches; every
+other branch is for a different `$vtype` (`iso`/`vztmpl`/`import`,
+`images`/`rootdir`, `snippets`), so a `host` backup falls through to
+`die "missing privileges to access $volid"` unless the caller already
+holds `Datastore.Allocate` on `/storage/{sid}`, checked unconditionally
+before any of those branches. That's the only path — there's no
+privilege between "nothing" and "storage admin" for a host backup
+specifically.
+
+`Datastore.Allocate` alone isn't sufficient either — a backup has to
+pass `PVE::API2::Storage::Content`'s own listing gate first, which
+needs `Datastore.Audit` *or* `Datastore.AllocateSpace`
+(`Datastore.Allocate` is not in that list and does not imply either —
+they're independent privilege bits). `FileRestoreReaderHost`'s
+`Datastore.Allocate,Datastore.Audit` (README's "Browse Host Backups")
+is the minimal pair that clears both gates.
+
+PBS has its own, separate ACL layer the PVE storage entry's own
+credential has to clear too: a PVE storage entry whose PBS-side
+user/token only holds `DatastoreBackup` on the datastore can't see
+backups it didn't itself create — `DatastoreBackup` is ownership-
+scoped on the PBS side, not purely namespace-scoped. A different PBS
+identity's backups (e.g. a separate service account doing host
+backups directly via `proxmox-backup-client`) need `DatastoreReader`
+(or broader) granted on PBS's own Permissions page for that namespace,
+independent of anything in PVE.
+
 ## `qemu-guest-agent` (QGA) — `agent/file-write`, `agent/file-read`, `guest-exec`
 
 ```

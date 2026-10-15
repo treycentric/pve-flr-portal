@@ -56,6 +56,35 @@ def test_index_lists_groups_and_defaults_to_first(client):
     assert "webserver" in body
 
 
+def test_index_groups_a_host_backup_with_no_guest_name_resolution(session_data, monkeypatch):
+    # Issue #155: a host backup's "vmid" is a hostname, not a numeric id -
+    # list_guest_names (keyed by /cluster/resources, vm/ct only) never has
+    # an entry for it, so the label falls back to "HOST <hostname>".
+    archives = [
+        {"volid": "pbs-host:backup/host/pve01/2026-05-14T12:56:57Z", "ctime": 50, "size": 1, "verification": {}},
+    ]
+
+    async def fake_archives(session):
+        return pve_client.BackupListing(archives=archives)
+
+    async def fake_names(session):
+        return {}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    main.app.dependency_overrides[auth.get_session_keepalive] = lambda: session_data
+    try:
+        with TestClient(main.app) as c:
+            resp = c.get("/", params={"task": "host:pve01"})
+    finally:
+        main.app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    body = resp.text
+    assert "HOST pve01" in body
+    assert "2026-05-14T12:56:57Z" in body
+
+
 def test_index_respects_task_query(client):
     resp = client.get("/", params={"task": "vm:133"})
     assert resp.status_code == 200
@@ -767,6 +796,19 @@ def test_tree_filepath_is_not_interpolated_into_inline_js(client, monkeypatch):
 def test_restore_capabilities_rejects_unknown_guest_type(client):
     resp = client.get("/api/restore-capabilities", params={"type": "bogus", "vmid": "133"})
     assert resp.status_code == 400
+
+
+def test_restore_capabilities_host_backup_is_a_clean_unavailable_not_a_400(client):
+    # Issue #155: a host backup has no guest to push into - this must be
+    # a normal 200/unavailable, not a 400, or the frontend's restore
+    # button gets stuck on "Checking restore availability..." forever
+    # (it treats any non-2xx as "never loaded", not "loaded: false").
+    resp = client.get("/api/restore-capabilities", params={"type": "host", "vmid": "myhostname"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["file_write"]["available"] is False
+    assert body["guest_exec"]["available"] is False
+    assert "host backup" in body["guest_exec"]["reason"]
 
 
 def test_restore_capabilities_returns_capability_json(client, monkeypatch):

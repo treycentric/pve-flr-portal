@@ -872,6 +872,18 @@ async def tree(
     )
 
 
+def _unavailable_restore_capabilities(reason: str) -> "guest_agent.RestoreCapabilities":
+    unavailable = guest_agent.PathAvailability(False, reason)
+    return guest_agent.RestoreCapabilities(
+        agent_running=False,
+        pve_version_ok=False,
+        guest_os_family=None,
+        file_write=unavailable,
+        guest_exec=unavailable,
+        verify_supported=False,
+    )
+
+
 @app.get("/api/restore-capabilities")
 async def restore_capabilities(
     type: str,
@@ -886,7 +898,13 @@ async def restore_capabilities(
     implies, not something that should ever crash the button. `type` is
     the app-internal "vm"/"ct" value (matching the task picker/groups
     elsewhere) - guest_agent.py translates it to PVE's "qemu"/"lxc" API
-    node segment."""
+    node segment. A `host` backup (issue #155) has no guest to push into
+    at all - a clean "unavailable" response here, not a 400, since the
+    frontend treats a non-2xx as "never loaded" and gets stuck showing
+    "Checking restore availability..." forever."""
+    if type == "host":
+        caps = _unavailable_restore_capabilities("push-to-guest restore is not supported for host backups")
+        return JSONResponse(dataclasses.asdict(caps))
     if type not in ("vm", "ct"):
         raise HTTPException(status_code=400, detail=f"Unknown guest type: {type}")
     try:
@@ -908,15 +926,7 @@ async def restore_capabilities(
         else:
             _log.warning("restore-capabilities for %s %s: %s", type, vmid, exc)
             reason = f"couldn't reach PVE to check this guest ({exc.__class__.__name__})"
-        unavailable = guest_agent.PathAvailability(False, reason)
-        caps = guest_agent.RestoreCapabilities(
-            agent_running=False,
-            pve_version_ok=False,
-            guest_os_family=None,
-            file_write=unavailable,
-            guest_exec=unavailable,
-            verify_supported=False,
-        )
+        caps = _unavailable_restore_capabilities(reason)
     return JSONResponse(dataclasses.asdict(caps))
 
 
