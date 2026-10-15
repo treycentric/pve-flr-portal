@@ -232,6 +232,17 @@ needs decrypted access to, upload it on this same storage entry's
 decrypts transparently during file-restore once the key is there,
 whether or not PVE itself made the backup.
 
+**This also unlocks host backups in PVE's own native "Backups" tab**,
+including its own File Restore button — not just this app, since
+`deploy/patch-pve-host-backups.sh` works by fixing what PVE itself
+hands back, the same way regardless of caller. Confirmed live: `Restore`,
+`Show Configuration`, and `Change Protection` on a host backup's row in
+PVE's GUI don't work correctly - PVE didn't design those for a backup
+with no VM/CT behind it. `File Restore` is the one that matters and
+it's fine. Fixing the other three would mean patching PVE's own
+frontend to hide them for `host`-type rows specifically - out of scope
+here; this is a known, accepted rough edge, not a bug to report.
+
 **1. Create the role** (once, on the PVE node — skip if it already
 exists):
 

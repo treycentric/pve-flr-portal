@@ -248,6 +248,26 @@ against PVE's built-in `PVEDatastoreAdmin` role, which bundles
 `Datastore.Allocate,Datastore.Audit` (README's "Browse Host Backups")
 is the minimal pair that clears both gates.
 
+**The patch also unlocks host backups in PVE's own native "Backups"
+tab, not just this app — including PVE's own File Restore button,
+confirmed live.** It's the same `file-restore/list`/`download`
+endpoints either way; the patch's job was only ever getting
+`list_volumes` to hand the entry to PVE's GUI at all (above), not
+anything specific to this app.
+
+**Known rough edge, confirmed live, left as-is:** PVE's "Backups" grid
+renders the same row actions for every backup regardless of type -
+`Restore`, `Show Configuration`, and `Change Protection` all assume a
+VM/CT guest behind the entry (a config blob to restore into, a vmid to
+reconfigure, etc.), none of which exist for a `host` backup, and none
+of the three work correctly on one. `File Restore` is the one that
+matters here and it works fine. A real fix would mean patching PVE's
+own ExtJS frontend to recognize `host`-type rows and hide the buttons
+that don't apply to them - a meaningfully bigger, separate patching
+project, and well outside what this app sets out to do. Not planned;
+documented here so it isn't mistaken for a bug in this app or in the
+patch above.
+
 ## `qemu-guest-agent` (QGA) — `agent/file-write`, `agent/file-read`, `guest-exec`
 
 ```

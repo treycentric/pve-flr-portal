@@ -69,8 +69,13 @@ import sys
 path, mode = sys.argv[1], sys.argv[2]
 pairs = [
     (
+        # Sentinel comment (no issue number - this is someone else's
+        # codebase) rides along on this one line so a later run, or a
+        # human reading the file, can tell "pve-flr-portal did this" apart
+        # from any other unrecognized modification near the same code.
         "next if !($btype eq 'vm' || $btype eq 'ct');",
-        "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');",
+        "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host'); "
+        "# patched by pve-flr-portal, see deploy/patch-pve-host-backups.sh",
     ),
     (
         r"next if $bid !~ m/^\d+$/;",
@@ -138,9 +143,17 @@ fi
 
 echo "==> Patching $PBS_PLUGIN_PATH"
 if ! result=$(_patch_py apply); then
-  echo "Refusing to patch - see the MISMATCH detail above. This almost certainly" >&2
-  echo "means a PVE update reworded the target line; check docs/api-reference.md" >&2
-  echo "for an update, or open an issue with your PVE version." >&2
+  echo "Refusing to patch - see the MISMATCH detail above." >&2
+  if grep -q "patched by pve-flr-portal" "$PBS_PLUGIN_PATH"; then
+    echo "This file already carries this script's own sentinel comment, so" >&2
+    echo "something unexpected happened to an already-patched line - check it" >&2
+    echo "by hand before re-running." >&2
+  else
+    echo "This almost certainly means a PVE update reworded the target line," >&2
+    echo "or some other tool already modified this same code - check" >&2
+    echo "docs/api-reference.md for an update, or open an issue with your PVE" >&2
+    echo "version." >&2
+  fi
   exit 1
 fi
 

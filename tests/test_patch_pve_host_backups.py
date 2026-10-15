@@ -20,7 +20,10 @@ _GIT_BASH = Path(r"C:\Program Files\Git\usr\bin\bash.exe")
 BASH = str(_GIT_BASH) if _GIT_BASH.is_file() else "bash"
 
 OLD_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct');"
-NEW_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');"
+NEW_LINE_1 = (
+    "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host'); "
+    "# patched by pve-flr-portal, see deploy/patch-pve-host-backups.sh"
+)
 OLD_LINE_2 = "next if $bid !~ m/^\\d+$/;"
 NEW_LINE_2 = "next if $btype ne 'host' && $bid !~ m/^\\d+$/;"
 OLD_LINE_3 = "vmid => int($bid),"

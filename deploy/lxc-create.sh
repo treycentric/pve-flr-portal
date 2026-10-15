@@ -51,7 +51,9 @@ if [ -z "$ENABLE_HOST_BACKUPS" ]; then
     echo "(docs/api-reference.md). The patch is opt-in, exact-match-or-"
     echo "refuse (never guesses at a changed PVE version), and reapplies"
     echo "itself after pve-storage updates via a dpkg hook - but it is"
-    echo "NOT officially supported by Proxmox. See"
+    echo "NOT officially supported by Proxmox. Also unlocks host backups"
+    echo "in PVE's own native Backups tab, not just this app (with a few"
+    echo "known-broken, out-of-scope buttons there - see the README). See"
     echo "deploy/patch-pve-host-backups.sh for the exact change."
     read -r -p "Enable host-backup support now? [y/N] " _reply || _reply=""
     case "$_reply" in
