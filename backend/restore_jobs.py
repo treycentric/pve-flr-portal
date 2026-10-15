@@ -303,6 +303,25 @@ class RestoreJobManager:
             job.log(f"Failed: {error}")
             job_history.persist_sync(job)
 
+    def evict_expired(self, retention_days: int) -> int:
+        """Drops terminal jobs (and their finished task handles) that
+        finished more than `retention_days` ago - the in-memory
+        counterpart of job_history.evict_expired(), using the same cutoff
+        so a job leaves both stores together (issue #17). Active jobs are
+        never touched. Returns the number evicted."""
+        cutoff = time.time() - retention_days * 86400
+        expired = [
+            job_id
+            for job_id, job in self._jobs.items()
+            if not job.is_active and job.finished_at is not None and job.finished_at < cutoff
+        ]
+        for job_id in expired:
+            del self._jobs[job_id]
+            task = self._tasks.get(job_id)
+            if task is None or task.done():
+                self._tasks.pop(job_id, None)
+        return len(expired)
+
     def clear(self) -> None:
         """Test/dev helper - mirrors auth._sessions.clear()'s role in tests."""
         self._jobs.clear()

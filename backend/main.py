@@ -1083,11 +1083,13 @@ async def restore_jobs_list(
     Merges this process's live, in-memory jobs with job_history's
     persisted rows for anything this process didn't itself create - a
     live job always wins over its own stale persisted snapshot, keyed
-    by id. Also sweeps expired history rows opportunistically here."""
+    by id. Also sweeps expired history rows - and the matching in-memory jobs
+    (issue #17) - opportunistically here."""
     is_admin = auth.is_job_admin(session)
     can_see_all = (not settings.restrict_jobs_to_own) or is_admin
 
     await job_history.evict_expired(settings.job_history_retention_days)
+    restore_jobs.manager.evict_expired(settings.job_history_retention_days)
     live_jobs = restore_jobs.manager.list_jobs()
     live_ids = frozenset(j.id for j in live_jobs)
     persisted = await job_history.list_recent(settings.job_history_retention_days, exclude_ids=live_ids)
