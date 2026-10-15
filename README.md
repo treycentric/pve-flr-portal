@@ -123,8 +123,8 @@ expected until you replace it. Drop a CA-issued cert/key at the same
 paths to do so.
 
 See "Provisioning access" below for how to grant a user the
-`FileRestoreReader` role needed to browse and download (restore-to-guest
-needs a separate grant, also covered there).
+`FileRestoreReader` role needed to browse and download (host backups and
+restore-to-guest each need their own separate grant, also covered there).
 
 ## Provisioning Access
 
@@ -177,6 +177,106 @@ a storage a user has no access to is simply skipped, not an error.
    account, Role: `FileRestoreReader`, Propagate: checked.
 4. **Add → User Permission** (again) — Path: `/vms` (or a specific
    `/vms/<vmid>`), same User/Role, Propagate: checked.
+
+### Browse Host Backups
+
+**Requires a PVE-side patch first — this alone won't make host backups
+appear, no matter how permissions are configured.** PVE's own
+`PVE::Storage::PBSPlugin::list_volumes` drops `host`-type backups from
+every storage content listing unconditionally, before any permission
+check ever runs — confirmed live: even `root@pam` can't see one in
+PVE's own GUI. There's no supported PVE API path around this. Run
+`deploy/patch-pve-host-backups.sh` on every PVE node first (opt-in,
+explained in full there and offered during `lxc-create.sh`) — only
+once that's done does the rest of this section's permission setup
+actually matter. See `docs/api-reference.md` for the full trace.
+
+A `host`-type backup (`proxmox-backup-client backup --backup-type
+host`, e.g. a PVE node backing up its own `/`, or any other machine
+backed up the same way — PBS has no fourth "generic file-level backup"
+type beyond `vm`/`ct`/`host`, this covers all of them) has no VM/CT
+behind it to attach a per-guest permission to, so it needs a separate
+role from `FileRestoreReader` — `Datastore.AllocateSpace` + `VM.Backup`
+can never grant access to one, no matter how it's configured: PVE's
+own `check_volume_access` only resolves an owning VM/CT id for `vm`/`ct`
+backups, so a host backup's volume-access check falls straight through
+to the one remaining path, `Datastore.Allocate` — full admin rights on
+that storage (create/delete backups, modify the storage definition),
+not a read-only grant. There is no narrower privilege in PVE's own
+access-control model for this.
+
+**PBS has its own, separate ACL system too.** The PVE storage entry
+authenticates to PBS using its own stored PBS user/token (configured
+when the storage was added) — that credential needs its own read
+access on the PBS side to the namespace in question, independent of
+anything granted in PVE. A PBS role like `DatastoreBackup` is
+*ownership-scoped* — it only covers backups that same PBS identity
+created — so if a different identity (e.g. a separate service account)
+made the host backups, the PVE storage entry's own PBS credential
+needs `DatastoreReader` (or broader) on that namespace too, granted on
+PBS's own Permissions page, or it'll see nothing there either.
+
+**Recommendation: give host backups their own PBS namespace (and PVE
+storage entry), separate from any storage holding VM/CT backups.**
+`Datastore.Allocate` is scoped to the whole storage entry, not to
+individual backups within it — granting it on a storage that also
+holds VM/CT backups would hand the same user admin rights (including
+delete) over those too, far beyond what browsing host backups needs.
+Datacenter → Storage → Add → Proxmox Backup Server, same server/
+datastore as your existing PBS storage, with **Namespace** set to
+wherever your host backups live, and a distinct storage id (e.g.
+`pbs-host`) — then add that id to `PVE_STORAGE` in `.env`. If the host
+backups are client-side encrypted with a key the portal's PVE account
+needs decrypted access to, upload it on this same storage entry's
+**Encryption Key** tab (`Edit` → `Encryption Key` → `Upload key`) — PVE
+decrypts transparently during file-restore once the key is there,
+whether or not PVE itself made the backup.
+
+**This also unlocks host backups in PVE's own native "Backups" tab**,
+including its own File Restore button — not just this app, since
+`deploy/patch-pve-host-backups.sh` works by fixing what PVE itself
+hands back, the same way regardless of caller. Confirmed live: `Restore`,
+`Show Configuration`, and `Change Protection` on a host backup's row in
+PVE's GUI don't work correctly - PVE didn't design those for a backup
+with no VM/CT behind it. `File Restore` is the one that matters and
+it's fine. Fixing the other three would mean patching PVE's own
+frontend to hide them for `host`-type rows specifically - out of scope
+here; this is a known, accepted rough edge, not a bug to report.
+
+**1. Create the role** (once, on the PVE node — skip if it already
+exists):
+
+```
+pveum role add FileRestoreReaderHost -privs "Datastore.Allocate,Datastore.Audit"
+```
+
+`Datastore.Allocate` is what file-restore itself needs (above);
+`Datastore.Audit` is needed separately — PVE's backup-listing endpoint
+(what makes a backup show up in the portal at all) accepts
+`Datastore.Audit` *or* `Datastore.AllocateSpace`, and `Allocate` isn't
+either of those; they're independent privilege bits in PVE, not a
+hierarchy, confirmed against PVE's own built-in `PVEDatastoreAdmin`
+role, which bundles all of them together rather than relying on
+`Allocate` alone. See `docs/api-reference.md` for the full trace
+through PVE's source.
+
+**2. Grant it to each user:**
+
+```
+pveum acl modify /storage/<host-storage-id> --users <user>@<realm> --roles FileRestoreReaderHost
+```
+
+Replace `<host-storage-id>` with the dedicated host-backup storage id
+from the recommendation above (not your general VM/CT storage) — this
+is the one grant `Datastore.Allocate`'s blast radius makes worth
+keeping storage-scoped rather than widened to a parent path.
+
+**Equivalent GUI steps** (Datacenter → Permissions):
+1. **Roles** — `Add` a role named `FileRestoreReaderHost` and check
+   `Datastore.Allocate`, `Datastore.Audit` (skip if the role already
+   exists).
+2. **Add → User Permission** — Path: `/storage/<host-storage-id>`,
+   User: the account, Role: `FileRestoreReaderHost`, Propagate: checked.
 
 ### Restore to Guest
 

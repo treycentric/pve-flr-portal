@@ -204,3 +204,62 @@ zstd-detection bug, where Python 3.14's native zstd support silently
 absorbed a bug that only reproduces on 3.11 — a standing reason to
 verify anything zstd-related against 3.11 specifically, not just
 whatever version the dev machine happens to run.
+
+## Host backups: three rounds to find the real blocker (issue #155, 2026-10)
+
+The permission model looked complete from reading PVE's source alone
+— `Datastore.Allocate`+`Datastore.Audit` should have been sufficient.
+Live-tested against a real cluster with exactly that granted, host
+backups still didn't show up anywhere: not in this app, not in PVE's
+own GUI, not even for `root@pam`. That ruled out permissions entirely
+and pointed at something in PVE's storage-listing code itself —
+`PVE::Storage::PBSPlugin::list_volumes`'s `next if !($btype eq 'vm'
+|| $btype eq 'ct')`, the thing now documented plainly in
+[`../api-reference.md`](../api-reference.md).
+
+The first patch — just that one line — still wasn't enough:
+`pvesh get .../content --content backup` came back empty even after
+patching and restarting `pvedaemon`/`pveproxy` on every node. Reading
+further into the same function found a second, independent filter
+right after the first: `next if $bid !~ m/^\d+$/;` — a host backup's
+id is a hostname, never numeric, so this line alone would have
+excluded it regardless of the first fix. A lesson worth generalizing:
+finding one matching `next if`/filter line in a function doesn't mean
+it's the only one — read to the end of the function before writing a
+patch against it.
+
+Once both lines were patched and host backups finally listed, two
+Perl warnings appeared on every single query —
+`Argument "<hostname>" isn't numeric in int`, from `list_volumes`
+setting `vmid => int($bid)` unconditionally. Confirmed live to fire on
+every query rather than being purely theoretical, so worth patching
+too even though this app never reads that field.
+
+Adding a sentinel comment to the first patched line (so the patch
+script could recognize its own prior work later) briefly broke
+re-running the script against already-patched nodes: an earlier
+version of the script had left that line in its patched form
+*without* the sentinel, and the updated matching logic treated "right
+text, missing the sentinel" as a mismatch rather than "needs
+upgrading." Fixed by modeling each line as a chain of every form it's
+taken across script versions, oldest to newest, with a mismatch only
+when a line matches none of its chain's known forms. That fix itself
+briefly broke `--remove` in the other direction: the sentinel-bearing
+text is a literal superstring of the pre-sentinel text, so checking
+the shorter form before the longer one produced a false double-match.
+Fixed by always preferring the longest (most specific) matching form,
+regardless of which direction the chain is read in — a reusable
+lesson for any future exact-match-or-refuse patch with more than one
+historical "already applied" form to recognize.
+
+No other known community script was found patching these same lines
+(checked Proxmox VE Helper-Scripts/`community-scripts`, the old
+`tteck/Proxmox` discussions, `ayufan/pve-patches`, and forum threads
+about host backups not listing in PVE). The closest-looking forum
+thread turned out to be about a different, ownership-permission issue
+entirely — PBS's `DatastoreBackup` role only covering backups the same
+PBS identity created, not a namespace-wide grant the way its ACL
+inheritance might suggest. That's a real, separate gotcha and is
+documented as current fact in
+[`../api-reference.md`](../api-reference.md); it just isn't what that
+forum thread's title made it sound like.
