@@ -67,61 +67,76 @@ _patch_py() {
 import sys
 
 path, mode = sys.argv[1], sys.argv[2]
-pairs = [
-    (
+
+# Each chain: every form this line has ever taken, oldest (stock PVE)
+# first, newest (current patched form) last. An install patched by an
+# OLDER version of this script sits at a middle entry, not the first or
+# last - recognized and upgraded to the last entry, never treated as a
+# mismatch (hit live: adding the sentinel comment below to the first
+# chain, without accounting for installs already patched by the
+# pre-sentinel version, briefly made this script refuse to touch an
+# already-fully-patched file). Only a line matching NONE of a chain's
+# known forms is a genuine mismatch.
+chains = [
+    [
+        "next if !($btype eq 'vm' || $btype eq 'ct');",
+        "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');",
         # Sentinel comment (no issue number - this is someone else's
         # codebase) rides along on this one line so a later run, or a
-        # human reading the file, can tell "pve-flr-portal did this" apart
-        # from any other unrecognized modification near the same code.
-        "next if !($btype eq 'vm' || $btype eq 'ct');",
+        # human reading the file, can tell "pve-flr-portal did this"
+        # apart from any other unrecognized modification nearby.
         "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host'); "
         "# patched by pve-flr-portal, see deploy/patch-pve-host-backups.sh",
-    ),
-    (
+    ],
+    [
         r"next if $bid !~ m/^\d+$/;",
         r"next if $btype ne 'host' && $bid !~ m/^\d+$/;",
-    ),
-    (
+    ],
+    [
         # Confirmed live 2026-10: int() on a hostname-shaped $bid prints
         # "Argument ... isn't numeric in int" to stderr on every single
-        # listing query once the two lines above let host entries
+        # listing query once the two chains above let host entries
         # through - cosmetic (this app reads guest type from the volid,
         # never vmid/subtype), but worth silencing rather than spamming
         # the journal indefinitely.
         "vmid => int($bid),",
         "vmid => ($btype eq 'host' ? undef : int($bid)),",
-    ),
-    (
+    ],
+    [
         "subtype => $btype eq 'vm' ? 'qemu' : 'lxc',",
         "subtype => $btype eq 'vm' ? 'qemu' : $btype eq 'ct' ? 'lxc' : undef,",
-    ),
+    ],
 ]
 if mode == "remove":
-    pairs = [(new, old) for old, new in pairs]
+    chains = [list(reversed(chain)) for chain in chains]
 
 text = open(path, encoding="utf-8").read()
 
-# Each line is judged independently - already-applied-for-this-line is
-# not a mismatch, it's the normal case for resuming after an earlier,
-# older version of this script only patched some of the lines (#155).
-# A real mismatch (a line that's neither the expected search nor its
-# already-applied replacement) still aborts the whole batch before
-# writing anything - this pass is read-only until every line checks out.
 to_apply = []
-for search, replace in pairs:
-    if replace in text and search not in text:
-        continue  # already applied for this specific line
-    count = text.count(search)
-    if count != 1:
-        print(f"MISMATCH: expected exactly 1 occurrence of {search!r}, found {count}", file=sys.stderr)
+for chain in chains:
+    target = chain[-1]
+    if target in text:
+        continue  # already at the current form for this line
+    # Longest-first: a sentinel comment riding on a line makes that
+    # line's current form a superstring of an older form (the same
+    # "next if ..." text, minus the trailing comment) - checking the
+    # shorter form first would match it as a false positive even when
+    # the longer, more specific form is what's actually present.
+    candidates = sorted(chain[:-1], key=len, reverse=True)
+    found = next((form for form in candidates if form in text), None)
+    if found is None:
+        print(f"MISMATCH: none of the recognized forms of {chain[0]!r} found", file=sys.stderr)
         sys.exit(1)
-    to_apply.append((search, replace))
+    if text.count(found) != 1:
+        print(f"MISMATCH: expected exactly 1 occurrence of {found!r}, found {text.count(found)}", file=sys.stderr)
+        sys.exit(1)
+    to_apply.append((found, target))
 
 if not to_apply:
     print("NOOP")
     sys.exit(0)
-for search, replace in to_apply:
-    text = text.replace(search, replace, 1)
+for old, new in to_apply:
+    text = text.replace(old, new, 1)
 open(path, "w", encoding="utf-8").write(text)
 print("CHANGED")
 PYEOF

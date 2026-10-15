@@ -20,6 +20,10 @@ _GIT_BASH = Path(r"C:\Program Files\Git\usr\bin\bash.exe")
 BASH = str(_GIT_BASH) if _GIT_BASH.is_file() else "bash"
 
 OLD_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct');"
+# The pre-sentinel form a previous script version left behind live -
+# must still be recognized as "already applied" (and upgraded), not a
+# mismatch, by every version from here on.
+LEGACY_NEW_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');"
 NEW_LINE_1 = (
     "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host'); "
     "# patched by pve-flr-portal, see deploy/patch-pve-host-backups.sh"
@@ -132,6 +136,43 @@ def test_patch_py_resumes_when_only_some_lines_were_patched_before(tmp_path):
     text = fixture.read_text(encoding="utf-8")
     for new_line in ALL_NEW:
         assert new_line in text
+
+
+def test_patch_py_upgrades_a_fully_patched_pre_sentinel_install(tmp_path):
+    # Hit live (#155): all four lines already patched by the version of
+    # this script from before the sentinel comment existed - must add
+    # the sentinel (an upgrade), not refuse the whole file as a mismatch
+    # just because line 1's exact text changed between script versions.
+    fixture = tmp_path / "PBSPlugin.pm"
+    fixture.write_text(_fixture_text(LEGACY_NEW_LINE_1, NEW_LINE_2, NEW_LINE_3, NEW_LINE_4), encoding="utf-8")
+
+    result = _run_patch_py(tmp_path, "apply")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "CHANGED"
+    # LEGACY_NEW_LINE_1 is a literal substring of NEW_LINE_1 (same text,
+    # minus the trailing comment) - asserting its absence would be
+    # asserting a contradiction once NEW_LINE_1 is present, so this only
+    # checks for the upgraded (comment-bearing) form.
+    text = fixture.read_text(encoding="utf-8")
+    assert NEW_LINE_1 in text
+
+    # And now a second run is a true no-op.
+    result = _run_patch_py(tmp_path, "apply")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "NOOP"
+
+
+def test_patch_py_remove_also_recognizes_the_legacy_pre_sentinel_form(tmp_path):
+    fixture = tmp_path / "PBSPlugin.pm"
+    fixture.write_text(_fixture_text(LEGACY_NEW_LINE_1, NEW_LINE_2, NEW_LINE_3, NEW_LINE_4), encoding="utf-8")
+
+    result = _run_patch_py(tmp_path, "remove")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "CHANGED"
+    text = fixture.read_text(encoding="utf-8")
+    assert OLD_LINE_1 in text
+    assert LEGACY_NEW_LINE_1 not in text
+    assert NEW_LINE_1 not in text
 
 
 def test_patch_py_refuses_whole_batch_if_one_line_is_genuinely_unrecognized(tmp_path):
