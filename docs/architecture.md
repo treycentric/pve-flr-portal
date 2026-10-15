@@ -163,6 +163,9 @@ a job survive a restart within `JOB_HISTORY_RETENTION_DAYS`.
 `evict_expired()` prunes terminal jobs past that window, called
 opportunistically from the list endpoint on every load — independent of
 restarts; it's a time-based sweep, not a restart-recovery mechanism.
+`RestoreJobManager.evict_expired()` runs alongside it with the same cutoff
+so a job leaves the in-memory dict (and its finished task handle) when its
+persisted row expires; active jobs are never evicted (#17).
 `reconcile_interrupted()` runs once at startup (`main.py`'s `lifespan`
 hook), before serving any request: any row still
 `queued`/`running`/`verifying` at that point is necessarily left over

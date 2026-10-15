@@ -2222,3 +2222,30 @@ def test_restore_download_fetch_404s_if_the_job_no_longer_exists(session_data):
     with TestClient(main.app) as c:
         resp = c.get(f"/api/restore-downloads/{token}")
     assert resp.status_code == 404
+
+
+def test_restore_jobs_list_evicts_expired_in_memory_jobs(client, monkeypatch, session_data):
+    import time
+
+    from backend import restore_jobs
+
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, job_history_retention_days=7))
+    job = restore_jobs.manager.create(
+        session=session_data,
+        guest_type="vm",
+        vmid="133",
+        guest_label="web (133)",
+        task_name="t",
+        snapshot_time="2026-08-30T14:48:06Z",
+        source_volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        source_filepath="L2V0Yy9ob3N0cw==",
+        source="/etc/hosts",
+        destination="/etc",
+    )
+    restore_jobs.manager.mark_done(job.id)
+    job.finished_at = time.time() - (8 * 86400)
+    job_history.persist_sync(job)
+
+    resp = client.get("/api/restore-jobs")
+    assert all(j["id"] != job.id for j in resp.json()["jobs"])
+    assert restore_jobs.manager.get(job.id) is None

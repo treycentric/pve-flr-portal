@@ -311,3 +311,45 @@ async def test_submitted_job_actually_runs(manager, session_data):
     await asyncio.wait_for(ran.wait(), timeout=1.0)
     await asyncio.sleep(0)  # let mark_done's task finish
     assert job.status == RestoreStatus.DONE
+
+
+def test_evict_expired_drops_only_old_terminal_jobs(manager, session_data):
+    old_done = _make(manager, session_data)
+    manager.mark_done(old_done.id)
+    old_done.finished_at -= 8 * 86400
+    old_failed = _make(manager, session_data)
+    manager.mark_failed(old_failed.id, "boom")
+    old_failed.finished_at -= 8 * 86400
+    recent_done = _make(manager, session_data)
+    manager.mark_done(recent_done.id)
+    active = _make(manager, session_data)
+    active.started_at -= 30 * 86400
+
+    assert manager.evict_expired(7) == 2
+    assert manager.get(old_done.id) is None
+    assert manager.get(old_failed.id) is None
+    assert manager.get(recent_done.id) is recent_done
+    assert manager.get(active.id) is active
+
+
+async def test_evict_expired_drops_finished_task_handles_but_keeps_running_ones(manager, session_data):
+    async def _noop(job):
+        return None
+
+    async def _forever(job):
+        await asyncio.Event().wait()
+
+    done_job = _make(manager, session_data)
+    manager.submit(done_job, _noop)
+    await manager._tasks[done_job.id]
+    manager.mark_done(done_job.id)
+    done_job.finished_at -= 8 * 86400
+
+    manager.evict_expired(7)
+    assert done_job.id not in manager._tasks
+
+    running = _make(manager, session_data)
+    manager.submit(running, _forever)
+    manager.evict_expired(7)
+    assert running.id in manager._tasks
+    manager._tasks[running.id].cancel()
