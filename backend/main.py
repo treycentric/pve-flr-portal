@@ -2,18 +2,14 @@ import asyncio
 import dataclasses
 import hashlib
 import hmac
-import io
 import json
 import logging
-import tarfile
-import zipfile
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
-import zstandard
 from fastapi import Depends, FastAPI, Form, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +28,9 @@ from . import (
     restore_download,
     restore_jobs,
     restore_runner,
+)
+from . import (
+    download_bundle as download_bundle_stream,
 )
 from .auth import SessionData, ensure_fresh_ticket
 from .config import settings
@@ -1325,53 +1324,14 @@ async def download_bundle(
         raise HTTPException(status_code=400, detail=f"Unknown archive format: {format}")
     extension, media_type = _ARCHIVE_FORMATS[format]
 
-    entries: list[tuple[str, bytes]] = []
+    items = []
     for raw in item:
         spec = json.loads(raw)
-        filepath = spec["filepath"]
-        item_name = spec["name"]
-        is_dir = not spec.get("leaf", True)
-        client, response = await pve_client.open_download(session, volume, filepath, tar=False)
-        try:
-            content = await response.aread()
-        finally:
-            await response.aclose()
-            await client.aclose()
-        if is_dir:
-            # PVE's own zip for a directory already roots every entry
-            # under the directory's own name (e.g. "Downloads/file.txt"
-            # for a "Downloads" selection) - confirmed live 2026-09-02
-            # (a doubled "Downloads/Downloads" in a restored bundle) -
-            # so info.filename is used as-is, not re-prefixed with
-            # item_name on top of what's already there.
-            with zipfile.ZipFile(io.BytesIO(content)) as sub:
-                for info in sub.infolist():
-                    if info.is_dir():
-                        continue
-                    entries.append((info.filename, sub.read(info.filename)))
-        else:
-            entries.append((item_name, content))
-
-    buffer = io.BytesIO()
-    if format == "zip":
-        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            for arcname, content in entries:
-                bundle.writestr(arcname, content)
-    else:
-        # .tar.gz uses tarfile's built-in gzip support; .tar.zst uses the
-        # zstandard package (not stdlib compression.zstd, which is
-        # 3.14+ only and won't exist on a normal deployment's Python).
-        tar_mode = "w:gz" if format == "targz" else "w|"
-        outer = zstandard.ZstdCompressor().stream_writer(buffer, closefd=False) if format == "tarzst" else buffer
-        try:
-            with tarfile.open(fileobj=outer, mode=tar_mode) as bundle:
-                for arcname, content in entries:
-                    info = tarfile.TarInfo(name=arcname)
-                    info.size = len(content)
-                    bundle.addfile(info, io.BytesIO(content))
-        finally:
-            if outer is not buffer:
-                outer.close()
+        items.append(
+            restore_bundle.BundleItem(filepath=spec["filepath"], name=spec["name"], leaf=spec.get("leaf", True))
+        )
 
     headers = {"content-disposition": _content_disposition(f"{name}.{extension}")}
-    return StreamingResponse(iter([buffer.getvalue()]), media_type=media_type, headers=headers)
+    return StreamingResponse(
+        download_bundle_stream.stream_bundle(session, volume, items, format), media_type=media_type, headers=headers
+    )
