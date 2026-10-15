@@ -37,24 +37,21 @@ ENABLE_HOST_BACKUPS="${ENABLE_HOST_BACKUPS:-}"  # "true"/"false" to skip the pro
 echo "==> pve-flr-portal LXC setup"
 echo "    CTID=$CTID  HOSTNAME=$CT_HOSTNAME  STORAGE=$STORAGE  DISK=${DISK_GB}G  MEM=${MEMORY_MB}MB"
 
-# Issue #155: opt-in only, and only asked interactively - a non-interactive
-# run (no ENABLE_HOST_BACKUPS override, no tty) defaults to "false" rather
-# than hanging on `read` or silently patching a Proxmox-owned file. See
-# deploy/patch-pve-host-backups.sh's header for what this actually does.
+# Opt-in only, and only asked interactively - a non-interactive run (no
+# ENABLE_HOST_BACKUPS override, no tty) defaults to "false" rather than
+# hanging on `read` or silently patching a Proxmox-owned file. See
+# deploy/patch-pve-host-backups.sh and docs/api-reference.md for the
+# full detail behind this prompt's wording.
 if [ -z "$ENABLE_HOST_BACKUPS" ]; then
   if [ -t 0 ]; then
     echo
-    echo "Host backups (proxmox-backup-client --backup-type host) need a"
-    echo "one-line patch to PVE's own PBSPlugin.pm - PVE drops them from"
-    echo "every storage listing unconditionally, before any permission"
-    echo "check, and there is no supported PVE API path around that"
-    echo "(docs/api-reference.md). The patch is opt-in, exact-match-or-"
-    echo "refuse (never guesses at a changed PVE version), and reapplies"
-    echo "itself after pve-storage updates via a dpkg hook - but it is"
-    echo "NOT officially supported by Proxmox. Also unlocks host backups"
-    echo "in PVE's own native Backups tab, not just this app (with a few"
-    echo "known-broken, out-of-scope buttons there - see the README). See"
-    echo "deploy/patch-pve-host-backups.sh for the exact change."
+    echo "This modifies the Proxmox Storage PBS backend to remove a"
+    echo "limitation preventing the browsing and file-level restore of"
+    echo "host backups, which is necessary for this application to"
+    echo "support them. A benefit is that host backups will also become"
+    echo "browsable in the PVE UI. It reapplies itself automatically"
+    echo "after pve-storage package updates. See"
+    echo "deploy/patch-pve-host-backups.sh for details."
     read -r -p "Enable host-backup support now? [y/N] " _reply || _reply=""
     case "$_reply" in
       [yY]*) ENABLE_HOST_BACKUPS=true ;;
@@ -149,8 +146,8 @@ pct exec "$CTID" -- bash /opt/pve-flr-portal/deploy/install.sh
 if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
   echo "==> Enabling host-backup support on this PVE node"
   # Runs on the PVE HOST, not inside the container - this script patches
-  # a file that only exists on the host (issue #155). Same local-clone-
-  # vs-curl-piped fallback install.sh above already has to handle.
+  # a file that only exists on the host. Same local-clone-vs-curl-piped
+  # fallback install.sh above already has to handle.
   if [ -f "$(dirname "$0")/patch-pve-host-backups.sh" ]; then
     bash "$(dirname "$0")/patch-pve-host-backups.sh"
   else

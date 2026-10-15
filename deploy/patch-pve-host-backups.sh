@@ -14,8 +14,8 @@
 #
 #   bash deploy/patch-pve-host-backups.sh --remove
 #
-# WHY THIS EXISTS (CLAUDE.md's "last resort" patching guidance, issue
-# #155): PVE::Storage::PBSPlugin::list_volumes - the code behind both
+# WHY THIS EXISTS (CLAUDE.md's "last resort" patching guidance):
+# PVE::Storage::PBSPlugin::list_volumes - the code behind both
 # this app's and PVE's own "Backups" content listing - drops host
 # backups via TWO separate lines, not one: a `$btype` check restricted
 # to vm/ct, and (confirmed live 2026-10 - the first patch alone wasn't
@@ -189,7 +189,7 @@ if ! cp -- "$0" "$INSTALLED_SCRIPT_PATH" 2>/dev/null; then
 fi
 chmod 755 "$INSTALLED_SCRIPT_PATH"
 cat > "$DPKG_HOOK_PATH" <<EOF
-// Installed by pve-flr-portal (deploy/patch-pve-host-backups.sh, issue #155).
+// Installed by pve-flr-portal (deploy/patch-pve-host-backups.sh).
 // Reapplies the host-backup-listing patch after every apt run - cheap/
 // idempotent (the script no-ops if already patched), so this doesn't
 // bother checking whether pve-storage specifically was touched.
