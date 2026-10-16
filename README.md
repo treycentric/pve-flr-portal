@@ -474,6 +474,16 @@ but not a container recreate - see "Persistence, and backing up the
 portal itself" below for what to preserve when moving/rebuilding the
 container.
 
+**App dir ownership.** The app dir (code, `.venv`, `.git`) is
+root-owned and read-only to the service - `certs/` is the one subtree
+the service can write (the self-signed cert(s) it generates), and
+`.env` is readable only by root and the service user. A compromised
+service process therefore can't modify code or `.git` hooks that root
+would run on the next update. If you're updating an install from
+before this change, either run `install.sh` once, or `update.sh` twice
+- the first `update.sh` run only updates `update.sh` itself to the
+version that applies this; the second actually applies it.
+
 ### Docker Image for Deployment
 
 Each release is published to GitHub Container Registry as
