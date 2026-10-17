@@ -347,7 +347,10 @@ These are design consequences, not defects.
   so builds run on a dedicated pool (`MAX_CONCURRENT_BUNDLES`, 4);
   further downloads wait for a free worker. A failure after the first
   byte aborts the connection (the HTTP status is already sent) rather
-  than leaving a silently truncated archive.
+  than leaving a silently truncated archive. A selected symlink
+  (e.g. `/initrd.img`) is a symlink member under `tar=1`, so that leaf
+  is re-fetched with `tar=0` (which follows the link) and spooled
+  (8 MB in memory, then a temp file) to learn its size.
 - **Helper-VM stampede.** Proxmox boots an ephemeral helper VM per cold
   snapshot browsed and exposes no API to list or stop one directly.
   `pve_client.list_path()` mitigates this in order: a `dir_cache` hit

@@ -33,6 +33,7 @@ than a silently truncated, apparently complete file. It's logged.
 import asyncio
 import logging
 import tarfile
+import tempfile
 import threading
 import time
 import zipfile
@@ -64,6 +65,9 @@ _QUEUE_DEPTH = 8
 # past this many waits for a free worker (no bytes flow until it gets one).
 MAX_CONCURRENT_BUNDLES = 4
 _executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BUNDLES, thread_name_prefix="download-bundle")
+
+# A symlinked leaf's target is spooled in memory up to this size, then on disk.
+_SPOOL_MAX_SIZE = 8 * 1024 * 1024
 
 _DONE = object()
 
@@ -152,8 +156,10 @@ class _QueueSink:
         self._send()
 
 
-async def _download_chunks(session: SessionData, volume: str, filepath: str) -> AsyncIterator[bytes]:
-    client, response = await pve_client.open_download(session, volume, filepath, tar=True)
+async def _download_chunks(
+    session: SessionData, volume: str, filepath: str, tar: bool = True
+) -> AsyncIterator[bytes]:
+    client, response = await pve_client.open_download(session, volume, filepath, tar=tar)
     try:
         async for piece in response.aiter_bytes(chunk_size=_CHUNK_SIZE):
             yield piece
@@ -243,7 +249,11 @@ def _add_item(
     into the output archive. A directory's members keep PVE's own names -
     PVE already roots them under the directory's name, so re-prefixing
     would double it (issue #66/#26). A leaf's single member is named by
-    the item itself."""
+    the item itself. Returns whether anything was written - a leaf that
+    isn't a regular file under `tar=1` (a symlink: /initrd.img is
+    typically one) yields nothing, and the caller falls back to
+    `_add_followed_leaf`."""
+    wrote = False
     with _open_item_tar(source) as tar:
         for member in tar:
             if stop.is_set():
@@ -256,8 +266,41 @@ def _add_item(
                 continue
             src = tar.extractfile(member)
             writer.add(arcname, member.size, int(member.mtime), member.mode & 0o7777, src)
+            wrote = True
             if item.leaf:
                 break
+    return wrote
+
+
+def _add_followed_leaf(
+    writer: _OutputWriter,
+    session: SessionData,
+    volume: str,
+    item: BundleItem,
+    loop: asyncio.AbstractEventLoop,
+    stop: threading.Event,
+) -> None:
+    """A leaf whose `tar=1` form held no regular file is a symlink (the
+    plain single-file download, `tar=0`, follows it and serves the
+    target's bytes - which is what the user gets from the Download button
+    and expects in the bundle). The target's size isn't known up front
+    and a tar member needs it, so the content is spooled (memory up to
+    _SPOOL_MAX_SIZE, then a temp file) - the one place a bundle touches
+    disk, and only for a symlink's target."""
+    arcname = _safe_arcname(item.name)
+    if arcname is None:
+        _log.warning("download-bundle: skipping unsafe item name %r", item.name)
+        return
+    chunks = _download_chunks(session, volume, item.filepath, tar=False)
+    source = _AsyncSource(chunks, loop, stop)
+    try:
+        with tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX_SIZE) as spool:
+            _copy(source, spool, stop)
+            size = spool.tell()
+            spool.seek(0)
+            writer.add(arcname, size, int(time.time()), 0o644, spool)
+    finally:
+        asyncio.run_coroutine_threadsafe(chunks.aclose(), loop).result()
 
 
 def _build(
@@ -277,11 +320,13 @@ def _build(
         chunks = _download_chunks(session, volume, item.filepath)
         source = _AsyncSource(chunks, loop, stop)
         try:
-            _add_item(writer, item, source, stop)
+            wrote = _add_item(writer, item, source, stop)
         finally:
             # Closes the PVE response/client even when this item's tar
             # wasn't read to the end (a leaf stops after its one member).
             asyncio.run_coroutine_threadsafe(chunks.aclose(), loop).result()
+        if not wrote and item.leaf:
+            _add_followed_leaf(writer, session, volume, item, loop, stop)
     writer.close()
 
 

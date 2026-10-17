@@ -29,6 +29,16 @@ def _tar(members: dict[str, bytes], mtime: int = 1_700_000_000) -> bytes:
     return buf.getvalue()
 
 
+def _symlink_tar(name: str, target: str) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        info = tarfile.TarInfo(name=name)
+        info.type = tarfile.SYMTYPE
+        info.linkname = target
+        tf.addfile(info)
+    return buf.getvalue()
+
+
 def _zst(data: bytes) -> bytes:
     return zstandard.ZstdCompressor().compress(data)
 
@@ -55,12 +65,16 @@ class _FakeClient:
         pass
 
 
-def patch_downloads(monkeypatch, by_filepath: dict[str, bytes], piece: int = 1000, on_close=None):
+def patch_downloads(
+    monkeypatch, by_filepath: dict[str, bytes], piece: int = 1000, on_close=None, plain: dict[str, bytes] | None = None
+):
+    """`plain` maps filepath -> bytes served for a `tar=0` request."""
     seen_tar_flags = []
 
     async def fake_open(session, volume, filepath, tar=False):
         seen_tar_flags.append(tar)
-        return _FakeClient(), _FakeResponse(by_filepath[filepath], piece, on_close)
+        payload = by_filepath[filepath] if tar else (plain or {})[filepath]
+        return _FakeClient(), _FakeResponse(payload, piece, on_close)
 
     monkeypatch.setattr(pve_client, "open_download", fake_open)
     return seen_tar_flags
@@ -170,3 +184,25 @@ async def test_consumer_abandoning_the_stream_unwinds_the_worker(monkeypatch, se
     while not closed.is_set() and time.time() < deadline:
         await asyncio.sleep(0.05)
     assert closed.is_set()  # the PVE response was closed and the worker thread exited
+
+
+@pytest.mark.parametrize("fmt", ["zip", "targz", "tarzst"])
+async def test_symlinked_leaf_is_bundled_as_its_target_content(monkeypatch, session_data, fmt):
+    # /initrd.img is a symlink: tar=1 yields a symlink member (no bytes), the
+    # plain download follows it. Used to produce an empty archive.
+    content = b"initrd-bytes" * 5000
+    patch_downloads(
+        monkeypatch,
+        {"a": _symlink_tar("initrd.img", "boot/initrd.img-6.1"), "b": _symlink_tar("initrd.img.old", "boot/old")},
+        plain={"a": content, "b": b"old"},
+    )
+    items = [BundleItem("a", "initrd.img", True), BundleItem("b", "initrd.img.old", True)]
+    data = await _collect(session_data, items, fmt)
+    if fmt == "zip":
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            assert zf.testzip() is None
+            assert {n: zf.read(n) for n in zf.namelist()} == {"initrd.img": content, "initrd.img.old": b"old"}
+    else:
+        raw = data if fmt == "targz" else zstandard.ZstdDecompressor().stream_reader(io.BytesIO(data)).read()
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tf:
+            assert {m.name: tf.extractfile(m).read() for m in tf} == {"initrd.img": content, "initrd.img.old": b"old"}
