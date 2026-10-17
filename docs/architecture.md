@@ -350,7 +350,9 @@ These are design consequences, not defects.
   than leaving a silently truncated archive. A selected symlink
   (e.g. `/initrd.img`) is a symlink member under `tar=1`, so that leaf
   is re-fetched with `tar=0` (which follows the link) and spooled
-  (8 MB in memory, then a temp file) to learn its size.
+  (8 MB in memory, then a temp file) to learn its size, because PVE's
+  plain download sends no `Content-Length`; that file also isn't
+  streamed until fully downloaded.
 - **Helper-VM stampede.** Proxmox boots an ephemeral helper VM per cold
   snapshot browsed and exposes no API to list or stop one directly.
   `pve_client.list_path()` mitigates this in order: a `dir_cache` hit

@@ -18,7 +18,10 @@ thread instead and streams it out as it goes:
 
 Memory is bounded by the queue depth plus a few chunk buffers,
 independent of how large any file or the whole selection is; nothing is
-staged on disk. That's possible because every item - a leaf or a
+staged on disk (one exception: a symlinked leaf, see `_add_followed_leaf`
+- its target is spooled to a temp file past 8 MB, since PVE's plain
+download has no Content-Length and a tar member needs its size first).
+That's possible because every item - a leaf or a
 directory - is fetched with `tar=1`: a tar can be read strictly front to
 back (a zip cannot - its index is at the end, so reading one needs random
 access, i.e. a full copy on disk). A single file under `tar=1` arrives as
