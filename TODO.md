@@ -62,9 +62,9 @@ with the fix, test, and commit.
   ownership checkbox). Windows ACLs remain infeasible, same reason as
   #20.
 - #7 — `/api/download-bundle` (the plain browser download feature,
-  separate from restore-to-guest) still buffers the whole archive in
-  RAM; the streaming techniques #24 built are directly reusable there
-  but haven't been applied yet.
+  separate from restore-to-guest). **FIXED** — now streams (see
+  `backend/download_bundle.py`): archive built on a worker thread and
+  streamed out through a bounded queue, nothing staged on disk.
 - #47 — HTTPS on the Direct Network Transfer data plane. **SHIPPED** —
   live-verified (2026-09-08, Windows + Linux VMs, self-signed and
   step-ca certs) and merged into `main`. `verify`/`insecure`/`plaintext`
@@ -195,12 +195,12 @@ as an actionable list. None of these are correctness bugs; they're
 ceilings the single-admin/single-worker design hits under load it
 wasn't built for.
 
-- [ ] **`/api/download-bundle` buffers the whole archive in RAM and
-  compresses synchronously on the event loop** — a large multi-file
-  selection can OOM the worker and stalls every other request
-  (including auth) while it compresses. Single-file `/api/download` is
-  unaffected (it streams). Fix: stream the archive as it's built; move
-  compression to a thread via `run_in_executor`.
+- [x] **`/api/download-bundle` buffered the whole archive in RAM and
+  compressed on the event loop** — fixed in #7: the archive is built on
+  a worker thread (`backend/download_bundle.py`) and streamed with
+  bounded memory; every item is fetched as `tar=1` and read front to
+  back, so nothing is staged on disk either. Concurrent builds are
+  capped (`MAX_CONCURRENT_BUNDLES`, a dedicated thread pool).
 - [x] **No request coalescing/throttle on `file-restore/list` calls** —
   fixed in #60: `pve_client.list_path()` caps in-flight calls
   (`FILE_RESTORE_LIST_MAX_CONCURRENCY`) and coalesces identical

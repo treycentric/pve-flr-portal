@@ -338,13 +338,16 @@ These are design consequences, not defects.
 
 **Hard ceilings (need real work to lift):**
 
-- **`/api/download-bundle` memory + event-loop block.** Reads every
-  selected file fully into RAM, builds the whole archive in a
-  `BytesIO`, and compresses synchronously on the event loop — a
-  multi-GB selection OOMs the worker and stalls every other request
-  while compressing. Single-file `/api/download` streams and is
-  unaffected. Fix: stream the archive as it's built; move compression
-  to a thread.
+- **`/api/download-bundle` concurrency.** Streams with bounded memory
+  and no disk staging (issue #7, `backend/download_bundle.py`): each
+  item is fetched as `tar=1` (readable strictly front to back, unlike
+  PVE's zip), re-emitted into the zip/tar.gz/tar.zst on a worker
+  thread, and handed to the response through a bounded queue. Each
+  in-progress download holds one worker thread for its whole duration,
+  so builds run on a dedicated pool (`MAX_CONCURRENT_BUNDLES`, 4);
+  further downloads wait for a free worker. A failure after the first
+  byte aborts the connection (the HTTP status is already sent) rather
+  than leaving a silently truncated archive.
 - **Helper-VM stampede.** Proxmox boots an ephemeral helper VM per cold
   snapshot browsed and exposes no API to list or stop one directly.
   `pve_client.list_path()` mitigates this in order: a `dir_cache` hit
