@@ -101,7 +101,7 @@ async def test_zip_from_leaf_and_directory_items(monkeypatch, session_data, fram
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         assert zf.testzip() is None
         # leaf is named by the item; directory members keep PVE's names un-reprefixed
-        assert sorted(zf.namelist()) == ["Downloads/a/b.txt", "Downloads/photo.jpg", "renamed.txt"]
+        assert sorted(zf.namelist()) == ["Downloads/", "Downloads/a/b.txt", "Downloads/photo.jpg", "renamed.txt"]
         assert zf.read("renamed.txt") == b"file-content"
         assert zf.read("Downloads/photo.jpg") == b"family photo bytes"
 
@@ -206,3 +206,18 @@ async def test_symlinked_leaf_is_bundled_as_its_target_content(monkeypatch, sess
         raw = data if fmt == "targz" else zstandard.ZstdDecompressor().stream_reader(io.BytesIO(data)).read()
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tf:
             assert {m.name: tf.extractfile(m).read() for m in tf} == {"initrd.img": content, "initrd.img.old": b"old"}
+
+
+@pytest.mark.parametrize("fmt", ["zip", "targz", "tarzst"])
+async def test_empty_directory_is_kept(monkeypatch, session_data, fmt):
+    # Windows' C:\PerfLogs is an empty folder: its tar is one directory entry.
+    patch_downloads(monkeypatch, {"d": _tar({"PerfLogs/": b""})})
+    data = await _collect(session_data, [BundleItem("d", "PerfLogs", False)], fmt)
+    if fmt == "zip":
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            assert zf.namelist() == ["PerfLogs/"]
+            assert zf.getinfo("PerfLogs/").is_dir()
+    else:
+        raw = data if fmt == "targz" else zstandard.ZstdDecompressor().stream_reader(io.BytesIO(data)).read()
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tf:
+            assert [(m.name, m.isdir()) for m in tf] == [("PerfLogs", True)]

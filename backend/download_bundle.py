@@ -232,6 +232,21 @@ class _OutputWriter:
             info.mode = mode
             self._archive.addfile(info, src)
 
+    def add_dir(self, arcname: str, mtime: int, mode: int) -> None:
+        """A directory entry, so an empty folder (Windows' PerfLogs) survives."""
+        if isinstance(self._archive, zipfile.ZipFile):
+            info = zipfile.ZipInfo(arcname + "/")
+            date_time = _safe_zip_date_time(mtime)
+            info.date_time = date_time if date_time is not None else time.localtime(time.time())[:6]
+            info.external_attr = (0o40000 | mode) << 16 | 0x10  # drwx bits + MS-DOS directory flag
+            self._archive.writestr(info, b"")
+        else:
+            info = tarfile.TarInfo(name=arcname)
+            info.type = tarfile.DIRTYPE
+            info.mtime = mtime
+            info.mode = mode
+            self._archive.addfile(info)
+
     def close(self) -> None:
         self._archive.close()
         if self._compressor is not None:
@@ -246,7 +261,7 @@ def _add_item(
     stop: threading.Event,
 ) -> None:
     """Reads one item's tar front to back and re-emits each regular file
-    into the output archive. A directory's members keep PVE's own names -
+    and directory (empty folders included) into the output archive. A directory's members keep PVE's own names -
     PVE already roots them under the directory's name, so re-prefixing
     would double it (issue #66/#26). A leaf's single member is named by
     the item itself. Returns whether anything was written - a leaf that
@@ -258,6 +273,11 @@ def _add_item(
         for member in tar:
             if stop.is_set():
                 raise _Aborted
+            if member.isdir() and not item.leaf:
+                dir_name = _safe_arcname(member.name)
+                if dir_name is not None:
+                    writer.add_dir(dir_name, int(member.mtime), member.mode & 0o7777)
+                continue
             if not member.isfile():
                 continue
             arcname = _safe_arcname(item.name if item.leaf else member.name)
