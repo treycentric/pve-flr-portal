@@ -507,10 +507,11 @@ on the node that hosts the container:
 | Command | What it does |
 |---|---|
 | `pve-flr-portal config [CTID]` | A welcome screen, then the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
-| `pve-flr-portal update [CTID] [version]` | Runs `update.sh` in the container (see "Updating"). |
-| `pve-flr-portal status [CTID]` | Installed version, service state and address. |
+| `pve-flr-portal update [CTID] [version]` | Shows the installed and new version, asks to confirm, then runs `update.sh` in the container (see "Updating"). |
+| `pve-flr-portal status [CTID]` | Installed version, whether a newer release is available, service state and address. |
 | `pve-flr-portal list` | The containers it manages, with their versions. |
 | `pve-flr-portal adopt [CTID...]` | Starts managing existing installs (below). |
+| `pve-flr-portal host-tools [CTID]` | Installs or updates the host-side pieces: this command, its `-config`/`-update` links, and the host-backup patch script if installed. Downloads them from GitHub (the latest release; `PFR_VERSION` picks another), so it works on a node that runs no portal container; with a CTID it copies them from that container's release instead. |
 
 Containers are found by their Proxmox tag, `pve-flr-portal`, which the
 installer sets - so they show up in the Proxmox UI too. With more than one you
@@ -538,31 +539,65 @@ Several Direct Network Transfer networks (more than one entry in
 `RESTORE_DATA_NICS`) show as "Custom" and are left untouched; edit `.env` for
 those.
 
-*Installs made before the management command existed.* Update the container
-once so it has the tools - `pct exec <CTID> -- bash
-/opt/pve-flr-portal/deploy/update.sh` - then install the command on the host
-and adopt it:
+*Installs made before the management command existed, or a host that doesn't
+have it yet.* Install the command on the PVE host (as root):
 
 ```
-pct pull <CTID> /opt/pve-flr-portal/deploy/host/pve-flr-portal /usr/local/sbin/pve-flr-portal
-chmod 755 /usr/local/sbin/pve-flr-portal
-ln -s pve-flr-portal /usr/local/sbin/pve-flr-portal-config
-ln -s pve-flr-portal /usr/local/sbin/pve-flr-portal-update
-pve-flr-portal adopt
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)"
+pve-flr-portal adopt      # start managing the existing install(s)
+pve-flr-portal update     # bring them up to date - older installs are handled too
 ```
+
+`install-host-tools.sh` downloads the command from the latest release (falling
+back to `main` if the release predates it; `PFR_VERSION=<tag or branch>` picks
+another), or copies it out of a container's own checkout if you give it a
+container ID (`bash install-host-tools.sh 207`). It refuses to install anything
+that isn't the command - an empty or truncated download never replaces a
+working copy. Once the command is there, `pve-flr-portal host-tools` keeps it -
+and the host-backup patch script, if you enabled host-backup support - up to
+date from GitHub, on any node, with no container involved (give it a CTID to
+copy from that container's release instead).
 
 **Updating**:
 
-`pve-flr-portal update` updates the chosen container to the latest release;
-`pve-flr-portal update 207 v1.4.0` (or `1.4.0`) pins CT 207 to a specific one.
-It runs `deploy/update.sh` inside the container, which you can also run
-yourself: `bash deploy/update.sh` for the latest release, `bash deploy/update.sh
-v1.4.0` (or `1.4.0`) to pin, or `bash deploy/update.sh main` for
-unreleased/bleeding-edge work. Reinstalls dependencies if
-`requirements.txt` changed and restarts the service; refuses to run if
-the install directory has local/uncommitted changes rather than
-discarding them. See `docs/archive/design-rationale.md` for how this
-maps onto the project's SemVer-tagged release channel.
+`pve-flr-portal update` updates the chosen container to the latest release.
+It shows the installed and the new version (with a link to the release notes),
+asks you to confirm, and - if the container's storage supports snapshots -
+offers to take one first so the update can be rolled back
+(`pct rollback <CTID> <snapshot>`; the snapshot is left for you to delete with
+`pct delsnapshot`). It then runs `deploy/update.sh` inside the container and
+tells you the version it ended up on. If the container is already on the
+latest release it says so and does nothing (`--force` updates anyway).
+
+| Option | Effect |
+|---|---|
+| `pve-flr-portal update 207 v1.4.0` (or `1.4.0`) | Pin CT 207 to a specific release. `main` selects unreleased, bleeding-edge work. |
+| `--all` | Update every running managed container on this node, with one confirmation; stopped ones are skipped, and there is a summary at the end. |
+| `-y`, `--yes` | Don't ask. Needed without a terminal (e.g. from cron). |
+| `--snapshot` / `--no-snapshot` | Always / never take a pre-update snapshot (the default asks, and only at a terminal). If a snapshot can't be taken the update still goes ahead. |
+
+After moving to the latest release (or `main`, but not an older pinned
+version), the host-side pieces are brought in line with it, copied from the
+container's checkout: the `pve-flr-portal` command itself and, if you ever
+enabled host-backup support, the host-backup patch script that the apt hook
+runs. A copy that doesn't parse is never installed.
+
+A container installed before `update.sh` existed can't use it, so the command
+runs the equivalent steps itself - after the same confirmation and snapshot
+offer: fetch the tags, check out the release, and run `install.sh`, which keeps
+`.env` and reinstalls the dependencies, the systemd unit and the service
+(certbot is not added). It refuses if the install directory has local changes.
+If the container isn't a git checkout, or has no `git` or `install.sh`, nothing
+is changed and the command prints the same steps for you to run by hand. After
+the update the container has `update.sh`, so later updates take the normal path.
+
+`deploy/update.sh` can also be run yourself inside the container: `bash
+deploy/update.sh` for the latest release, `bash deploy/update.sh v1.4.0` (or
+`1.4.0`) to pin, or `bash deploy/update.sh main` for unreleased work. It
+reinstalls dependencies if `requirements.txt` changed and restarts the
+service; it refuses to run if the install directory has local/uncommitted
+changes rather than discarding them. See `docs/archive/design-rationale.md`
+for how this maps onto the project's SemVer-tagged release channel.
 
 The systemd unit's `StateDirectory=` puts the app-state dir
 (`PFR_DATA_DIR`) at `/var/lib/pve-flr-portal`, created and owned by the

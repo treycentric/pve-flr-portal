@@ -94,10 +94,13 @@ with the fix, test, and commit.
     **SHIPPED**: container tagging, the shared settings library
     (`deploy/lib/settings.sh`), the `pve-flr-portal` host command, and
     `pve-flr-portal config` (portal `.env` + container network, with
-    rollback). Remaining: stage 2 `update` proper (version check, refresh
-    the host-side pieces, optional pre-update snapshot, `--all`); stage 3
-    `status` extras, host-backup and certificate actions, uninstall (#93);
-    stage 4 container resources (`pct set` / grow-only `pct resize`).
+    rollback). Stage 2 **SHIPPED**: `pve-flr-portal update` (version check,
+    optional pre-update snapshot, `--all`, refreshes the host-side pieces) and
+    an update-available line in `status`, updating installs that predate
+    `update.sh`, and `pve-flr-portal host-tools` / `install-host-tools.sh` to
+    install or refresh the host command. Remaining: stage 3 host-backup and
+    certificate actions, uninstall (#93); stage 4 container resources
+    (`pct set` / grow-only `pct resize`).
 - #92 — submit pve-flr-portal to community-scripts.org (ProxmoxVED).
   Deliberately separate from #91 — needs a purpose-built script pair
   against their own conventions (root-run, `uv`, no dedicated service

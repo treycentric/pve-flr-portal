@@ -3,6 +3,7 @@
 #   FAKE_LATEST_URL  what `releases/latest` redirects to (the -w %{url_effective} call)
 #   FAKE_TAG_LIB     file served for a URL containing /v1.9.0/
 #   FAKE_MAIN_LIB    file served for a URL containing /main/
+#   FAKE_RAW_DIR     if set, instead serves FAKE_RAW_DIR/<ref>/<file name> (or fails)
 case "$*" in
   *"-w"*) echo "${FAKE_LATEST_URL:-https://github.com/x/y/releases}"; exit 0 ;;
 esac
@@ -14,6 +15,16 @@ while [ "$#" -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
+# FAKE_RAW_DIR/<ref>/<file name>, for tests that need different files per path
+if [ -n "${FAKE_RAW_DIR:-}" ]; then
+  ref=$(printf '%s' "$url" | sed -n 's|^https://raw.githubusercontent.com/[^/]*/[^/]*/\([^/]*\)/.*|\1|p')
+  name="${url##*/}"
+  if [ -n "$ref" ] && [ -f "$FAKE_RAW_DIR/$ref/$name" ]; then
+    cp "$FAKE_RAW_DIR/$ref/$name" "$out"
+    exit 0
+  fi
+  exit 22
+fi
 case "$url" in
   */v1.9.0/*) src="${FAKE_TAG_LIB:-}" ;;
   */main/*) src="${FAKE_MAIN_LIB:-}" ;;
