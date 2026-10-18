@@ -450,11 +450,12 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-port
 
 Guided setup at a real terminal - a welcome screen, then a short
 Back/Next wizard for the essentials (container ID, hostname, storage,
-network, PVE host, which PBS storage(s) to browse, and optional
-host-backup support), then a review screen where you can change
+network, PVE host, which PBS storage(s) to browse, Direct Network
+Transfer, and optional host-backup support), then a review screen where you can change
 anything before it starts. Advanced settings (resource sizing, portal
 port and theme, job visibility, performance limits, Direct Network
-Transfer and its TLS policy, and a Let's Encrypt/ACME certificate) live
+Transfer's subnet/hostname/TLS policy, and a Let's Encrypt/ACME
+certificate) live
 behind "Advanced settings" on that screen and keep their defaults unless
 you change them. Creates an
 unprivileged Debian 12 container, checks out the latest tagged release,
