@@ -4,7 +4,7 @@
 #   pve-flr-portal config [CTID]            change settings (portal and network)
 #   pve-flr-portal update [CTID] [VERSION]  update (--all, -y, --snapshot: see --help)
 #   pve-flr-portal status [CTID]            version, service state, address
-#   pve-flr-portal host-tools [CTID]        install/update this command from a container
+#   pve-flr-portal host-tools [CTID]        install/update this command (GitHub, or a container)
 #   pve-flr-portal list                     the containers it manages
 #   pve-flr-portal adopt [CTID...]          start managing existing installs
 #
@@ -72,7 +72,10 @@ Commands:
   status [CTID]          Show the installed version, service state and address.
   host-tools [CTID]      Install or update the host-side pieces (this command, its
                          -config/-update links, and the host-backup patch script
-                         if installed) from that container's release.
+                         if installed). Downloads them from GitHub - the latest
+                         release, or PFR_VERSION - so it works on a node with no
+                         portal container; with a CTID, copies them from that
+                         container's release instead.
   list                   List the containers managed from this node.
   adopt [CTID...]        Start managing existing installs: tag them so they
                          are found (with no CTID, scan the running containers).
@@ -307,16 +310,14 @@ repo_url() {
 # container's checkout to DEST, only if it differs. The replacement is atomic
 # (a new file moved over the old), so a copy that is running right now is
 # unaffected. A release that doesn't have the file is skipped.
-install_from_container() {
-  local ctid="$1" rel="$2" dest="$3" tmp
-  tmp_new tmp
-  if ! pull_file "$ctid" "$APP_DIR/deploy/$rel" "$tmp"; then
-    rm -f "$tmp"
-    return 0
-  fi
-  if ! bash -n "$tmp" 2>/dev/null; then
-    echo "Not updating $dest: the copy in container $ctid doesn't parse." >&2
-    rm -f "$tmp"
+# install_file TMP DEST LABEL [MARKER] - put TMP at DEST, only if it differs.
+# TMP must parse as a script (and contain MARKER, when given), or nothing is
+# installed. The replacement is atomic (a new file moved over the old), so a
+# copy that is running right now is unaffected.
+install_file() {
+  local tmp="$1" dest="$2" label="$3" marker="${4:-}"
+  if ! bash -n "$tmp" 2>/dev/null || { [ -n "$marker" ] && ! grep -q "$marker" "$tmp"; }; then
+    echo "Not updating $dest: the copy from $label isn't the expected script." >&2
     return 0
   fi
   if ! cmp -s "$tmp" "$dest" 2>/dev/null; then
@@ -326,7 +327,32 @@ install_from_container() {
   elif [ "${VERBOSE_REFRESH:-0}" = "1" ]; then
     echo "Already up to date: $dest"
   fi
-  rm -f "$tmp"
+}
+
+# install_from_container CTID REL DEST [MARKER] - copy deploy/REL out of the
+# container's checkout. A release that doesn't have the file is skipped.
+install_from_container() {
+  local ctid="$1" rel="$2" dest="$3" marker="${4:-}" tmp
+  tmp_new tmp
+  if ! pull_file "$ctid" "$APP_DIR/deploy/$rel" "$tmp"; then
+    return 0
+  fi
+  install_file "$tmp" "$dest" "container $ctid" "$marker"
+}
+
+# refresh_host_pieces CTID - bring what lives on the host in line with the
+# release the container just moved to: this command (and its -config/-update
+# links) and, if it was ever installed, the host-backup patch script that the
+# apt hook runs.
+# What a download from the network must contain to be taken for this command.
+STUB_MARKER='^TAG="pve-flr-portal"'
+
+# link_host_command - the -config / -update names for this command.
+link_host_command() {
+  if [ -f "$SBIN/pve-flr-portal" ]; then
+    ln -sf pve-flr-portal "$SBIN/pve-flr-portal-config"
+    ln -sf pve-flr-portal "$SBIN/pve-flr-portal-update"
+  fi
 }
 
 # refresh_host_pieces CTID - bring what lives on the host in line with the
@@ -336,13 +362,66 @@ install_from_container() {
 refresh_host_pieces() {
   local ctid="$1"
   install_from_container "$ctid" host/pve-flr-portal "$SBIN/pve-flr-portal"
-  if [ -f "$SBIN/pve-flr-portal" ]; then
-    ln -sf pve-flr-portal "$SBIN/pve-flr-portal-config"
-    ln -sf pve-flr-portal "$SBIN/pve-flr-portal-update"
-  fi
+  link_host_command
   if [ -f "$SBIN/pve-flr-portal-patch-host-backups.sh" ]; then
     install_from_container "$ctid" patch-pve-host-backups.sh "$SBIN/pve-flr-portal-patch-host-backups.sh"
   fi
+}
+
+# github_refs - the refs to try, in order: PFR_VERSION (a tag or branch) if
+# set, else the latest release; then main (a release can predate the file).
+github_refs() {
+  local slug tag
+  slug="$(github_slug)"
+  tag="${PFR_VERSION:-}"
+  if [ -z "$tag" ]; then
+    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${slug}/releases/latest" 2>/dev/null || true)
+    tag="${tag##*/}"
+    case "$tag" in
+      v[0-9]*) ;;
+      *) tag="" ;;
+    esac
+  fi
+  if [ -n "$tag" ]; then
+    echo "$tag"
+  fi
+  echo main
+}
+
+# github_slug - owner/repo from REPO_URL (a GitHub URL).
+github_slug() {
+  local url="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}" slug
+  case "$url" in
+    https://github.com/*) ;;
+    *) die "REPO_URL must be a GitHub URL." ;;
+  esac
+  slug="${url#https://github.com/}"
+  echo "${slug%.git}"
+}
+
+# refresh_from_github - for a node with no container to copy from: download
+# the host command (and the host-backup patch script, if installed) from the
+# first ref that has the command.
+refresh_from_github() {
+  local slug ref tmp raw
+  slug="$(github_slug)"
+  for ref in $(github_refs); do
+    raw="https://raw.githubusercontent.com/${slug}/${ref}/deploy"
+    tmp_new tmp
+    if curl -fsSL "$raw/host/pve-flr-portal" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+      echo "Downloaded from $ref."
+      install_file "$tmp" "$SBIN/pve-flr-portal" "GitHub ($ref)" "$STUB_MARKER"
+      link_host_command
+      if [ -f "$SBIN/pve-flr-portal-patch-host-backups.sh" ]; then
+        tmp_new tmp
+        if curl -fsSL "$raw/patch-pve-host-backups.sh" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+          install_file "$tmp" "$SBIN/pve-flr-portal-patch-host-backups.sh" "GitHub ($ref)"
+        fi
+      fi
+      return 0
+    fi
+  done
+  die "Could not download the host command from GitHub. Check the network, or give a container ID to copy it from that container's checkout."
 }
 
 # --- Commands ---------------------------------------------------------------
@@ -588,13 +667,23 @@ cmd_update() {
 
 # host-tools [CTID] - install or update the host-side pieces from a
 # container's checkout, without touching the container.
+# host-tools [CTID] - install or update the host-side pieces without touching
+# any container: from GitHub (the latest release; PFR_VERSION picks another),
+# which works on a node that runs no portal container, or from the checkout
+# of the container CTID.
 cmd_host_tools() {
-  choose_ct "${1:-}"
+  VERBOSE_REFRESH=1
+  if [ "$#" -eq 0 ]; then
+    refresh_from_github
+    echo "The host tools are up to date."
+    return 0
+  fi
+  [[ "$1" =~ ^[0-9]+$ ]] || die "'$1' is not a container ID (see --help)."
+  choose_ct "$1"
   ensure_running "$CTID"
   if ! pct exec "$CTID" -- test -f "$APP_DIR/deploy/host/pve-flr-portal" 2>/dev/null; then
     die "Container $CTID runs a release that doesn't include the host command. Update it first: pve-flr-portal update $CTID"
   fi
-  VERBOSE_REFRESH=1
   refresh_host_pieces "$CTID"
   echo "The host tools match container $CTID's release."
 }

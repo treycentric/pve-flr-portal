@@ -250,7 +250,7 @@ def test_a_replacement_that_does_not_parse_is_not_installed(pve):
     _write(_new_release_files(pve) / "host" / "pve-flr-portal", "if then fi (((\n")
     result = stub(pve, "update", "-y")
     assert "keep-me" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
-    assert "doesn't parse" in result.stderr
+    assert "isn't the expected script" in result.stderr
 
 
 def test_pinning_an_older_version_leaves_the_host_tools_alone(pve):
@@ -474,3 +474,88 @@ def test_host_tools_on_a_release_without_the_command_says_to_update_first(pve):
     assert "doesn't include the host command" in result.stderr
     assert "pve-flr-portal update 207" in result.stderr
     assert not (pve.root / "sbin" / "pve-flr-portal").exists()
+
+
+# --- host-tools from GitHub (a node with no portal container) -------------------------
+
+
+def _raw(pve: FakePve, ref: str, **files: str) -> Path:
+    """FAKE_RAW_DIR/<ref>/<file>: what raw.githubusercontent.com serves for that ref."""
+    raw = pve.root / "raw"
+    for name, content in files.items():
+        _write(raw / ref / name, content)
+    return raw
+
+
+def _github_env(pve: FakePve, raw: Path, latest: str | None = "v1.9.0") -> dict[str, str]:
+    env = {"FAKE_RAW_DIR": raw.as_posix(), "REPO_URL": "https://github.com/octo/portal.git"}
+    if latest:
+        env["FAKE_LATEST_URL"] = f"https://github.com/octo/portal/releases/tag/{latest}"
+    return env
+
+
+NEW_CMD = '#!/usr/bin/env bash\nTAG="pve-flr-portal"\necho from-github\n'
+
+
+def test_host_tools_without_a_container_downloads_the_latest_release(pve):
+    # no containers at all on this node
+    raw = _raw(pve, "v1.9.0", **{"pve-flr-portal": NEW_CMD})
+    result = stub(pve, "host-tools", env=_github_env(pve, raw))
+    assert result.returncode == 0, result.stderr
+    assert "Downloaded from v1.9.0" in result.stdout
+    sbin = pve.root / "sbin"
+    assert "from-github" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
+    assert (sbin / "pve-flr-portal-config").exists()
+    assert (sbin / "pve-flr-portal-update").exists()
+    assert "Already up to date" in stub(pve, "host-tools", env=_github_env(pve, raw)).stdout
+
+
+def test_host_tools_falls_back_to_main_when_the_release_predates_the_command(pve):
+    raw = _raw(pve, "main", **{"pve-flr-portal": NEW_CMD})  # nothing under v1.9.0
+    result = stub(pve, "host-tools", env=_github_env(pve, raw))
+    assert result.returncode == 0, result.stderr
+    assert "Downloaded from main" in result.stdout
+
+
+def test_host_tools_honours_pfr_version(pve):
+    raw = _raw(pve, "my-branch", **{"pve-flr-portal": NEW_CMD})
+    result = stub(pve, "host-tools", env={**_github_env(pve, raw), "PFR_VERSION": "my-branch"})
+    assert result.returncode == 0, result.stderr
+    assert "Downloaded from my-branch" in result.stdout
+
+
+def test_host_tools_from_github_refreshes_the_patch_script_only_if_it_was_installed(pve):
+    raw = _raw(
+        pve,
+        "v1.9.0",
+        **{"pve-flr-portal": NEW_CMD, "patch-pve-host-backups.sh": "#!/usr/bin/env bash\necho new-patch\n"},
+    )
+    sbin = pve.root / "sbin"
+    stub(pve, "host-tools", env=_github_env(pve, raw))
+    assert not (sbin / "pve-flr-portal-patch-host-backups.sh").exists()  # never installed: left alone
+    _write(sbin / "pve-flr-portal-patch-host-backups.sh", "#!/usr/bin/env bash\necho old-patch\n")
+    stub(pve, "host-tools", env=_github_env(pve, raw))
+    assert "new-patch" in (sbin / "pve-flr-portal-patch-host-backups.sh").read_text(encoding="utf-8")
+
+
+def test_host_tools_never_installs_something_that_is_not_the_command(pve):
+    raw = _raw(pve, "v1.9.0", **{"pve-flr-portal": "#!/usr/bin/env bash\necho not-the-command\n"})
+    sbin = pve.root / "sbin"
+    _write(sbin / "pve-flr-portal", "#!/usr/bin/env bash\necho keep-me\n")
+    result = stub(pve, "host-tools", env=_github_env(pve, raw))
+    assert "keep-me" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
+    assert "isn't the expected script" in result.stderr
+
+
+def test_host_tools_says_what_to_do_when_github_cannot_be_reached(pve):
+    raw = pve.root / "raw"  # serves nothing
+    result = stub(pve, "host-tools", env=_github_env(pve, raw))
+    assert result.returncode != 0
+    assert "Could not download the host command from GitHub" in result.stderr
+    assert "give a container ID" in result.stderr
+
+
+def test_host_tools_rejects_something_that_is_not_a_container_id(pve):
+    result = stub(pve, "host-tools", "not-an-id")
+    assert result.returncode != 0
+    assert "not a container ID" in result.stderr

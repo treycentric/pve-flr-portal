@@ -360,8 +360,10 @@ portal already keeps:
   (curl-pipeable) fetches the stub from the latest release - or `PFR_VERSION`,
   or `main` if the release predates it - or copies it from a container's
   checkout, and refuses an empty, unparsable or foreign file. `pve-flr-portal
-  host-tools` then refreshes it (and the host-backup patch script) from any
-  container's checkout.
+  host-tools` then refreshes it (and the host-backup patch script, if
+  installed) from GitHub - the same ref order, and the same refusal of a file
+  that isn't the command - so a node with no portal container can stay current;
+  given a CTID it copies from that container's checkout instead.
 - **`update`** is host-resident logic in the stub (it has to work on a
   release that predates the management tools, so it can't come from the
   container): the installed version from the container's `VERSION`, the latest

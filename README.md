@@ -511,7 +511,7 @@ on the node that hosts the container:
 | `pve-flr-portal status [CTID]` | Installed version, whether a newer release is available, service state and address. |
 | `pve-flr-portal list` | The containers it manages, with their versions. |
 | `pve-flr-portal adopt [CTID...]` | Starts managing existing installs (below). |
-| `pve-flr-portal host-tools [CTID]` | Installs or updates the host-side pieces (this command, its `-config`/`-update` links, and the host-backup patch script if installed) from that container's release. |
+| `pve-flr-portal host-tools [CTID]` | Installs or updates the host-side pieces: this command, its `-config`/`-update` links, and the host-backup patch script if installed. Downloads them from GitHub (the latest release; `PFR_VERSION` picks another), so it works on a node that runs no portal container; with a CTID it copies them from that container's release instead. |
 
 Containers are found by their Proxmox tag, `pve-flr-portal`, which the
 installer sets - so they show up in the Proxmox UI too. With more than one you
@@ -553,9 +553,10 @@ back to `main` if the release predates it; `PFR_VERSION=<tag or branch>` picks
 another), or copies it out of a container's own checkout if you give it a
 container ID (`bash install-host-tools.sh 207`). It refuses to install anything
 that isn't the command - an empty or truncated download never replaces a
-working copy. Once the command is there, `pve-flr-portal host-tools [CTID]`
-keeps it - and the host-backup patch script, if you enabled host-backup
-support - in step with a container's release without touching the container.
+working copy. Once the command is there, `pve-flr-portal host-tools` keeps it -
+and the host-backup patch script, if you enabled host-backup support - up to
+date from GitHub, on any node, with no container involved (give it a CTID to
+copy from that container's release instead).
 
 **Updating**:
 
