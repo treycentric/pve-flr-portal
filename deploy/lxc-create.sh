@@ -159,9 +159,11 @@ def CT_HOSTNAME "Container hostname" str pve-flr-portal "" basic '^[A-Za-z0-9]([
 def STORAGE "Container storage" str local-lvm "" basic "" "" "Choose the storage that will hold the virtual disk (root filesystem) of this application's container. Only storages that can hold container disks are listed."
 def BRIDGE "Network bridge" str vmbr0 "" basic "" "" "Choose the network bridge the container's network interface will attach to. This decides which network the portal is reachable on."
 def VLAN_TAG "VLAN tag" str "" "" basic '^([0-9]{1,4})?$' "" "Leave blank for no VLAN tag."
-def USE_STATIC_IP "IPv4 configuration" enum no "" basic "no=DHCP - the address is assigned automatically|yes=Static - enter an address and gateway" "" "How should the container get its IPv4 address?"
+def USE_STATIC_IP "IPv4 configuration" enum no "" basic "no=DHCP - the address is assigned automatically|yes=Static - enter an address and gateway" "" "How should the container get its IPv4 network configuration?"
 def STATIC_CIDR "IPv4/CIDR" str 10.0.0.50/24 "" basic '^[0-9.]+/[0-9]+$' "USE_STATIC_IP=yes" "The container's address and prefix length, e.g. 10.0.0.50/24."
 def STATIC_GW "Gateway (IPv4)" str 10.0.0.1 "" basic '^[0-9.]+$' "USE_STATIC_IP=yes" "The default gateway for the container."
+def DNS_SERVERS "DNS servers" str "" "" basic '^([0-9A-Fa-f:.]+([ ,]+[0-9A-Fa-f:.]+)*)?$' "USE_STATIC_IP=yes" "One or more DNS server addresses, separated by spaces or commas. Leave blank to use the PVE host's DNS settings."
+def SEARCH_DOMAIN "DNS search domain" str "" "" basic '^([A-Za-z0-9.-]+)?$' "USE_STATIC_IP=yes" "For example example.com. Leave blank to use the PVE host's setting."
 def PVE_HOST "PVE host" str "$DEFAULT_PVE_HOST" PVE_HOST basic '^[^[:space:]]+$' "" "The hostname or IP the portal uses to reach the Proxmox API (usually this host)."
 def PVE_STORAGE "PBS storage(s) to browse" str pbs PVE_STORAGE basic "" "" "Select the Proxmox Backup Server storage(s) the portal will browse backups from. Choose more than one if your backups are spread across several PBS storages or namespaces."
 def ENABLE_HOST_BACKUPS "Host-backup support" enum false "" basic "false=No|true=Yes - patch this PVE node now" "" "Lets the portal browse and restore from HOST-type backups.\n\nThis modifies the Proxmox Storage PBS backend on this PVE host to remove a limitation that prevents browsing and file-level restore of host backups. A side benefit: host backups also become browsable in the PVE UI.\n\nThe change reapplies itself automatically after pve-storage package updates. See deploy/patch-pve-host-backups.sh for details. On a cluster, run that script on every other node too."
@@ -232,7 +234,7 @@ for _k in "${ALL_KEYS[@]}"; do
   fi
 done
 if [ -n "${IP_CONFIG:-}" ]; then
-  PRESET[USE_STATIC_IP]=1; PRESET[STATIC_CIDR]=1; PRESET[STATIC_GW]=1
+  PRESET[USE_STATIC_IP]=1; PRESET[STATIC_CIDR]=1; PRESET[STATIC_GW]=1; PRESET[DNS_SERVERS]=1; PRESET[SEARCH_DOMAIN]=1
 fi
 if [ -n "${RESTORE_DATA_NICS_JSON:-}" ]; then
   if [ -z "${PRESET[ENABLE_DNT]:-}" ]; then
@@ -255,7 +257,7 @@ ip_display() {
   if [ -n "${IP_CONFIG:-}" ]; then
     echo "$IP_CONFIG"
   elif [ "$USE_STATIC_IP" = "yes" ]; then
-    echo "$STATIC_CIDR (gateway $STATIC_GW)"
+    echo "$STATIC_CIDR (gateway $STATIC_GW${DNS_SERVERS:+, DNS $DNS_SERVERS})"
   else
     echo "DHCP"
   fi
@@ -611,6 +613,8 @@ edit_IP() {
   if [ "$USE_STATIC_IP" = "yes" ]; then
     edit_setting STATIC_CIDR || return 1
     edit_setting STATIC_GW || return 1
+    edit_setting DNS_SERVERS || return 1
+    edit_setting SEARCH_DOMAIN || return 1
   fi
   IP_CONFIG=""
 }
@@ -861,7 +865,7 @@ review_hub() {
 # ---------------------------------------------------------------------
 WELCOME_TEXT="Welcome to the pve-flr-portal installer.\n\nFile Level Restore Portal for Proxmox Backup Server: a scrubbable snapshot timeline for browsing and restoring files from your PBS backups.\n\nThis will create an unprivileged Debian 12 container on this PVE host, install the portal in it, and write your answers into its .env.\n\nA few essential questions come first (use Back to step back). A review screen then lets you change anything - including Advanced options - before anything is created.\n\nAnything you pre-set through environment variables is skipped."
 
-WIZARD=(WELCOME CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG USE_STATIC_IP STATIC_CIDR STATIC_GW PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
+WIZARD=(WELCOME CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG USE_STATIC_IP STATIC_CIDR STATIC_GW DNS_SERVERS SEARCH_DOMAIN PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
 
 step_skipped() {
   if [ "$1" = "WELCOME" ]; then
@@ -969,6 +973,15 @@ if [ -n "$VLAN_TAG" ]; then
   NET0="${NET0},tag=${VLAN_TAG}"
 fi
 
+# DNS only when given; otherwise the container uses the PVE host's settings.
+DNS_ARGS=()
+if [ -n "$DNS_SERVERS" ]; then
+  DNS_ARGS+=(--nameserver "${DNS_SERVERS//,/ }")
+fi
+if [ -n "$SEARCH_DOMAIN" ]; then
+  DNS_ARGS+=(--searchdomain "$SEARCH_DOMAIN")
+fi
+
 msg_info "Creating container $CTID"
 pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --hostname "$CT_HOSTNAME" \
@@ -979,6 +992,7 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --swap 512 \
   --rootfs "${STORAGE}:${DISK_GB}" \
   --net0 "$NET0" \
+  "${DNS_ARGS[@]}" \
   --onboot 1 \
   --start 1
 msg_ok "Created container $CTID"
