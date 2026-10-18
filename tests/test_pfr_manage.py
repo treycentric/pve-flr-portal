@@ -38,9 +38,8 @@ def test_load_current_reads_the_network_and_the_env(pve):
     out = (
         run(
             pve,
-            LOAD
-            + 'echo "$CT_HOSTNAME|$BRIDGE|$VLAN_TAG|$USE_STATIC_IP|$STATIC_CIDR|$STATIC_GW|$IPV6_MODE|'
-            '$DNS_SERVERS|$SEARCH_DOMAIN|'
+            LOAD + 'echo "$CT_HOSTNAME|$BRIDGE|$VLAN_TAG|$USE_STATIC_IP|$STATIC_CIDR|$STATIC_GW|$IPV6_MODE|'
+            "$DNS_SERVERS|$SEARCH_DOMAIN|"
             '$PVE_HOST|$PVE_STORAGE|$ENABLE_DNT|$DNT_LOCAL_IP|$OLD_ADDR"',
         )
         .stdout.strip()
@@ -110,8 +109,7 @@ def test_network_change_preserves_the_mac_and_other_fields_and_reboots(pve):
     pve.add_ct(207, net0="name=eth0,bridge=vmbr0,hwaddr=BC:24:11:AA:BB:CC,firewall=1,ip=dhcp,type=veth")
     result = run(
         pve,
-        LOAD
-        + "VLAN_TAG=30; USE_STATIC_IP=yes; STATIC_CIDR=10.9.0.5/24; STATIC_GW=10.9.0.1;"
+        LOAD + "VLAN_TAG=30; USE_STATIC_IP=yes; STATIC_CIDR=10.9.0.5/24; STATIC_GW=10.9.0.1;"
         ' DNS_SERVERS="1.1.1.1, 9.9.9.9"\n'
         "apply_network 207 && echo NET_OK",
     )
@@ -226,3 +224,12 @@ def test_config_refuses_without_a_terminal_and_with_a_bad_container_id(pve):
     assert result.returncode == 2
     result = pve.run_script(script, ["--help"])
     assert result.returncode == 0 and "Usage: pfr-manage.sh config CTID" in result.stdout
+
+
+def test_the_welcome_screen_names_the_container_being_configured(pve):
+    pve.add_ct(207, name="flr-prod")
+    run(pve, LOAD + "IS_TTY=1; HAS_WHIPTAIL=1; set_welcome 207; show_welcome")
+    log = pve.log("wt.log")
+    assert "Welcome to the pve-flr-portal configurator" in log
+    assert "container 207 (flr-prod)" in log
+    assert "Nothing is applied until you choose" in log

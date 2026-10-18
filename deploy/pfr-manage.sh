@@ -300,6 +300,17 @@ apply_changes() {
 
 # --- Entry point --------------------------------------------------------
 
+# set_welcome CTID - the welcome screen names the container being configured.
+set_welcome() {
+  WELCOME_TEXT="Welcome to the pve-flr-portal configurator.
+
+This changes the settings of container ${1} (${CT_HOSTNAME}): the portal's own settings and the container's network configuration.
+
+Changed settings are marked with *. Nothing is applied until you choose \"Apply changes\", and you see what will change first.
+
+Container resources and storage aren't changed here - use Proxmox for those."
+}
+
 main() {
   local sub="${1:-}" ctid="${2:-}" ip
   case "$sub" in
@@ -321,6 +332,8 @@ main() {
   fi
   load_current "$ctid"
   pfr_use_config_layout
+  set_welcome "$ctid"
+  show_welcome
   start_prefetch
   while :; do
     review_hub

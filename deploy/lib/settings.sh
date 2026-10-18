@@ -1399,10 +1399,18 @@ else:
 # questions here.
 pfr_use_config_layout() {
   PFR_MODE="config"
+  TITLE="pve-flr-portal configuration"
   BASIC_KEYS=(CT_HOSTNAME BRIDGE VLAN_TAG IP IP6 DNS PVE_HOST PVE_STORAGE ENABLE_DNT)
   BASIC_LAYOUT=("H:Container" CT_HOSTNAME "H:Network" BRIDGE VLAN_TAG IP IP6 DNS "H:Portal" PVE_HOST PVE_STORAGE ENABLE_DNT)
   ADV_GROUPS=(portal access limits dnt)
   HUB_GO_LABEL=">>> Apply changes"
   HUB_TEXT="Select a setting to change it. Changed settings are marked with *. Choose \"Apply changes\" when you're ready."
   HUB_QUIT_TEXT="Quit without applying any changes?"
+  WELCOME_TEXT="Welcome to the pve-flr-portal configurator.
+
+This changes the settings of an installed portal: the portal's own settings and its container's network configuration.
+
+Changed settings are marked with *. Nothing is applied until you choose \"Apply changes\", and you see what will change first.
+
+Container resources and storage aren't changed here - use Proxmox for those."
 }

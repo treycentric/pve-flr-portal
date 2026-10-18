@@ -228,3 +228,17 @@ def test_very_long_text_scrolls_instead_of_being_cut_off(pve):
     long_text = "word " * 600
     log = _dialog_args(pve, f'BRIDGE=vmbr0; ui_pick BRIDGE "Bridge" "{long_text}" "vmbr0" "vmbr1"')
     assert "--scrolltext" in log
+
+
+def test_the_installer_welcome_says_installer(pve):
+    log = _dialog_args(pve, "show_welcome")
+    assert "Welcome to the pve-flr-portal installer" in log
+    assert "configurator" not in log
+    assert "--backtitle pve-flr-portal setup" in log
+
+
+def test_the_configurator_welcome_says_configurator(pve):
+    log = _dialog_args(pve, "pfr_use_config_layout; show_welcome")
+    assert "Welcome to the pve-flr-portal configurator" in log
+    assert "installer" not in log
+    assert "--backtitle pve-flr-portal configuration" in log

@@ -501,7 +501,7 @@ on the node that hosts the container:
 
 | Command | What it does |
 |---|---|
-| `pve-flr-portal config [CTID]` | Opens the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
+| `pve-flr-portal config [CTID]` | A welcome screen, then the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
 | `pve-flr-portal update [CTID] [version]` | Runs `update.sh` in the container (see "Updating"). |
 | `pve-flr-portal status [CTID]` | Installed version, service state and address. |
 | `pve-flr-portal list` | The containers it manages, with their versions. |
