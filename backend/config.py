@@ -82,7 +82,7 @@ def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     return val
 
 
-# Data-plane TLS modes for Direct Network Transfer (issue #47), weakest
+# Data-plane TLS modes for Direct Network Transfer, weakest
 # to strongest. `restore_network_pull` depends on this exact ordering to
 # walk the PREFERRED->MINIMUM downgrade ladder.
 TLS_MODES: tuple[str, ...] = ("plaintext", "insecure", "verify")
@@ -91,7 +91,7 @@ TLS_MODES: tuple[str, ...] = ("plaintext", "insecure", "verify")
 def _csv(name: str, default: str) -> tuple[str, ...]:
     """Comma-separated env var -> tuple of trimmed, non-empty entries,
     order preserved, duplicates dropped. Used for PVE_STORAGE, which
-    accepts one *or more* storage ids (issue #43)."""
+    accepts one *or more* storage ids."""
     raw = os.environ.get(name)
     raw = default if raw is None else raw
     seen: dict[str, None] = {}
@@ -115,7 +115,7 @@ def _theme(name: str, default: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     pve_host: str
-    # One or more PBS-backed storage ids (issue #43). My cluster has 3
+    # One or more PBS-backed storage ids. My cluster has 3
     # PBS storages, each on a different PBS namespace; PVE hides the
     # namespace inside the storage config, so from here "3 namespaces" is
     # just "3 storage ids". Enumeration queries every entry and merges;
@@ -178,8 +178,8 @@ class Settings:
     # kernels. Set it explicitly to share the port if your setup allows.
     restore_data_nic_port: int
 
-    # Direct Network Transfer data-plane TLS (issue #47,
-    # docs/push-to-guest.md). `plaintext` = HTTP listener (pre-#47 behaviour);
+    # Direct Network Transfer data-plane TLS
+    # (docs/push-to-guest.md). `plaintext` = HTTP listener (the behaviour before data-plane TLS);
     # `insecure`/`verify` = HTTPS listener. The ladder: per guest,
     # resolve the strongest mode in
     # [minimum, preferred] that the detected fetch tool can actually do
@@ -217,20 +217,20 @@ class Settings:
 
     # pve_client.run_guest_exec()'s default ~15s poll budget is sized for
     # commands that don't scale with file size (mkdir, an exists check).
-    # Confirmed live 2026-09-01: nowhere near enough for one that does -
+    # Nowhere near enough for one that does -
     # Direct Network Transfer's actual fetch, or hashing/concatenating a
     # large file. Used explicitly for just those calls, not as a new
     # blanket default.
     restore_long_running_exec_timeout_seconds: float
 
-    # Issue #29: the colour theme a browser gets before the visitor has
+    # The colour theme a browser gets before the visitor has
     # made their own choice (stored client-side in localStorage). One of
     # auto|light|dark; "auto" follows the OS but resolves to dark when
     # the OS states no preference. Purely a default - a logged-in user
     # can still switch themes from the user menu.
     default_theme: str
 
-    # Issue #122: off by default - matches the original "one shared task
+    # Off by default - matches the original "one shared task
     # list" behavior exactly, so turning this on is purely opt-in. When
     # on, a user only sees their own restore jobs (GET /api/restore-jobs
     # enforces this server-side, not just a UI filter) unless they hold
@@ -253,7 +253,7 @@ class Settings:
     # kept before an opportunistic sweep deletes it.
     job_history_retention_days: int
 
-    # Issue #60: caps how many `file-restore/list` calls this app has
+    # Caps how many `file-restore/list` calls this app has
     # in flight to PVE at once. Each cold call boots an ephemeral helper
     # VM on the PVE node (~3s, docs/api-reference.md) - Proxmox exposes no API
     # to list or stop those VMs directly (they're not visible as regular
@@ -264,7 +264,7 @@ class Settings:
     # in-flight request coalescing (pve_client.list_path) for the exact-
     # duplicate case (two scrubs landing on the same snapshot+path).
     #
-    # Default lowered from 4 to 2 (issue #109) after a real host
+    # Default lowered from 4 to 2 after a real host
     # instability report during timeline scrubbing. PVE's own privileged
     # API worker pool (pvedaemon/pveproxy, confirmed via
     # PVE/Service/pvedaemon.pm and PVE/Service/pveproxy.pm: hardcoded
@@ -275,9 +275,9 @@ class Settings:
     # window; 2 guarantees at least 1 slot stays free at all times.
     file_restore_list_max_concurrency: int
 
-    # Issue #30: one writable directory for the app's own small, durable
+    # One writable directory for the app's own small, durable
     # state. Nothing writes here yet - it exists so the features that
-    # will need persistence (#29's per-user prefs, #14's session store,
+    # will need persistence (per-user prefs, a persistent session store,
     # PH.6's dir_cache) share one deploy-provisioned location instead of
     # each inventing their own. Default "data" for a source checkout;
     # the systemd unit and docker-compose point it at a real volume.
@@ -289,7 +289,7 @@ class Settings:
     def pve_storage(self) -> str:
         """The first configured storage id. Kept for the handful of
         callers/tests that only need "a" storage; new code that lists
-        backups should iterate `pve_storages` (issue #43)."""
+        backups should iterate `pve_storages`."""
         return self.pve_storages[0]
 
 
@@ -301,7 +301,7 @@ def _storages_required() -> tuple[str, ...]:
 
 
 def _tls_preferred_and_minimum() -> tuple[str, str]:
-    """PREFERRED and MINIMUM data-plane TLS modes (issue #47). MINIMUM
+    """PREFERRED and MINIMUM data-plane TLS modes. MINIMUM
     must not be stricter than PREFERRED - caught here rather than as a
     confusing "no mode qualifies" at restore time."""
     preferred = _choice("RESTORE_DATA_NIC_TLS_PREFERRED", "verify", TLS_MODES)

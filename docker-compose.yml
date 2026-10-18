@@ -11,13 +11,13 @@ services:
     volumes:
       - ./.env:/app/.env:ro
       - ./certs:/app/certs
-      # Issue #30: the app's own state dir (PFR_DATA_DIR, default
+      # The app's own state dir (PFR_DATA_DIR, default
       # /app/data in the container). Named volume so it survives
       # `docker compose down` + a rebuild.
       - pve-flr-data:/app/data
     restart: unless-stopped
 
-  # Direct Network Transfer (docs/push-to-guest.md, issue #22) local
+  # Direct Network Transfer (docs/push-to-guest.md) local
   # testing only - not needed for ordinary use of the app. RESTORE_DATA_NICS' local_ip has
   # to be an address the container can actually bind to from inside its
   # own network namespace; the default service above uses Docker's

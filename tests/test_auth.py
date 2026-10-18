@@ -32,7 +32,7 @@ async def test_list_realms_sorted():
 @respx.mock
 async def test_list_realms_retries_then_succeeds(monkeypatch):
     """A transient failure of /access/domains is retried, not surfaced
-    as an empty dropdown (issue #31)."""
+    as an empty dropdown."""
     monkeypatch.setattr(auth, "_LIST_REALMS_BACKOFF_SECONDS", 0)
     route = respx.get(f"{API}/access/domains").mock(
         side_effect=[
@@ -48,7 +48,7 @@ async def test_list_realms_retries_then_succeeds(monkeypatch):
 @respx.mock
 async def test_list_realms_falls_back_to_pam_pve_when_pve_unreachable(monkeypatch, caplog):
     """Retries exhausted -> the two realms PVE always ships, never an
-    empty list (issue #31)."""
+    empty list."""
     monkeypatch.setattr(auth, "_LIST_REALMS_BACKOFF_SECONDS", 0)
     route = respx.get(f"{API}/access/domains").mock(side_effect=httpx.ConnectError("down"))
     with caplog.at_level("WARNING"):
@@ -91,9 +91,9 @@ async def test_login_bad_credentials_raises_401():
 
 @respx.mock
 async def test_login_with_2fa_raises_tfa_required(monkeypatch):
-    """Issue #15: PVE's own AccessControl.pm returns NeedTFA plus an
+    """PVE's own AccessControl.pm returns NeedTFA plus an
     opaque intermediate ticket (never a real session) rather than a
-    401/200 login - confirmed against PVE's own source, not guessed."""
+    401/200 login - per PVE's own source."""
     respx.post(f"{API}/access/ticket").mock(
         return_value=httpx.Response(
             200,
@@ -132,7 +132,7 @@ async def test_finish_tfa_login_totp_success_stores_session():
     assert session_id in auth._sessions
     assert auth._sessions[session_id].ticket == "PVE:alice@pam:REALTICKET"
     sent = route.calls.last.request.read().decode()
-    # A live-reported real bug (2026-09-30): PVE's own web UI
+    # A real bug: PVE's own web UI
     # (proxmox-widget-toolkit's TfaWindow.js) prefixes the response with
     # which method it's for - a bare code is rejected outright,
     # regardless of correctness. The colon is form-urlencoded as %3A.
@@ -267,7 +267,7 @@ async def test_get_session_refreshes_activity(session_data):
 
 async def test_get_session_keepalive_does_not_extend_the_idle_clock(session_data):
     """A background poll validates the session but is not user activity
-    (issue #27) - last_activity_at is left untouched."""
+    - last_activity_at is left untouched."""
     before = time.time() - 600
     session_data.last_activity_at = before
     auth._sessions["sid"] = session_data
@@ -310,7 +310,7 @@ async def test_ensure_fresh_ticket_refreshes_when_stale(session_data):
 
 @respx.mock
 async def test_ensure_fresh_ticket_refreshes_cap(session_data):
-    """Issue #122: `cap` (used by is_job_admin) must be kept current on
+    """`cap` (used by is_job_admin) must be kept current on
     every ticket refresh, not just captured once at login - a role
     change on PVE's side should take effect on the next refresh."""
     respx.post(f"{API}/access/ticket").mock(
@@ -334,7 +334,7 @@ async def test_ensure_fresh_ticket_refreshes_cap(session_data):
 @respx.mock
 async def test_get_session_evicts_and_401s_when_ticket_refresh_rejected(session_data):
     """A stale session whose ticket PVE won't renew is expired, not a 500
-    (issue #27) - get_session evicts it and raises 401 so the caller
+    - get_session evicts it and raises 401 so the caller
     redirects to /login."""
     respx.post(f"{API}/access/ticket").mock(return_value=httpx.Response(401, json={"data": None}))
     session_data.ticket_issued_at = time.time() - (auth._TICKET_REFRESH_AGE_SECONDS + 60)

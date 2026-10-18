@@ -57,7 +57,7 @@ def test_index_lists_groups_and_defaults_to_first(client):
 
 
 def test_index_groups_a_host_backup_with_no_guest_name_resolution(session_data, monkeypatch):
-    # Issue #155: a host backup's "vmid" is a hostname, not a numeric id -
+    # A host backup's "vmid" is a hostname, not a numeric id -
     # list_guest_names (keyed by /cluster/resources, vm/ct only) never has
     # an entry for it, so the label falls back to "HOST <hostname>".
     archives = [
@@ -232,7 +232,7 @@ def test_htmx_unauthorized_returns_hx_redirect():
 
 def test_api_unauthorized_returns_401_json_not_a_redirect():
     # fetch() follows a 302 transparently and reads the login HTML as a
-    # success; the app.js widgets need a real 401 to act on (issue #27).
+    # success; the app.js widgets need a real 401 to act on.
     main.app.dependency_overrides.clear()
     with TestClient(main.app) as c:
         resp = c.get("/api/browse", params={"volume": "v"}, follow_redirects=False)
@@ -264,7 +264,7 @@ def test_expired_session_on_api_returns_401_with_expiry_detail(session_data):
 
 def test_restore_jobs_poll_does_not_refresh_session_activity(session_data):
     # The 4s restore-jobs poll must not keep an idle session alive
-    # (issue #27) - so an open-but-unused tab still times out.
+    # - so an open-but-unused tab still times out.
     main.app.dependency_overrides.clear()
     before = time.time() - 600
     session_data.last_activity_at = before
@@ -311,7 +311,7 @@ def test_browse_renders_file_grid(client, monkeypatch):
 
 
 def test_browse_renders_drive_icon_for_root_entries(client, monkeypatch):
-    """Issue #64: a root-level, non-leaf entry (a virtual disk) gets the
+    """A root-level, non-leaf entry (a virtual disk) gets the
     same drive SVG the tree pane already uses, not the plain folder
     emoji a subdirectory gets."""
 
@@ -331,11 +331,11 @@ def test_browse_renders_drive_icon_for_root_entries(client, monkeypatch):
     assert "&#128193;" in sub_resp.text  # plain folder emoji for a non-root directory
 
 
-# Issue #66: a 3-disk VM whose LVM volume group ("myvg", to avoid any
+# A 3-disk VM whose LVM volume group ("myvg", to avoid any
 # substring collision with the filepath tokens below) spans all three -
 # every disk's own "lvm" folder shows the identical VG (different filepath
-# tokens per disk, same content - confirmed live 2026-09-25), same shape
-# the real screenshot behind #66 showed. "disk0" also has a "boot" entry
+# tokens per disk, same content - as seen against a real PVE), same shape
+# a real screenshot showed. "disk0" also has a "boot" entry
 # alongside "part"/"lvm" (a stand-in for some as-yet-unobserved third
 # category) so flattening only fires when "part" truly has zero siblings.
 # "drive-efidisk0" has no LVM at all and only a single "part" child, to
@@ -369,12 +369,12 @@ _LVM_TREE = {
         {"text": "root", "leaf": False, "filepath": "tok-vg-root"},
         {"text": "swap", "leaf": False, "filepath": "tok-vg-swap"},
     ],
-    "tok-vg-home": [],  # mountable but empty - issue #80's readability probe lands here
+    "tok-vg-home": [],  # mountable but empty - the readability probe lands here
     "tok-vg-root": [],
     "tok-vg-swap": [],
     "tok-efidisk0": [{"text": "part", "leaf": False, "filepath": "tok-efidisk0-raw"}],
     "tok-efidisk0-raw": [{"text": "1", "leaf": False, "filepath": "tok-efidisk0-raw-1"}],
-    "tok-efidisk0-raw-1": [],  # mountable but empty - issue #80's readability probe lands here
+    "tok-efidisk0-raw-1": [],  # mountable but empty - the readability probe lands here
 }
 
 
@@ -383,7 +383,7 @@ async def _fake_lvm_list_path(session, volume, filepath="/"):
 
 
 def test_browse_root_elevates_lvm_volume_groups(client, monkeypatch):
-    """Issue #66: a VG spanning multiple disks gets ONE root-level entry
+    """A VG spanning multiple disks gets ONE root-level entry
     (deduped across the disks it spans) instead of forcing the user to
     pick an arbitrary disk to find it under."""
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
@@ -403,7 +403,7 @@ def test_browse_root_elevates_lvm_volume_groups(client, monkeypatch):
 
 
 def test_browse_disk_level_hides_lvm_and_keeps_part_with_a_real_sibling(client, monkeypatch):
-    """Issue #66: a disk that still has other real, non-LVM content
+    """A disk that still has other real, non-LVM content
     alongside "part" (here "boot") keeps "part" as its own folder when
     browsed directly - only the now-redundant "lvm" folder (elevated to
     root) is hidden, and "part" is left alone only when it's truly the
@@ -420,7 +420,7 @@ def test_browse_disk_level_hides_lvm_and_keeps_part_with_a_real_sibling(client, 
 
 
 def test_browse_disk_level_flattens_lone_part(client, monkeypatch):
-    """Issue #66: when "part" is a disk's only remaining child (no LVM or
+    """When "part" is a disk's only remaining child (no LVM or
     anything else alongside it), the indirection folder itself is skipped
     - partition numbers show directly under the disk."""
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
@@ -434,7 +434,7 @@ def test_browse_disk_level_flattens_lone_part(client, monkeypatch):
 
 
 def test_browse_partition_folder_gets_the_partition_type_label(client, monkeypatch):
-    """Issue #83: a numbered partition folder (this disk's flattened "1")
+    """A numbered partition folder (this disk's flattened "1")
     gets a distinct "Partition" type_label/icon, not the generic
     "Folder" every other directory gets."""
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
@@ -447,7 +447,7 @@ def test_browse_partition_folder_gets_the_partition_type_label(client, monkeypat
 
 
 def test_browse_lvm_logical_volume_gets_the_partition_type_label(client, monkeypatch):
-    """Issue #83: same distinct type_label/icon for a logical volume
+    """Same distinct type_label/icon for a logical volume
     inside an elevated LVM volume group's own listing - also a
     filesystem root, not a plain directory."""
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
@@ -458,7 +458,7 @@ def test_browse_lvm_logical_volume_gets_the_partition_type_label(client, monkeyp
 
 
 def test_browse_annotates_windows_drive_letter_on_partition_folder(client, monkeypatch):
-    """Issue #77: a flattened partition folder ("1" under drive-efidisk0,
+    """A flattened partition folder ("1" under drive-efidisk0,
     same fixture as the flatten test above) gets its resolved drive
     letter appended for display - but the raw data-label used to build
     the navigational crumb trail must stay untouched ("1", not
@@ -528,7 +528,7 @@ def test_tree_annotates_windows_drive_letter_on_partition_folder(client, monkeyp
 
 
 def test_browse_skips_drive_letter_annotation_for_containers(client, monkeypatch):
-    """Issue #77: containers have no guest agent/disk concept at all -
+    """Containers have no guest agent/disk concept at all -
     must never even attempt the capability check."""
     from backend import guest_agent
 
@@ -570,7 +570,7 @@ async def _fake_unreadable_list_path(session, volume, filepath="/"):
 
 
 def test_browse_hides_partition_pve_cant_mount(client, monkeypatch):
-    """Issue #80: confirmed live 2026-09-28 - a partition PVE's file-
+    """A partition PVE's file-
     restore helper can't mount (e.g. a Windows Storage Spaces stripe
     member) errors on `file-restore/list`, it doesn't list empty. That's
     the signal to hide it - and a genuinely empty-but-mountable
@@ -596,7 +596,7 @@ def test_tree_hides_partition_pve_cant_mount(client, monkeypatch):
 
 
 def test_browse_never_probes_partition_readability_for_containers(client, monkeypatch):
-    """Issue #80: containers have no partition concept - must never even
+    """Containers have no partition concept - must never even
     attempt the extra mount-probe call."""
 
     async def fake_ct_list_path(session, volume, filepath="/"):
@@ -688,7 +688,7 @@ def test_tree_hides_swap_volume_inside_an_lvm_group(client, monkeypatch):
 
 
 def test_browse_never_applies_lvm_view_to_container_volumes(client, monkeypatch):
-    """Issue #66: containers have no disk/partition concept - a CT backup
+    """Containers have no disk/partition concept - a CT backup
     could legitimately have real top-level folders literally named "part"
     or "lvm", which must never be touched by this logic."""
 
@@ -746,7 +746,7 @@ def test_tree_lists_only_directories(client, monkeypatch):
 
 
 def test_tree_sorts_subdirectories_alphabetically(client, monkeypatch):
-    """Issue #63: PVE's file-restore/list response order isn't
+    """PVE's file-restore/list response order isn't
     alphabetical - unlike /api/browse, /api/tree wasn't sorting its own
     entries before this fix."""
 
@@ -799,7 +799,7 @@ def test_restore_capabilities_rejects_unknown_guest_type(client):
 
 
 def test_restore_capabilities_host_backup_is_a_clean_unavailable_not_a_400(client):
-    # Issue #155: a host backup has no guest to push into - this must be
+    # A host backup has no guest to push into - this must be
     # a normal 200/unavailable, not a 400, or the frontend's restore
     # button gets stuck on "Checking restore availability..." forever
     # (it treats any non-2xx as "never loaded", not "loaded: false").
@@ -1012,7 +1012,7 @@ def test_restore_bundle_passes_ownership_through_for_a_linux_guest(client, monke
 
 
 def test_restore_bundle_ownership_forced_false_for_a_windows_guest(client, monkeypatch):
-    """Issue #26: same defense-in-depth as the single-file case (#20) -
+    """Same defense-in-depth as the single-file case -
     the server never trusts the frontend's checkbox state alone."""
     from backend import guest_agent, restore_jobs, restore_runner
 
@@ -1036,7 +1036,7 @@ def test_restore_bundle_ownership_forced_false_for_a_windows_guest(client, monke
 
 
 def test_restore_bundle_tolerates_extra_fields_in_item_json(client, monkeypatch):
-    # Confirmed live 2026-09-01: the checkbox value each `item` entry
+    # The checkbox value each `item` entry
     # comes from (main.py's own item_json, browse()) always includes
     # `mtime` too - only relevant to the single-file restore path, but
     # still present on every multi-select entry. A strict
@@ -1217,7 +1217,7 @@ def test_restore_passes_ownership_through_to_the_job_for_a_linux_guest(client, m
 
 
 def test_restore_ownership_forced_false_for_a_windows_guest_regardless_of_request(client, monkeypatch):
-    """Issue #20: NTFS has no uid/gid/mode concept, and ACL restore is a
+    """NTFS has no uid/gid/mode concept, and ACL restore is a
     separate, confirmed-infeasible-via-this-API problem - the server
     never trusts the frontend's checkbox state for this, even though
     the checkbox is also disabled client-side for a Windows guest."""
@@ -1495,8 +1495,8 @@ def test_restore_jobs_cancel_marks_flag_and_returns_job(client, monkeypatch):
 
 
 def test_restore_jobs_cancel_forbidden_for_non_owner_non_admin(client, monkeypatch, session_data):
-    """Issue #123: cancel has its own ownership check, independent of
-    RESTRICT_JOBS_TO_OWN (#122) - a job submitted by one user can't be
+    """Cancel has its own ownership check, independent of
+    RESTRICT_JOBS_TO_OWN - a job submitted by one user can't be
     cancelled by another who isn't a job admin either."""
     from backend import guest_agent, restore_jobs, restore_runner
 
@@ -1671,7 +1671,7 @@ def test_restore_original_path_rejects_unknown_guest_type(client):
 
 
 def test_restore_original_path_rejects_containers(client):
-    """Issue #68: push-to-guest restore is never available for a
+    """Push-to-guest restore is never available for a
     container at all (no qemu-guest-agent) - this whole modal, and so
     this endpoint, is unreachable for one; 400 rather than a 200
     available=false so a stray call doesn't look like a real answer."""
@@ -1797,7 +1797,7 @@ def test_download_bundle_streams_a_zip(client, monkeypatch):
 
 
 def test_login_page_always_has_a_realm_option(monkeypatch):
-    # list_realms() owns its own failure handling now (issue #31): it
+    # list_realms() owns its own failure handling now: it
     # retries, then returns the pam/pve fallback rather than raising or
     # returning an empty list, so login_page never renders an empty
     # <select> (which the browser would omit from the POST).
@@ -1830,14 +1830,10 @@ def test_login_submit_invalid_credentials(monkeypatch):
 
 
 def test_login_submit_fails_cleanly_when_pve_is_unreachable(monkeypatch):
-    """Issue #98/#99: a transport-level failure (PVE unreachable, TLS
+    """A transport-level failure (PVE unreachable, TLS
     verification failure, DNS) isn't an HTTPException and used to
     propagate as an unhandled 500 with zero indication of the real
-    cause. login_submit was rewritten from scratch by #15's 2FA work
-    before #99 merged, which carried the fix itself forward but dropped
-    this regression test along the way - added back here directly
-    against current main rather than resolving #99's now-conflicting
-    diff, since the code it tests is already shipped."""
+    cause. This regression test guards the fix for that."""
 
     async def unreachable_login(username, password):
         raise httpx.ConnectError("Connection refused")
@@ -1871,7 +1867,7 @@ def test_login_submit_success_sets_cookie(monkeypatch):
 
 
 def test_login_submit_shows_code_entry_step_when_2fa_required(monkeypatch):
-    """Issue #15, step 1: a NeedTFA account gets the code-entry form back,
+    """Step 1: a NeedTFA account gets the code-entry form back,
     not an error - and the response must carry the challenge forward,
     since this route keeps no server-side state for a login still in
     progress. Critically, the hidden username field must be PVE's own
@@ -1879,7 +1875,7 @@ def test_login_submit_shows_code_entry_step_when_2fa_required(monkeypatch):
     not the raw typed username ("x") - PVE's challenge ticket is
     cryptographically bound to the exact string it returned (AAD in its
     own assemble_ticket call), so resending anything else fails the
-    second call even with the right code. A real live-reported bug: this
+    second call even with the right code. A real bug: this
     field used to echo back the raw form value instead."""
 
     async def needs_tfa(username, password):
@@ -1900,7 +1896,7 @@ def test_login_submit_shows_code_entry_step_when_2fa_required(monkeypatch):
 
 
 def test_login_submit_completes_2fa_and_sets_cookie(monkeypatch):
-    """Issue #15, step 2: the code-entry form's own POST is distinguished
+    """Step 2: the code-entry form's own POST is distinguished
     by tfa_challenge being present, and completes the login via
     finish_tfa_login - the original password is never sent again."""
 

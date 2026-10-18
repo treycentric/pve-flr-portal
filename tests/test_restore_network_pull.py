@@ -158,7 +158,7 @@ async def test_detect_fetch_tool_tolerates_a_probe_raising_and_tries_the_next_on
     assert calls == ["where curl.exe", "powershell -NoProfile -NonInteractive -Command Get-Command Invoke-WebRequest"]
 
 
-# --- data-plane TLS ladder (issue #47) ----------------------------------
+# --- data-plane TLS ladder ----------------------------------
 
 def test_tool_supports_tls_capability_matrix():
     for tool in ("curl", "wget", "python3", "Invoke-WebRequest", "cscript", "certutil", "bitsadmin", "bash"):

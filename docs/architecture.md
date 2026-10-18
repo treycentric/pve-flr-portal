@@ -37,7 +37,7 @@ two exceptions are both single SQLite files under `PFR_DATA_DIR` (issue
 #30), written from the request path, never a background job:
 
 - `dir_cache.sqlite3` — a lazily-populated cache of `file-restore/list`
-  responses (issue #109). See "Data model" below.
+  responses. See "Data model" below.
 - `job_history.sqlite` — persisted restore-job records and logs (issue
   #124). See "Data model" below.
 
@@ -165,7 +165,7 @@ opportunistically from the list endpoint on every load — independent of
 restarts; it's a time-based sweep, not a restart-recovery mechanism.
 `RestoreJobManager.evict_expired()` runs alongside it with the same cutoff
 so a job leaves the in-memory dict (and its finished task handle) when its
-persisted row expires; active jobs are never evicted (#17).
+persisted row expires; active jobs are never evicted.
 `reconcile_interrupted()` runs once at startup (`main.py`'s `lifespan`
 hook), before serving any request: any row still
 `queued`/`running`/`verifying` at that point is necessarily left over
@@ -212,9 +212,8 @@ own `GET /nodes/{node}/storage/{storage}/content?content=backup`.
   `cap["dc"][priv]` means a privilege was granted at the bare root path
   `/` specifically (PVE's bucketing falls through to `"dc"` only when a
   grant has no second path segment to match) — this is what
-  `auth.is_job_admin()` checks for the `RESTRICT_JOBS_TO_OWN` bypass
-  (issue #122).
-- **2FA (TOTP/recovery keys, issue #15):** PVE's `/access/ticket`
+  `auth.is_job_admin()` checks for the `RESTRICT_JOBS_TO_OWN` bypass.
+- **2FA (TOTP/recovery keys):** PVE's `/access/ticket`
   returns `NeedTFA: 1` plus an opaque, signed intermediate value in
   `ticket` when a second factor is required. `auth.login()` raises
   `TFARequired(challenge, username)` in that case; `finish_tfa_login
@@ -228,7 +227,7 @@ own `GET /nodes/{node}/storage/{storage}/content?content=backup`.
   cryptographically bound to PVE's normalized username. WebAuthn is out
   of scope (needs browser credential-API JS, not a text field).
 
-### OIDC/SSO realm login (issue #56)
+### OIDC/SSO realm login
 
 A PVE realm can be `type: openid`. Two calls, matching
 `pve-access-control`'s `PVE/API2/OpenId.pm`:
@@ -339,7 +338,7 @@ These are design consequences, not defects.
 **Hard ceilings (need real work to lift):**
 
 - **`/api/download-bundle` concurrency.** Streams with bounded memory
-  and no disk staging (issue #7, `backend/download_bundle.py`): each
+  and no disk staging (`backend/download_bundle.py`): each
   item is fetched as `tar=1` (readable strictly front to back, unlike
   PVE's zip), re-emitted into the zip/tar.gz/tar.zst on a worker
   thread, and handed to the response through a bounded queue. Each

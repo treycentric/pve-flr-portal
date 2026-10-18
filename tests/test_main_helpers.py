@@ -8,7 +8,7 @@ main = pytest.importorskip("backend.main", reason="backend.main needs FastAPI")
     [
         ("pbs:backup/vm/133/2026-08-30T02:03:57Z", ("vm", "133", "2026-08-30T02:03:57Z")),
         ("pbs:backup/ct/104/2026-01-02T00:00:00Z", ("ct", "104", "2026-01-02T00:00:00Z")),
-        # Issue #155: a host backup's third segment is a hostname, not a vmid.
+        # A host backup's third segment is a hostname, not a vmid.
         ("pbs-host:backup/host/pve01/2026-05-14T12:56:57Z", ("host", "pve01", "2026-05-14T12:56:57Z")),
     ],
 )

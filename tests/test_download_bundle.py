@@ -1,4 +1,4 @@
-"""Streaming /api/download-bundle (issue #7) - see backend/download_bundle.py."""
+"""Streaming /api/download-bundle - see backend/download_bundle.py."""
 
 import asyncio
 import io

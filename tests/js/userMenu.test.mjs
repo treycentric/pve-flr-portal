@@ -27,7 +27,7 @@ test('logout closes the menu and POSTs a form to /logout', () => {
   assert.deepEqual(submitted, [{ method: 'post', action: '/logout' }]);
 });
 
-// --- Color theme (issue #29) ---
+// --- Color theme ---
 
 function themeEnv(stored, osPrefersLight = false) {
   const store = stored ? { pfr_theme: stored } : {};

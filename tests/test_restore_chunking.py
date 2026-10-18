@@ -41,7 +41,7 @@ def test_scratch_filename_is_unique_per_job_and_index():
 
 
 def test_bytes_to_wire_str_full_binary_range_round_trips_losslessly():
-    # Live-verified 2026-09-01 against a real guest: every byte value
+    # Against a real guest, every byte value
     # (including NUL and 0xFF) survives the latin-1 mapping unchanged -
     # this is the pure-logic half of that same guarantee.
     content = bytes(range(256))

@@ -4,7 +4,7 @@ This reference documents the undocumented or under-documented Proxmox API surfac
 depends on. None of this is in Proxmox's published API reference
 (`https://pve.proxmox.com/pve-docs/api-viewer/`) beyond the bare
 parameter list — it's reverse-engineered from the real GUI's traffic,
-Proxmox's own source, and live testing against real guests. Each fact
+Proxmox's own source, and testing against real guests. Each fact
 below is confirmed, not guessed; if a future PVE/QGA version behaves
 differently, update this doc from the same kind of evidence rather than
 assuming the old facts still hold.

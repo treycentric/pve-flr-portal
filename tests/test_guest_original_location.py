@@ -78,7 +78,7 @@ async def test_windows_partition_resolves_to_drive_letter(session_data, monkeypa
 
 @respx.mock
 async def test_windows_sata_disk_matched_by_scsibus_not_ordinal(session_data, monkeypatch):
-    """Confirmed live 2026-09-27: sataN's disk is matched by BusType=SATA
+    """sataN's disk is matched by BusType=SATA
     + SCSIBus==N, not by its ordinal position in PVE's root listing -
     here the disk is 3rd in PVE's listing (ordinal 2) but its real
     Windows DiskNumber is 1, which only the bus-based match can find."""
@@ -111,7 +111,7 @@ async def test_windows_sata_disk_matched_by_scsibus_not_ordinal(session_data, mo
 
 @respx.mock
 async def test_windows_scsi_disk_matched_by_lun(session_data, monkeypatch):
-    """Confirmed live 2026-09-27: virtio-scsi-single gives every scsi disk
+    """virtio-scsi-single gives every scsi disk
     its own controller (SCSIBus/SCSITargetId both read 0 for all of
     them), so the LUN from DEVPKEY_Device_LocationInfo is what actually
     distinguishes scsi0 from a disk configured as scsi5."""
@@ -200,7 +200,7 @@ async def test_windows_bus_match_http_error_falls_back_to_ordinal_not_a_500(sess
 
 
 async def test_windows_disk_bus_rows_are_cached_per_vmid(session_data, monkeypatch):
-    """Issue #77 follow-on: resolving a second, different disk on the
+    """Resolving a second, different disk on the
     same vmid within the TTL must not re-invoke guest-exec - the
     whole-VM query already covered every disk in the first call."""
     calls = []
@@ -331,7 +331,7 @@ async def test_windows_virtio_blk_bus_falls_back_to_ordinal(session_data, monkey
 
 @respx.mock
 async def test_flattened_partition_resolves_to_drive_letter(session_data, monkeypatch):
-    """Issue #66 regression: a disk whose `part` folder was flattened
+    """Regression: a disk whose `part` folder was flattened
     away (the common case - `part` was its only child) has no literal
     "part" crumb at all, just the partition number directly under the
     disk. This used to fall through to "unavailable" until this shape
@@ -353,7 +353,7 @@ async def test_flattened_partition_resolves_to_drive_letter(session_data, monkey
 
 @respx.mock
 async def test_elevated_lvm_resolves_via_vg_lv_crumb(session_data):
-    """Issue #66 regression: LVM volume groups are elevated to root-level
+    """Regression: LVM volume groups are elevated to root-level
     "LVM <vg>" entries - browsing into one lands directly on its logical
     volumes, with no disk/`lvm` crumb prefix at all anymore. This used to
     fall through to "unavailable" until this shape was recognized too."""

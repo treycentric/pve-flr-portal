@@ -18,7 +18,7 @@
 # PVE::Storage::PBSPlugin::list_volumes - the code behind both
 # this app's and PVE's own "Backups" content listing - drops host
 # backups via TWO separate lines, not one: a `$btype` check restricted
-# to vm/ct, and (confirmed live 2026-10 - the first patch alone wasn't
+# to vm/ct, and (the first patch alone wasn't
 # enough, host backups still didn't list even after it) a `$bid`
 # numeric-only check right after it, which a host backup's hostname-
 # shaped id always fails regardless of the first check. Neither check
@@ -29,7 +29,7 @@
 # reverted by every pve-storage package update (the dpkg hook below
 # reapplies it automatically after that happens).
 #
-# Two more lines (also confirmed live, once the two above let host
+# Two more lines (once the two above let host
 # entries through at all) set `vmid => int($bid)` and `subtype =>
 # 'lxc'` unconditionally for every entry - wrong for a host backup
 # (whose id is a hostname, not a vmid) and noisy: int() on a non-
@@ -93,7 +93,7 @@ chains = [
         r"next if $btype ne 'host' && $bid !~ m/^\d+$/;",
     ],
     [
-        # Confirmed live 2026-10: int() on a hostname-shaped $bid prints
+        # int() on a hostname-shaped $bid prints
         # "Argument ... isn't numeric in int" to stderr on every single
         # listing query once the two chains above let host entries
         # through - cosmetic (this app reads guest type from the volid,

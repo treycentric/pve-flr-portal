@@ -3,8 +3,8 @@ cert/key pair on first run so the app never has to serve plain HTTP once
 real login credentials are involved.
 
 Both `ensure_self_signed_cert` (main UI listener) and
-`ensure_data_plane_cert` (Direct Network Transfer data plane, issue #47
-§7.6.1) generate a self-signed pair only when the target files are
+`ensure_data_plane_cert` (Direct Network Transfer data plane,
+docs/push-to-guest.md) generate a self-signed pair only when the target files are
 absent. An **admin-supplied cert/key is never overwritten or deleted** -
 if it's valid it's used as-is; if it's broken (mismatched, unreadable,
 expired) the app logs a clear error and leaves it in place for the
@@ -73,7 +73,7 @@ def _write_self_signed(
     )
     if is_ca:
         # Self-signed cert used as its own trust anchor (the data-plane
-        # cert, issue #47): a strict validator - and this app's own
+        # cert): a strict validator - and this app's own
         # guest_ca.is_ca_cert() guard - wants BasicConstraints cA=True.
         builder = builder.add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
     cert = builder.sign(key, hashes.SHA256())
@@ -186,7 +186,7 @@ def ensure_data_plane_cert(
     ip_sans: tuple[str, ...],
     dns_sans: tuple[str, ...] = (),
 ) -> None:
-    """Ensure a usable data-plane cert/key at these paths (issue #47).
+    """Ensure a usable data-plane cert/key at these paths.
     Generates a self-signed one (IP/DNS SANs for the configured data
     NICs) only if absent. An existing pair:
       - valid, covers every SAN -> use as-is;

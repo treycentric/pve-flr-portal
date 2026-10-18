@@ -74,7 +74,7 @@ def _static_version(filename: str) -> int:
 
 templates.env.globals["static_version"] = _static_version
 
-# Issue #29: admin-configured default colour theme, surfaced to every
+# Admin-configured default colour theme, surfaced to every
 # template (base.html / login.html both need it in <head> before paint).
 templates.env.globals["default_theme"] = settings.default_theme
 
@@ -88,7 +88,7 @@ async def unauthorized_handler(request: Request, exc: HTTPException):
     if exc.status_code == 401:
         # "Not logged in" is a plain unauthenticated visit; anything else
         # (idle timeout, failed PVE ticket refresh) is a session that
-        # *was* valid, so tell /login to say so (issue #27).
+        # *was* valid, so tell /login to say so.
         target = "/login" if exc.detail == "Not logged in" else "/login?reason=expired"
         if request.headers.get("HX-Request"):
             return Response(status_code=200, headers={"HX-Redirect": target})
@@ -146,7 +146,7 @@ def _oidc_binding(state: str) -> str:
 @app.get("/login")
 async def login_page(request: Request, reason: str | None = Query(None)):
     # list_realms() handles its own failures - it retries, then returns
-    # the pam/pve fallback (issue #31) - so it never raises here and
+    # the pam/pve fallback - so it never raises here and
     # never yields an empty dropdown.
     realms = await auth.list_realms()
     notice = "Your session expired — please sign in again." if reason == "expired" else None
@@ -163,7 +163,7 @@ async def login_submit(
     password: str = Form(""),
     tfa_challenge: str = Form(""),
 ):
-    """Issue #15: a second POST here - distinguished by `tfa_challenge`
+    """A second POST here - distinguished by `tfa_challenge`
     being set - is the second step of a 2FA login. `password` doubles
     as "the account password" (first step) or "the TOTP/recovery code"
     (second step), same as PVE's own /access/ticket contract does.
@@ -177,7 +177,7 @@ async def login_submit(
     PVE/API2/AccessControl.pm, `$aad = $username` after
     `lookup_username` normalization) - resending anything other than
     the exact string PVE itself returned makes the second call fail
-    verification, even with the right code. Confirmed live: this was
+    verification, even with the right code. This was
     the actual bug behind an initial "the submitted code isn't
     working" report."""
 
@@ -223,8 +223,8 @@ async def login_submit(
         )
     except httpx.HTTPError as exc:
         # A transport-level failure (PVE unreachable, TLS verification
-        # failure against its cert, DNS) isn't an HTTPException - issue
-        # #98, confirmed live as an unhandled 500 with zero indication
+        # failure against its cert, DNS) isn't an HTTPException - left alone it
+        # surfaces as an unhandled 500 with zero indication
         # of the real cause. Logged here since the login page's own
         # message is deliberately generic (no PVE_HOST/internals in a
         # page anyone can reach pre-auth).
@@ -250,11 +250,11 @@ async def login_oidc_callback(
     error: str | None = Query(None),
     error_description: str | None = Query(None),
 ):
-    """Issue #56, leg 2: the identity provider's redirect back. Registered
+    """The identity provider's redirect back. Registered
     *before* login_oidc_start's `/login/oidc/{realm}` below - Starlette
     matches routes in registration order, and a `{realm}` path parameter
     would otherwise swallow this literal path first (matching with
-    realm="callback"), confirmed live by this route's own tests.
+    realm="callback"), as this route's own tests show.
 
     A denied/cancelled login or a misconfigured client comes back as
     `error` (standard OAuth2), not `code`/`state` - handled explicitly
@@ -313,7 +313,7 @@ async def login_oidc_callback(
 
 @app.get("/login/oidc/{realm}")
 async def login_oidc_start(realm: str, request: Request):
-    """Issue #56, leg 1: redirects the browser to the identity provider.
+    """Redirects the browser to the identity provider.
     `redirect_url` is computed from this same route both here and in
     login_oidc_callback() above via `url_for` - since it's derived from
     whatever host/scheme the browser actually used to reach this route,
@@ -494,14 +494,14 @@ def _type_label(entry: dict, at_root: bool, filesystem_root: bool = False) -> st
 
 
 async def _discover_lvm_volumes(session: SessionData, volume: str, disk_entries: list[dict]) -> list[dict]:
-    """Issue #66: an LVM volume group spanning multiple virtual disks shows
+    """An LVM volume group spanning multiple virtual disks shows
     up as an identical `lvm/<vg>` subtree under EVERY disk it spans -
-    confirmed live 2026-09-25: PVE's helper VM attaches every disk in the
+    PVE's helper VM attaches every disk in the
     snapshot at once and assembles LVM across them, so drilling into
     `lvm/<vg>/...` under any one of them shows the same merged contents.
 
     Probes each root-level disk (in parallel - pve_client.list_path's own
-    semaphore/coalescing, issue #60, still caps how many of these actually
+    semaphore/coalescing, still caps how many of these actually
     hit PVE at once) for an `lvm` child, and returns one synthetic
     root-level entry per distinct volume-group name found, pointing at
     whichever disk's copy was seen first (content is identical regardless
@@ -547,7 +547,7 @@ def _volid_guest_type(volid: str) -> str | None:
 
 
 async def _disk_level_entries(session: SessionData, volume: str, entries: list[dict]) -> list[dict]:
-    """Issue #66: called only when `entries` is a disk's own listing (one
+    """Called only when `entries` is a disk's own listing (one
     level below root). PVE always nests a disk's real content under a
     synthetic `part` folder (raw partition-table entries) and, when the
     disk is part of the guest's own LVM, an `lvm` folder (assembled volume
@@ -569,15 +569,14 @@ async def _disk_level_entries(session: SessionData, volume: str, entries: list[d
 async def _apply_lvm_view(
     session: SessionData, volume: str, filepath: str, crumbs: list, entries: list[dict]
 ) -> tuple[list[dict], set[str]]:
-    """Shared by /api/browse and /api/tree (issue #66): returns the
+    """Shared by /api/browse and /api/tree: returns the
     entries to actually render plus the set of entry names that are
     elevated LVM volume-group entries (so callers can label/icon them
     distinctly). Applies _discover_lvm_volumes at root and
     _disk_level_entries one level below it - both gated to `vm`-type
     volumes, since containers have no disk/partition concept at all and a
     CT's own root could legitimately contain a real folder named "part"
-    or "lvm". Also hides a disk from the root listing entirely (issue
-    #80 follow-on) when it has no elevated LVM content of its own and
+    or "lvm". Also hides a disk from the root listing entirely when it has no elevated LVM content of its own and
     every one of its partitions is unmountable - see
     _disk_has_visible_content."""
     if _volid_guest_type(volume) != "vm":
@@ -598,7 +597,7 @@ async def _apply_lvm_view(
 async def _disk_has_visible_content(
     session: SessionData, volume: str, disk: dict, lvm_names: set[str]
 ) -> bool:
-    """Issue #80 follow-on: would browsing into this disk show anything
+    """Would browsing into this disk show anything
     at all? A disk that hosts part of an elevated LVM volume group
     always counts as visible - that content already shows up at root
     via its own elevated entry, regardless of whether this disk's own
@@ -648,12 +647,12 @@ def _is_lvm_volume_group_listing(crumbs: list) -> bool:
 
 
 def _is_filesystem_root_listing(volume: str, crumbs: list) -> bool:
-    """Issue #83: true when the entries about to be rendered are
+    """True when the entries about to be rendered are
     themselves filesystem roots - a disk's numbered partitions, or an
     elevated LVM volume group's own logical volumes - rather than plain
     directories within one. Drives `_type_label`'s "Partition" type_label
     (a distinct icon), reusing the exact same crumb-position checks
-    issue #80's readability probe already needs for the same
+    the readability probe already needs for the same
     distinction."""
     return _is_partition_listing(volume, crumbs) or _is_lvm_volume_group_listing(crumbs)
 
@@ -661,9 +660,9 @@ def _is_filesystem_root_listing(volume: str, crumbs: list) -> bool:
 async def _readable_entries(
     session: SessionData, volume: str, entries: list[dict], *, digits_only: bool
 ) -> list[dict]:
-    """Issue #80 (+ LVM follow-on): the actual mount-readability probe -
+    """The actual mount-readability probe -
     a child PVE's file-restore helper VM can't mount any filesystem on
-    is dropped entirely. Confirmed live 2026-09-28: a member of a
+    is dropped entirely. A member of a
     Windows Storage Spaces stripe set comes back as a real PVE error -
     "mounting '...' failed: all mounts failed or no supported file
     system" - not an empty listing, which is the safe signal to key off
@@ -710,7 +709,7 @@ async def _filter_unmountable_children(
 
 
 async def _annotate_windows_drive_letters(session: SessionData, volume: str, crumbs: list, entries: list[dict]) -> None:
-    """Issue #77: sets a numbered partition folder entry's own
+    """Sets a numbered partition folder entry's own
     `drive_letter` key when it resolves to a real drive letter in the
     running Windows guest, for a template to render as "2 (C:)" - a
     display-only annotation, never written into `text` itself, since
@@ -728,7 +727,7 @@ async def _annotate_windows_drive_letters(session: SessionData, volume: str, cru
     an explicit user action with its own capability check the way
     restore-to-original-location is, so a flaky guest agent must never
     turn into a broken tree/browse view. Callers should run this after
-    _filter_unmountable_children (issue #80), not before - no point
+    _filter_unmountable_children, not before - no point
     querying guest-exec for a drive letter on an entry that's about to
     be hidden anyway."""
     try:
@@ -833,7 +832,7 @@ async def tree(
     at_root = filepath == "/"
     parent_crumbs = json.loads(crumbs)
     entries, lvm_names = await _apply_lvm_view(session, volume, filepath, parent_crumbs, entries)
-    # Issue #63: PVE's file-restore/list response order isn't alphabetical
+    # PVE's file-restore/list response order isn't alphabetical
     # (it's whatever order the backup's own filesystem metadata happens to
     # be in) - /api/browse already sorts its entries, this endpoint didn't.
     entries = sorted((e for e in entries if not bool(e.get("leaf", True))), key=lambda e: e.get("text", "").lower())
@@ -898,7 +897,7 @@ async def restore_capabilities(
     implies, not something that should ever crash the button. `type` is
     the app-internal "vm"/"ct" value (matching the task picker/groups
     elsewhere) - guest_agent.py translates it to PVE's "qemu"/"lxc" API
-    node segment. A `host` backup (issue #155) has no guest to push into
+    node segment. A `host` backup has no guest to push into
     at all - a clean "unavailable" response here, not a 400, since the
     frontend treats a non-2xx as "never loaded" and gets stuck showing
     "Checking restore availability..." forever."""
@@ -919,7 +918,7 @@ async def restore_capabilities(
                 reason = (
                     f"PVE returned {code} for {path} - on a cluster this can mean the guest's real node "
                     "couldn't be resolved (needs Sys.Audit on / for /cluster/resources; falls back to "
-                    "'localhost', which 500s for a guest on another node - issue #51, docs/architecture.md)"
+                    "'localhost', which 500s for a guest on another node - docs/architecture.md)"
                 )
             else:
                 reason = f"could not read this guest's configuration/permissions (HTTP {code} from {path})"
@@ -958,7 +957,7 @@ async def restore(
     it. `guest_type` is the app-internal "vm"/"ct" value - see
     restore_capabilities() above.
 
-    Multi-file/directory restore (docs/push-to-guest.md, issue #24): pass
+    Multi-file/directory restore (docs/push-to-guest.md): pass
     one or more `item` fields - the same JSON `{filepath, name, leaf}`
     shape `download_bundle()` already uses for multi-select - instead
     of `filepath`/`name`. Exactly one of (`filepath` + `name`) or
@@ -1068,8 +1067,8 @@ async def restore_jobs_list(
     """PH.5 (docs/push-to-guest.md): the running-jobs indicator's data source,
     polled from the top bar every few seconds. Jobs were originally
     visible to any logged-in user unconditionally - a single-admin tool
-    with one shared task list - and still are by default; issue #122
-    makes that configurable.
+    with one shared task list - and still are by default; the
+    jobs-scope setting makes that configurable.
 
     `scope` ("mine" or "all") is enforced here, not left to the client:
     a non-admin can't pass scope=all to see past RESTRICT_JOBS_TO_OWN.
@@ -1079,9 +1078,9 @@ async def restore_jobs_list(
     non-admin, restricted user can't actually use.
 
     Uses get_session_keepalive: this poll must not keep an idle session
-    alive (issue #27) - if it 401s, apiFetch() in app.js redirects.
+    alive - if it 401s, apiFetch() in app.js redirects.
 
-    Each job dict also carries `can_cancel` (issue #123) - whether
+    Each job dict also carries `can_cancel` - whether
     *this* session may cancel *that* job (owner or a job admin, and
     still active). Computed here, not in `RestoreJob.to_dict()` itself,
     since that method has no session to check ownership against. The
@@ -1093,7 +1092,7 @@ async def restore_jobs_list(
     persisted rows for anything this process didn't itself create - a
     live job always wins over its own stale persisted snapshot, keyed
     by id. Also sweeps expired history rows - and the matching in-memory jobs
-    (issue #17) - opportunistically here."""
+    - opportunistically here."""
     is_admin = auth.is_job_admin(session)
     can_see_all = (not settings.restrict_jobs_to_own) or is_admin
 
@@ -1139,8 +1138,7 @@ async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.g
     user opens the log viewer for one specific job.
 
     Also get_session_keepalive: the log viewer re-polls this on the same
-    tick as the list, and watching a log is not activity either (issue
-    #27) - an idle user parked on the log viewer still times out.
+    tick as the list, and watching a log is not activity either - an idle user parked on the log viewer still times out.
 
     Falls back to job_history's persisted record when the id isn't in
     this process's in-memory RestoreJobManager."""
@@ -1155,10 +1153,10 @@ async def restore_jobs_detail(job_id: str, session: SessionData = Depends(auth.g
 
 @app.post("/api/restore-jobs/{job_id}/cancel")
 async def restore_jobs_cancel(job_id: str, session: SessionData = Depends(auth.get_session)):
-    """Issue #123: independent of RESTRICT_JOBS_TO_OWN (#122) - that
+    """Independent of RESTRICT_JOBS_TO_OWN - that
     setting controls who can *see* a job, this controls who can *act* on
     one. A non-owner, non-admin gets 403, not 404 - the job IS visible
-    to them in the "all jobs" view (unless #122's restriction also hides
+    to them in the "all jobs" view (unless the jobs-scope restriction also hides
     it), so pretending it doesn't exist would be a dishonest signal."""
     job = restore_jobs.manager.get(job_id)
     if job is None:
@@ -1184,7 +1182,7 @@ async def restore_download_fetch(token: str):
     one restore_runner.py already uses for the rest of that job's work -
     never the requester's, since the requester is the guest, not a
     logged-in user. Except for a bundle restore's already-built local
-    bundle file (docs/push-to-guest.md, issue #24) - `token.local_path`, set
+    bundle file (docs/push-to-guest.md) - `token.local_path`, set
     only in that case - which is streamed straight off local disk
     instead, since a bundle isn't something PVE's file-restore API can
     hand back as one item."""
@@ -1259,7 +1257,7 @@ async def restore_original_path(
     crumbs: str = "[]",
     session: SessionData = Depends(auth.get_session),
 ):
-    """Issue #68: resolves the "restore to original location" destination
+    """Resolves the "restore to original location" destination
     for the item(s) currently browsed - VM guests only, since push-to-
     guest restore (and therefore this whole modal) is never available
     for a container at all (guest_original_location's module docstring).

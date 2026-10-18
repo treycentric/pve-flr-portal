@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Log in &mdash; File Level Restore Portal for Proxmox Backup Server</title>
   <link rel="icon" type="image/png" href="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}">
-  {# Theme (issue #29): match base.html - resolve before first paint. #}
+  {# Theme: match base.html - resolve before first paint. #}
   <script>
     (function () {
       var d = "{{ default_theme }}";
@@ -32,7 +32,7 @@
   </header>
   <div class="login-wrap">
     {% if tfa_challenge %}
-    {# Issue #15, second step: a plain form, no Alpine needed here - the
+    {# 2FA second step: a plain form, no Alpine needed here - the
        realm/openid branching above doesn't apply mid-2FA-flow. Carries
        username/realm/the PVE-issued challenge back as hidden fields so
        this route needs no server-side state for a login in progress;
@@ -62,12 +62,12 @@
         selectedType: 'pam',
         updateType() { this.selectedType = $refs.realm.selectedOptions[0]?.dataset.type || ''; },
         handleSubmit(event) {
-          // Issue #56: an OpenID Connect realm has no password to POST -
+          // An OpenID Connect realm has no password to POST -
           // send the browser into the SSO redirect flow instead of
           // submitting this form. A plain function-call expression here
           // (rather than an inline if/else statement block in @submit
           // itself) - Alpine's expression compiler for x-on rejects a
-          // leading `if` as a syntax error (confirmed live: it throws
+          // leading `if` as a syntax error (it throws
           // and never attaches the listener at all, so the form silently
           // falls through to its default POST - PVE then 422s on the
           // missing password field).

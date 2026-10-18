@@ -71,13 +71,13 @@ class RestoreJob:
     source_filepath: str  # opaque file-restore filepath token (docs/api-reference.md) - unused for a bundle job
     source: str  # display path within the backup, or "N item(s)" for a bundle job
     destination: str  # single-file job: dest_dir + filename. Bundle job: the target directory itself.
-    # The guest's real PVE node (issue #51) - every guest-scoped call this
+    # The guest's real PVE node - every guest-scoped call this
     # job makes (guest-exec, agent/file-write) targets this instead of the
     # literal "localhost", which PVE resolves to the API-serving node, not
     # the guest's own. Defaults to "localhost" so an unresolved/single-node
     # setup keeps working exactly as before.
     node: str = "localhost"
-    # Multi-file/directory restore (docs/push-to-guest.md, issue #24). None
+    # Multi-file/directory restore (docs/push-to-guest.md). None
     # (the default, and every job created before this existed) means an
     # ordinary single-file job - source_filepath/source/destination keep
     # their original single-file meaning and restore_runner.py's
@@ -95,7 +95,7 @@ class RestoreJob:
     # support it (docs/push-to-guest.md).
     restore_metadata: bool = False
     verify: bool = False
-    # Issue #20: original uid/gid/mode, fetched from a second file-
+    # Original uid/gid/mode, fetched from a second file-
     # restore/download(tar=1) call at restore time (docs/push-to-guest.md's
     # 2026-09-28 finding - PVE's tar output carries this, the JSON
     # file-restore/list API never has). Linux/BSD only - a no-op when
@@ -121,8 +121,7 @@ class RestoreJob:
     #
     # Defaults to 0, not 1: progress_total <= 0 is progress_percent's own
     # signal for "nothing meaningful to report yet" (returns None, which
-    # the frontend renders as no percentage/bar at all). Confirmed live
-    # 2026-09-02: a default of 1 meant progress_current=0/progress_total=1
+    # the frontend renders as no percentage/bar at all). A default of 1 meant progress_current=0/progress_total=1
     # computed a real-looking "0%" during any phase that hasn't set a
     # real total yet - e.g. the bundle-restore build phase downloading an
     # item PVE didn't send a Content-Length for - which renders as a
@@ -307,7 +306,7 @@ class RestoreJobManager:
         """Drops terminal jobs (and their finished task handles) that
         finished more than `retention_days` ago - the in-memory
         counterpart of job_history.evict_expired(), using the same cutoff
-        so a job leaves both stores together (issue #17). Active jobs are
+        so a job leaves both stores together. Active jobs are
         never touched. Returns the number evicted."""
         cutoff = time.time() - retention_days * 86400
         expired = [

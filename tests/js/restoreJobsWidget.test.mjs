@@ -48,7 +48,7 @@ test('selectedCancellable reflects the selected job, false when none selected', 
   assert.equal(w.selectedCancellable, false);
 });
 
-test('selectedCancellable is false for an active job the session cant cancel (issue #123)', () => {
+test('selectedCancellable is false for an active job the session cant cancel', () => {
   // can_cancel folds in ownership/admin on top of "still active" - a
   // non-owner, non-admin session must not see the button enabled even
   // though the job itself is still running.

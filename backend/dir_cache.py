@@ -25,7 +25,7 @@ revoked could still read out everything they cached from it before,
 forever. `fetched_at` is kept in case a future purely-time-based sweep
 is ever wanted too, but isn't used for that today.
 
-Single SQLite file under PFR_DATA_DIR (issue #30), no background job,
+Single SQLite file under PFR_DATA_DIR, no background job,
 per CLAUDE.md's "no extra services" constraint. Uses stdlib `sqlite3`
 via `asyncio.to_thread` rather than adding an async-sqlite dependency -
 these are tiny single-row reads/writes, not worth a new requirement.

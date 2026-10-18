@@ -11,7 +11,7 @@
 # Unlike `git pull` on main, this pins to a tagged GitHub Release by
 # default (see docs/dev/versioning.md) so an update lands on a version
 # that actually shipped and passed CI, not whatever commit happened to
-# be on main at the time. See issue #89.
+# be on main at the time.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -71,7 +71,7 @@ echo "==> Installing dependencies"
 "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
 "$APP_DIR/.venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
 
-# Re-applies install.sh's root-owned-app-dir/certs-only layout (#137),
+# Re-applies install.sh's root-owned-app-dir/certs-only layout,
 # migrating an existing install. Note: an install from before #137 needs
 # this script run twice - the checkout above updates the file on disk,
 # but the process already running this update is still the old version
@@ -93,7 +93,7 @@ check_mode "$APP_DIR/.env" "640"
 
 echo "==> Refreshing systemd unit"
 # Previously only install.sh wrote this file, so a unit-template change
-# (like #137's ReadWritePaths narrowing) could leave an update's unit stale.
+# (like narrowing ReadWritePaths) could leave an update's unit stale.
 sed "s#__APP_DIR__#${APP_DIR}#g; s#__APP_USER__#${APP_USER}#g" \
   "$APP_DIR/deploy/pve-flr-portal.service.template" > "/etc/systemd/system/${SERVICE_NAME}.service"
 systemctl daemon-reload

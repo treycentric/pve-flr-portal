@@ -10,7 +10,7 @@ trusted from the earlier `/api/restore-capabilities` response used to
 build the confirmation UI).
 
 Whenever more than one chunk would otherwise be needed, `_try_direct_network_transfer()`
-(docs/push-to-guest.md, issue #22) is tried first as a faster alternative to
+(docs/push-to-guest.md) is tried first as a faster alternative to
 the scratch-write+concat path below it - silently, and only when an
 admin has actually configured a data NIC that matches the guest's own
 subnet; every other guest keeps going through the unchanged chunked
@@ -18,8 +18,7 @@ guest-agent-write path exactly as before.
 
 Streams the download rather than buffering the whole file into a
 separate wire-ready copy - see restore_chunking.py's module docstring
-for the real memory blow-up this replaced (confirmed live 2026-09-01:
-a large restore OOM-killed a memory-constrained deployment before ever
+for the real memory blow-up this replaced (a large restore OOM-killed a memory-constrained deployment before ever
 reaching the Direct Network Transfer eligibility check).
 """
 import asyncio
@@ -157,7 +156,7 @@ async def _write_chunks_to_scratch(
     either. Returns (scratch paths written, total bytes seen) - the real
     chunk count isn't known until the source is exhausted, unlike the
     pre-2026-09-01 design which downloaded everything up front specifically
-    to know this before writing a single byte (confirmed live: that
+    to know this before writing a single byte (that
     up-front-buffering approach OOM-killed a memory-constrained
     deployment on a large file, twice - once for the redundant
     wire-string copy, fixed first, and again for the raw-bytes buffer
@@ -169,8 +168,7 @@ async def _write_chunks_to_scratch(
     progress against an accurate chunk count from the start, instead of
     the "+1 ahead of current" placeholder scheme below (kept as the
     fallback for a genuinely-unknown-length streaming download, where
-    the real count truly isn't known until exhausted). Confirmed live
-    2026-09-02: without this, a several-thousand-chunk bundle write
+    the real count truly isn't known until exhausted). Without this, a several-thousand-chunk bundle write
     (61440-byte chunks against a 1.5GB+ bundle) rounded up to a
     displayed 100% after only ~200 chunks - a few percent of the real
     work - misreading as stuck rather than still genuinely writing."""
@@ -204,7 +202,7 @@ async def _write_chunks_to_scratch(
         index += 1
         # A big chunked write logs nothing between "creating scratch dir"
         # and "downloaded N bytes" otherwise - a heartbeat keeps it from
-        # looking hung (issue #47 live testing).
+        # looking hung.
         if expected_chunks:
             pct = index * 100 // expected_chunks
             if pct > last_logged_pct:
@@ -219,7 +217,7 @@ async def _write_chunks_to_scratch(
 
 async def _ensure_destination_dir(job: RestoreJob, guest_os_family: str | None) -> None:
     """Creates the destination's parent directory if it doesn't already
-    exist. Confirmed live as a real gap: restoring into a directory that
+    exist. A real gap: restoring into a directory that
     didn't exist yet made the concatenation step (_concat_chunks) report
     success - `copy /b`'s exit code isn't reliable enough to catch every
     failure mode - while never actually creating the file, which then
@@ -229,12 +227,11 @@ async def _ensure_destination_dir(job: RestoreJob, guest_os_family: str | None) 
 
     Windows uses PowerShell's `New-Item -Force` (idempotent - no
     separate exists-check needed) rather than `cmd /c if not exist "X"
-    mkdir "X"`, which this function originally used: confirmed live
-    2026-09-01 that cmd.exe's handling of multiple embedded double-quoted
+    mkdir "X"`, which this function originally used: cmd.exe's handling of multiple embedded double-quoted
     segments on one `/c` line is unreliable ("The filename, directory
     name, or volume label syntax is incorrect" against a perfectly valid
     path). Single-quoted PowerShell literal instead, matching
-    `_restore_mtime()`'s already-live-verified pattern - safe for the
+    `_restore_mtime()`'s pattern - safe for the
     same reason: `pve_client.check_path_safe()` (called once, up front,
     before any exec step runs) already rejects `'` along with every
     other shell-metacharacter."""
@@ -294,13 +291,12 @@ async def _verify_destination_exists(job: RestoreJob, guest_os_family: str | Non
 
 
 async def _clear_readonly_if_present(job: RestoreJob, guest_os_family: str | None, path: str | None = None) -> None:
-    """Issue #72: clears attributes that would otherwise make the
+    """Clears attributes that would otherwise make the
     upcoming write fail. On Windows, `CreateFile` refuses write access
     to a ReadOnly-attributed file no matter who's asking - even SYSTEM,
     which is what the guest agent runs as - so a pre-existing
     `agent/file-write` destination with that attribute set fails with a
-    raw, confusing "Access is denied" agent error. Confirmed live
-    2026-09-25 restoring `desktop.ini` to its original location:
+    raw, confusing "Access is denied" agent error. For example, restoring `desktop.ini` to its original location:
     Explorer creates these with ReadOnly (often Hidden+System too) by
     default in nearly every folder, making it the single most common
     file this hits, but any pre-existing destination carrying the
@@ -336,8 +332,8 @@ async def _clear_readonly_if_present(job: RestoreJob, guest_os_family: str | Non
 
 
 async def _secure_ca_anchor(job: RestoreJob, anchor: str) -> bool:
-    """Issue #136: agent/file-write takes no mode and qemu-ga creates the
-    file 0666 (confirmed live on a Linux guest), so a trust anchor written
+    """Agent/file-write takes no mode and qemu-ga creates the
+    file 0666, so a trust anchor written
     through it is writable by every guest user - who could then change
     what the whole guest trusts. `chmod 644` it; if that fails, remove it
     (best effort) rather than leave a writable anchor in the trust
@@ -352,7 +348,7 @@ async def _secure_ca_anchor(job: RestoreJob, anchor: str) -> bool:
 
 async def _ensure_guest_trusts_ca(job: RestoreJob, guest_os_family: str | None) -> bool:
     """Install the Direct Network Transfer data-plane CA into the guest's
-    trust store so `verify` mode works (issue #47 §7.6.1). Returns
+    trust store so `verify` mode works (docs/push-to-guest.md). Returns
     True if the guest trusts it afterwards (already did, or the install
     succeeded), False otherwise - the caller steps the TLS mode down on
     False. Never raises. `RESTORE_DATA_NIC_TLS_INSTALL_CA` is `if-missing`
@@ -438,7 +434,7 @@ async def _try_direct_network_transfer(
     had it fail partway is a real problem worth surfacing clearly, not
     masking by silently retrying via a completely different mechanism.
 
-    `dest_path`/`local_path` (docs/push-to-guest.md, issue #24): a bundle
+    `dest_path`/`local_path` (docs/push-to-guest.md): a bundle
     restore passes both - `dest_path` is the scratch bundle-file path in
     the guest to fetch *into* (not `job.destination`, which is the
     extraction target directory, not a file), and `local_path` is the
@@ -449,7 +445,7 @@ async def _try_direct_network_transfer(
     behavior, fetching straight to `job.destination` via a token that
     re-proxies `job.source_volume`/`job.source_filepath` from PVE.
 
-    **Data-plane TLS (issue #47, docs/push-to-guest.md).** The download URL
+    **Data-plane TLS (docs/push-to-guest.md).** The download URL
     is `http://` only when `RESTORE_DATA_NIC_TLS_PREFERRED` is
     `plaintext` (the legacy behaviour: the token is the access control,
     NIC segmentation + firewalling the perimeter). Otherwise this
@@ -503,7 +499,7 @@ async def _try_direct_network_transfer(
     fetch_dest = job.destination if dest_path is None else dest_path
     port = settings.restore_data_nic_port or settings.port
 
-    # Resolve the data-plane TLS mode for this guest (issue #47): the
+    # Resolve the data-plane TLS mode for this guest: the
     # strongest mode in [minimum, preferred] the detected fetch tool can
     # actually do. The data listener is HTTPS-only whenever preferred
     # isn't `plaintext`, so a `plaintext` rung below it can't be served
@@ -524,7 +520,7 @@ async def _try_direct_network_transfer(
         return False
 
     # `verify`: the guest has to trust the data-plane cert. Install it if
-    # asked to (issue #47 §7.6.1); on failure, step down to the strongest
+    # asked to (docs/push-to-guest.md); on failure, step down to the strongest
     # non-verify mode the ladder still allows.
     if mode == "verify" and settings.restore_data_nic_tls_install_ca != "never":
         if not await _ensure_guest_trusts_ca(job, guest_os_family):
@@ -551,7 +547,7 @@ async def _try_direct_network_transfer(
             "matches the guest's own subnet."
         )
         # The fetch scales with file size / network throughput, not the
-        # ~15s "fast command" default (confirmed live 2026-09-01: it
+        # ~15s "fast command" default (it
         # timed out mid-fetch on a real file).
         return await _exec(job, plan.exec_argv, timeout_seconds=settings.restore_long_running_exec_timeout_seconds)
 
@@ -616,7 +612,7 @@ async def _concat_chunks(job: RestoreJob, chunk_paths: list[str], dest_path: str
     (never user input), so they don't need the same check.
 
     Windows uses a small PowerShell `FileStream`/`CopyTo` script, not
-    `cmd /c copy /b "a"+"b" "dest"` (confirmed live 2026-09-02: even a
+    `cmd /c copy /b "a"+"b" "dest"` (even a
     *single* chunk failed with "The filename, directory name, or volume
     label syntax is incorrect" against a perfectly valid path) -
     `cmd.exe`'s handling of multiple embedded double-quoted segments on
@@ -672,9 +668,9 @@ async def _restore_mtime(job: RestoreJob, guest_os_family: str | None) -> None:
 
 
 async def _fetch_source_ownership(job: RestoreJob) -> tuple[int, int, int] | None:
-    """Issue #20/#26: thin, job-specific wrapper over
+    """Thin, job-specific wrapper over
     pve_client.fetch_source_metadata (the shared implementation - also
-    used by restore_bundle.py for the multi-file/directory case, #26).
+    used by restore_bundle.py for the multi-file/directory case).
     Single-file restore already has its own real mtime from file-
     restore/list's JSON (job.source_mtime), so only uid/gid/mode are
     used here - the shared function's mtime is discarded.
@@ -714,8 +710,8 @@ async def _restore_ownership(job: RestoreJob, uid: int, gid: int, mode: int) -> 
 
 
 async def _set_restored_file_mode(job: RestoreJob) -> None:
-    """Issue #136: agent/file-write has no mode parameter and qemu-ga
-    creates a new file 0666 (confirmed live on a Linux guest), so a
+    """Agent/file-write has no mode parameter and qemu-ga
+    creates a new file 0666, so a
     quick-restored file would be world-writable. `chmod go-w` turns that
     into 0644 - the same result the guest-exec paths get from the
     guest's umask - and never widens a stricter mode an overwritten file
@@ -759,8 +755,8 @@ async def _verify_checksum(job: RestoreJob, expected_sha256: str, guest_os_famil
 
 async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
     """Dispatches to the single-file restore path (unchanged since
-    §7.5/§7.6) or the multi-file/directory bundle restore path (§7.7,
-    issue #24), based on whether `job.items` is set. `job.items` is
+    §7.5/§7.6) or the multi-file/directory bundle restore path (§7.7),
+    based on whether `job.items` is set. `job.items` is
     `None` for every job created before that field existed and for
     every ordinary single-file restore submitted today, so this is a
     zero-behavior-change dispatch for the existing path."""
@@ -771,7 +767,7 @@ async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
 
 
 async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
-    """Multi-file/directory restore (docs/push-to-guest.md, issue #24):
+    """Multi-file/directory restore (docs/push-to-guest.md):
     builds one bundle from every selected item (`restore_bundle.
     build_bundle()`), writes it to the guest via the same chunked
     scratch-write+concat mechanism the single-file path already uses
@@ -839,7 +835,7 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
 
         job.log(f"Building the restore bundle from {len(job.items)} item(s).")
 
-        # Confirmed live 2026-09-02: this whole build phase (download +
+        # This whole build phase (download +
         # add-to-bundle) had no progress signal at all - a large
         # single-directory selection looked indistinguishable from a
         # hang for several minutes. Logs when each item starts, and
@@ -904,8 +900,7 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         # fetches the already-built bundle straight from this app's
         # download-token endpoint over its own NIC, instead of tens of
         # thousands of individual agent/file-write round trips at
-        # DEFAULT_CHUNK_SIZE_BYTES each. Confirmed live the same day this
-        # was added: a ~1.5GB bundle's chunked write was projected at
+        # DEFAULT_CHUNK_SIZE_BYTES each. A ~1.5GB bundle's chunked write was projected at
         # tens of thousands of chunks - the chunked guest-exec path
         # alone doesn't scale to bundle-sized payloads the way it does
         # to modest single files.
@@ -918,8 +913,7 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
             # Rescaled to just (transfer, extract, verify) - not
             # expected_chunks-based like the chunked path below, and no
             # separate concat unit (DNT fetches the whole bundle in one
-            # shot, nothing to concatenate). Confirmed live 2026-09-02:
-            # leaving progress_total at expected_chunks + 3 here meant
+            # shot, nothing to concatenate). Leaving progress_total at expected_chunks + 3 here meant
             # progress_current (set to expected_chunks, standing in for
             # "the transfer is done") divided by that total rounded to a
             # displayed 100% the instant the fetch finished - before
@@ -985,7 +979,7 @@ async def _run_bundle_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
         job.log(f"Checksum verified for all {len(manifest)} restored file(s) - matches the source.")
 
         # The manifest is a restore-mechanism artifact, not part of the
-        # original backup - confirmed live 2026-09-02 that it was
+        # original backup - it was
         # otherwise left behind in the destination directory permanently.
         # Best-effort: verification already succeeded, so a cleanup
         # failure here shouldn't fail the whole restore, just gets a
@@ -1081,7 +1075,7 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
                     + (1 if job.restore_ownership else 0)
                 )
 
-                # Issue #72: capabilities are now checked even when
+                # Capabilities are now checked even when
                 # nothing else needs guest-exec, purely so a ReadOnly/
                 # Hidden/System-attributed destination (desktop.ini and
                 # friends - Explorer creates these with ReadOnly set by
@@ -1186,8 +1180,8 @@ async def _run_single_file_restore(job: RestoreJob, jobs: RestoreJobManager) -> 
 
                 pieces = _iter_download_pieces(first_piece, second_piece, byte_iter)
                 if await _try_direct_network_transfer(job, guest_os_family):
-                    # Direct Network Transfer (docs/push-to-guest.md, issue
-                    # #22): the guest fetches the file itself, straight
+                    # Direct Network Transfer (docs/push-to-guest.md):
+                    # the guest fetches the file itself, straight
                     # from PVE - so the rest of this already-open stream
                     # (only read this far to determine chunking) is
                     # drained and discarded, never written anywhere by

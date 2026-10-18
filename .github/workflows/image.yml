@@ -71,7 +71,7 @@ jobs:
     # this job, not merge with it - contents/packages are restated here.
     # id-token is scoped to this job alone (not test, which doesn't need
     # it): it's what lets cosign request a short-lived OIDC token from
-    # GitHub for keyless signing (issue #111) - no key to manage or leak.
+    # GitHub for keyless signing - no key to manage or leak.
     permissions:
       contents: read
       packages: write
@@ -158,7 +158,7 @@ jobs:
       - uses: sigstore/cosign-installer@v3
         if: env.PUSH == 'true'
 
-      # Keyless signing (issue #111): cosign requests a short-lived cert
+      # Keyless signing: cosign requests a short-lived cert
       # from Sigstore's public Fulcio CA using this job's own GitHub
       # Actions OIDC token, and records the signature in the public
       # Rekor transparency log - no private key generated, stored, or

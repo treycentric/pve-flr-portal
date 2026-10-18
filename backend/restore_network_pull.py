@@ -37,7 +37,7 @@ ExecFn = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
 class DataNic:
     cidr: str
     local_ip: str
-    # Optional DNS name for this segment (issue #47). When set it's used
+    # Optional DNS name for this segment. When set it's used
     # in the download URL and the data-plane cert's SAN instead of the
     # bare IP - sidesteps old-Windows IP-SAN quirks for `verify`. The
     # guest must be able to resolve it.
@@ -140,7 +140,7 @@ def _candidates_for(guest_os_family: str | None) -> list[tuple[str, list[str]]]:
     return []  # unknown OS family - nothing to safely probe
 
 
-# --- data-plane TLS ladder (issue #47) --------------------------------
+# --- data-plane TLS ladder --------------------------------
 
 # Tools that cannot skip certificate verification, so they can only do a
 # TLS fetch when the guest already trusts the cert (`verify` mode):
@@ -191,9 +191,8 @@ _TLS_ERR_HINTS = (
 def is_tls_negotiation_failure(tool: str, exitcode: int, stderr: str = "", stdout: str = "") -> bool:
     """Whether a failed fetch looks like a TLS *handshake / trust*
     failure (bad or untrusted cert, protocol/version mismatch) - i.e.
-    nothing was transferred and it's safe to retry a rung down the ladder
-    (issue #47). A failure after bytes started flowing is deliberately
-    not matched here - that stays a hard error."""
+    nothing was transferred and it's safe to retry a rung down the ladder. A failure after bytes started flowing
+    is deliberately not matched here - that stays a hard error."""
     if exitcode == 0:
         return False
     blob = f"{stderr} {stdout}".lower()
@@ -253,7 +252,7 @@ def build_fetch_command(
     data-NIC host, this app's own port, a random token), never anything a
     guest or a user supplies.
 
-    `tls` (issue #47) is the resolved data-plane mode for this fetch:
+    `tls` is the resolved data-plane mode for this fetch:
     - `plaintext` - `url` must be `http://`; no cert handling.
     - `insecure` - `url` must be `https://`; the command is built to
       skip certificate verification (`curl -k`, `wget
@@ -313,8 +312,7 @@ def build_fetch_command(
     if tool == "bitsadmin":
         # Plain argv, not `cmd /c 'bitsadmin ... "{url}" "{destination}"'`
         # - the same `cmd /c` "multiple embedded double-quoted segments
-        # on one /c line" pattern already confirmed live (2026-09-01,
-        # 2026-09-02) to be unreliable elsewhere in this project
+        # on one /c line" pattern already known to be unreliable elsewhere in this project
         # (_ensure_destination_dir(), _concat_chunks()) even against
         # perfectly valid paths. bitsadmin.exe is a real executable, so
         # it can be invoked directly - each argv element reaches it

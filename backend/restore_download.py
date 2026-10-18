@@ -27,7 +27,7 @@ class DownloadToken:
     job_id: str
     expires_at: float
     local_path: str | None = None
-    """Set only for a bundle restore (docs/push-to-guest.md, issue #24):
+    """Set only for a bundle restore (docs/push-to-guest.md):
     when present, the download endpoint serves this already-built local
     bundle file directly instead of re-proxying from PVE via
     job_id/source_volume/source_filepath - a bundle isn't something
