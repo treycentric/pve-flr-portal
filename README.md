@@ -507,8 +507,8 @@ on the node that hosts the container:
 | Command | What it does |
 |---|---|
 | `pve-flr-portal config [CTID]` | A welcome screen, then the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
-| `pve-flr-portal update [CTID] [version]` | Runs `update.sh` in the container (see "Updating"). |
-| `pve-flr-portal status [CTID]` | Installed version, service state and address. |
+| `pve-flr-portal update [CTID] [version]` | Shows the installed and new version, asks to confirm, then runs `update.sh` in the container (see "Updating"). |
+| `pve-flr-portal status [CTID]` | Installed version, whether a newer release is available, service state and address. |
 | `pve-flr-portal list` | The containers it manages, with their versions. |
 | `pve-flr-portal adopt [CTID...]` | Starts managing existing installs (below). |
 
@@ -553,16 +553,35 @@ pve-flr-portal adopt
 
 **Updating**:
 
-`pve-flr-portal update` updates the chosen container to the latest release;
-`pve-flr-portal update 207 v1.4.0` (or `1.4.0`) pins CT 207 to a specific one.
-It runs `deploy/update.sh` inside the container, which you can also run
-yourself: `bash deploy/update.sh` for the latest release, `bash deploy/update.sh
-v1.4.0` (or `1.4.0`) to pin, or `bash deploy/update.sh main` for
-unreleased/bleeding-edge work. Reinstalls dependencies if
-`requirements.txt` changed and restarts the service; refuses to run if
-the install directory has local/uncommitted changes rather than
-discarding them. See `docs/archive/design-rationale.md` for how this
-maps onto the project's SemVer-tagged release channel.
+`pve-flr-portal update` updates the chosen container to the latest release.
+It shows the installed and the new version (with a link to the release notes),
+asks you to confirm, and - if the container's storage supports snapshots -
+offers to take one first so the update can be rolled back
+(`pct rollback <CTID> <snapshot>`; the snapshot is left for you to delete with
+`pct delsnapshot`). It then runs `deploy/update.sh` inside the container and
+tells you the version it ended up on. If the container is already on the
+latest release it says so and does nothing (`--force` updates anyway).
+
+| Option | Effect |
+|---|---|
+| `pve-flr-portal update 207 v1.4.0` (or `1.4.0`) | Pin CT 207 to a specific release. `main` selects unreleased, bleeding-edge work. |
+| `--all` | Update every running managed container on this node, with one confirmation; stopped ones are skipped, and there is a summary at the end. |
+| `-y`, `--yes` | Don't ask. Needed without a terminal (e.g. from cron). |
+| `--snapshot` / `--no-snapshot` | Always / never take a pre-update snapshot (the default asks, and only at a terminal). If a snapshot can't be taken the update still goes ahead. |
+
+After moving to the latest release (or `main`, but not an older pinned
+version), the host-side pieces are brought in line with it, copied from the
+container's checkout: the `pve-flr-portal` command itself and, if you ever
+enabled host-backup support, the host-backup patch script that the apt hook
+runs. A copy that doesn't parse is never installed.
+
+`deploy/update.sh` can also be run yourself inside the container: `bash
+deploy/update.sh` for the latest release, `bash deploy/update.sh v1.4.0` (or
+`1.4.0`) to pin, or `bash deploy/update.sh main` for unreleased work. It
+reinstalls dependencies if `requirements.txt` changed and restarts the
+service; it refuses to run if the install directory has local/uncommitted
+changes rather than discarding them. See `docs/archive/design-rationale.md`
+for how this maps onto the project's SemVer-tagged release channel.
 
 The systemd unit's `StateDirectory=` puts the app-state dir
 (`PFR_DATA_DIR`) at `/var/lib/pve-flr-portal`, created and owned by the

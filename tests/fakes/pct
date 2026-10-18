@@ -9,6 +9,11 @@
 #                       container is unreachable (exec fails, no address)
 #   ct/<id>/dhcp_addr   the address a DHCP lease gives after a reboot
 #   ct/<id>/noping      present: no `ping` inside
+#   ct/<id>/remote_tags release tags on origin, one per line (git ls-remote)
+#   ct/<id>/remote_url  origin's URL (default https://github.com/octo/portal.git)
+#   ct/<id>/no_snapshot present: `pct snapshot` fails (storage can't do them)
+#   ct/<id>/update_fails present: update.sh exits non-zero
+#   ct/<id>/after_update/  files copied into the container when update.sh runs
 #   calls.log           every invocation, one per line
 set -uo pipefail
 d="${FAKE_PVE:?FAKE_PVE not set}"
@@ -74,6 +79,14 @@ case "$cmd" in
       esac
     done
     ;;
+  snapshot)
+    need "$1"
+    echo "snapshot $1 $2" >> "$d/set.log"
+    if [ -f "$(ct "$1")/no_snapshot" ]; then
+      echo "snapshot feature is not available" >&2
+      exit 255
+    fi
+    ;;
   start) need "$1"; echo running > "$(ct "$1")/status" ;;
   stop) need "$1"; echo stopped > "$(ct "$1")/status" ;;
   reboot)
@@ -127,7 +140,33 @@ case "$cmd" in
         ;;
       systemctl) echo "systemctl $*" >> "$d/exec.log"; [ "$1" = "is-active" ] && { [ "${2:-}" = "--quiet" ] || echo active; }; exit 0 ;;
       hostname) echo "192.168.1.50" ;;
-      bash) echo "bash $*" >> "$d/exec.log" ;;
+      bash)
+        echo "bash $*" >> "$d/exec.log"
+        if [ "${1##*/}" = "update.sh" ]; then
+          [ -f "$(ct "$id")/update_fails" ] && exit 1
+          target="${2:-}"
+          if [ -z "$target" ]; then
+            target="$(tail -1 "$(ct "$id")/remote_tags" 2>/dev/null)"
+          fi
+          echo "${target#v}" > "$(ct "$id")/fs/opt/pve-flr-portal/VERSION"
+          if [ -d "$(ct "$id")/after_update" ]; then
+            cp -r "$(ct "$id")/after_update/." "$(ct "$id")/fs/"
+          fi
+        fi
+        ;;
+      git)
+        shift 2 # -C DIR
+        case "$1" in
+          ls-remote)
+            [ -f "$(ct "$id")/remote_tags" ] || exit 2
+            while read -r tag; do printf 'deadbeef	refs/tags/%s
+' "$tag"; done < "$(ct "$id")/remote_tags"
+            ;;
+          remote)
+            if [ -f "$(ct "$id")/remote_url" ]; then cat "$(ct "$id")/remote_url"; else echo "https://github.com/octo/portal.git"; fi
+            ;;
+        esac
+        ;;
       ping) broken "$id" && exit 1; exit 0 ;;
       sh)
         script="$2"

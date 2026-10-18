@@ -2,7 +2,7 @@
 # pve-flr-portal - manage the pve-flr-portal containers on this PVE node.
 #
 #   pve-flr-portal config [CTID]            change settings (portal and network)
-#   pve-flr-portal update [CTID] [ARGS]     update to the latest release
+#   pve-flr-portal update [CTID] [VERSION]  update (--all, -y, --snapshot: see --help)
 #   pve-flr-portal status [CTID]            version, service state, address
 #   pve-flr-portal list                     the containers it manages
 #   pve-flr-portal adopt [CTID...]          start managing existing installs
@@ -20,6 +20,8 @@ set -euo pipefail
 TAG="pve-flr-portal"
 APP_DIR="/opt/pve-flr-portal"
 TOOLS_DIR=""
+# Where the host command and its links live (overridable for tests).
+SBIN="${PFR_SBIN:-/usr/local/sbin}"
 
 die() {
   echo "pve-flr-portal: $*" >&2
@@ -57,8 +59,15 @@ Usage: pve-flr-portal <command> [CTID] [arguments]
 Commands:
   config [CTID]          Change the portal's settings and the container's
                          network configuration.
-  update [CTID] [ARGS]   Update to the latest release (ARGS go to update.sh,
-                         e.g. a version to pin to).
+  update [CTID] [VERSION] [options]
+                         Update to the latest release, or pin to VERSION
+                         (e.g. v1.4.0, or main for unreleased work). Shows the
+                         installed and new version first and asks to confirm.
+                           --all          every running container on this node
+                           -y, --yes      don't ask (needed without a terminal)
+                           --snapshot     take a snapshot first (rollback point)
+                           --no-snapshot  don't ask about a snapshot
+                           --force        update even if already up to date
   status [CTID]          Show the installed version, service state and address.
   list                   List the containers managed from this node.
   adopt [CTID...]        Start managing existing installs: tag them so they
@@ -266,19 +275,235 @@ cmd_config() {
   bash "$TOOLS_DIR/pfr-manage.sh" config "$CTID"
 }
 
+# --- Versions and the host-side pieces ------------------------------------
+
+# norm VERSION -> VERSION without a leading "v".
+norm() {
+  printf '%s' "${1#v}"
+}
+
+# latest_release CTID -> the newest vX.Y.Z tag on the container's origin
+# (empty when it can't be read).
+latest_release() {
+  pct exec "$1" -- git -C "$APP_DIR" ls-remote --tags --refs origin 'v*.*.*' 2>/dev/null \
+    | sed 's|.*refs/tags/||' | sort -V | tail -1 || true
+}
+
+# repo_url CTID -> the container's origin as an https GitHub URL (no .git).
+repo_url() {
+  local url
+  url=$(pct exec "$1" -- git -C "$APP_DIR" remote get-url origin 2>/dev/null | head -1 || true)
+  url="${url%.git}"
+  case "$url" in
+    https://github.com/*) echo "$url" ;;
+  esac
+}
+
+# install_from_container CTID REL DEST - copy deploy/REL out of the
+# container's checkout to DEST, only if it differs. The replacement is atomic
+# (a new file moved over the old), so a copy that is running right now is
+# unaffected. A release that doesn't have the file is skipped.
+install_from_container() {
+  local ctid="$1" rel="$2" dest="$3" tmp
+  tmp=$(mktemp)
+  if ! pct pull "$ctid" "$APP_DIR/deploy/$rel" "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if ! bash -n "$tmp" 2>/dev/null; then
+    echo "Not updating $dest: the copy in container $ctid doesn't parse." >&2
+    rm -f "$tmp"
+    return 0
+  fi
+  if ! cmp -s "$tmp" "$dest" 2>/dev/null; then
+    install -m 755 "$tmp" "$dest.new"
+    mv -f "$dest.new" "$dest"
+    echo "Updated $dest"
+  fi
+  rm -f "$tmp"
+}
+
+# refresh_host_pieces CTID - bring what lives on the host in line with the
+# release the container just moved to: this command (and its -config/-update
+# links) and, if it was ever installed, the host-backup patch script that the
+# apt hook runs.
+refresh_host_pieces() {
+  local ctid="$1"
+  install_from_container "$ctid" host/pve-flr-portal "$SBIN/pve-flr-portal"
+  if [ -f "$SBIN/pve-flr-portal" ]; then
+    ln -sf pve-flr-portal "$SBIN/pve-flr-portal-config"
+    ln -sf pve-flr-portal "$SBIN/pve-flr-portal-update"
+  fi
+  if [ -f "$SBIN/pve-flr-portal-patch-host-backups.sh" ]; then
+    install_from_container "$ctid" patch-pve-host-backups.sh "$SBIN/pve-flr-portal-patch-host-backups.sh"
+  fi
+}
+
+# --- Commands ---------------------------------------------------------------
+
+ASSUME_YES=0
+SNAPSHOT_MODE="ask"
+FORCE=0
+
+# ask_yes TEXT - [Y/n]; the answer is yes without a terminal's say-so only
+# when -y was given (checked by the callers).
+ask_yes() {
+  local answer
+  read -rp "$1 [Y/n] " answer || answer="n"
+  case "$answer" in
+    n|N|no|NO) return 1 ;;
+  esac
+  return 0
+}
+
+# update_one CTID TARGET -> 0 updated, 10 already up to date, 11 declined,
+# anything else failed. TARGET is empty/latest, main, or a version.
+update_one() {
+  local ctid="$1" target="$2" name current latest want url snapshot="" take=0 args=()
+  name=$(pct config "$ctid" | sed -n 's/^hostname: *//p')
+  current="$(norm "$(ct_version "$ctid")")"
+  latest="$(latest_release "$ctid")"
+  case "$target" in
+    ""|latest) want="$latest" ;;
+    main) want="main" ;;
+    *) want="v$(norm "$target")" ;;
+  esac
+  if [ -z "$target" ] || [ "$target" = "latest" ]; then
+    if [ -n "$latest" ] && [ "$(norm "$latest")" = "$current" ] && [ "$FORCE" != "1" ]; then
+      echo "Container $ctid ($name) is up to date (v$current)."
+      return 10
+    fi
+  fi
+  url="$(repo_url "$ctid")"
+  echo "Container $ctid ($name): v${current:-?} -> ${want:-the latest release}"
+  if [ -n "$url" ] && [ "${want:0:1}" = "v" ]; then
+    echo "  Release notes: $url/releases/tag/$want"
+  fi
+  if [ "$target" = "main" ]; then
+    echo "  (unreleased work from main - not a tested release)"
+  fi
+  if [ "$ASSUME_YES" != "1" ]; then
+    have_tty || die "Updating without a terminal needs -y."
+    ask_yes "Update container $ctid?" || return 11
+  fi
+
+  case "$SNAPSHOT_MODE" in
+    yes) take=1 ;;
+    ask)
+      if have_tty && [ "$ASSUME_YES" != "1" ] && ask_yes "Take a snapshot first, so it can be rolled back?"; then
+        take=1
+      fi
+      ;;
+  esac
+  if [ "$take" = "1" ]; then
+    snapshot="pfr-pre-update-$(date +%Y%m%d-%H%M%S)"
+    if pct snapshot "$ctid" "$snapshot" --description "Before the pve-flr-portal update to ${want:-latest}" >/dev/null 2>&1; then
+      echo "Snapshot $snapshot taken (remove it later with: pct delsnapshot $ctid $snapshot)"
+    else
+      echo "Could not take a snapshot (does the container's storage support them?)." >&2
+      snapshot=""
+      if have_tty && [ "$ASSUME_YES" != "1" ]; then
+        ask_yes "Update without one?" || return 11
+      fi
+    fi
+  fi
+
+  if [ -n "$target" ] && [ "$target" != "latest" ]; then
+    args=("$target")
+  fi
+  if ! pct exec "$ctid" -- bash "$APP_DIR/deploy/update.sh" "${args[@]}"; then
+    echo "update.sh failed in container $ctid." >&2
+    if [ -n "$snapshot" ]; then
+      echo "Roll back with: pct rollback $ctid $snapshot" >&2
+    fi
+    return 1
+  fi
+  echo "Container $ctid is now at v$(norm "$(ct_version "$ctid")")."
+  # Pinning an older version must not pull the host's tools back with it.
+  case "$target" in
+    ""|latest|main) refresh_host_pieces "$ctid" ;;
+  esac
+  return 0
+}
+
+update_all() {
+  local target="$1" rows=() row id status rc updated=0 current=0 failed=0 skipped=0
+  while IFS= read -r row; do
+    rows+=("$row")
+  done < <(list_rows)
+  [ "${#rows[@]}" -gt 0 ] || die "No pve-flr-portal containers found on this node."
+  if [ "$ASSUME_YES" != "1" ]; then
+    have_tty || die "Updating without a terminal needs -y."
+    echo "Containers: $(printf '%s ' "${rows[@]%%|*}")"
+    ask_yes "Update all of them?" || exit 0
+    if [ "$SNAPSHOT_MODE" = "ask" ]; then
+      if ask_yes "Take a snapshot of each first, so it can be rolled back?"; then
+        SNAPSHOT_MODE="yes"
+      else
+        SNAPSHOT_MODE="no"
+      fi
+    fi
+    ASSUME_YES=1
+  fi
+  for row in "${rows[@]}"; do
+    IFS='|' read -r id _ status _ <<< "$row"
+    if [ "$status" != "running" ]; then
+      echo "Skipping container $id (not running)."
+      skipped=$((skipped + 1))
+      continue
+    fi
+    rc=0
+    update_one "$id" "$target" || rc=$?
+    case "$rc" in
+      0) updated=$((updated + 1)) ;;
+      10) current=$((current + 1)) ;;
+      *) failed=$((failed + 1)) ;;
+    esac
+  done
+  echo
+  echo "Updated: $updated, already up to date: $current, skipped: $skipped, failed: $failed."
+  [ "$failed" -eq 0 ]
+}
+
 cmd_update() {
-  local explicit=""
-  if [ "$#" -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
-    explicit="$1"
+  local explicit="" target="" all=0 rc=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -y|--yes) ASSUME_YES=1 ;;
+      --all) all=1 ;;
+      --snapshot) SNAPSHOT_MODE="yes" ;;
+      --no-snapshot) SNAPSHOT_MODE="no" ;;
+      --force) FORCE=1 ;;
+      -*) die "Unknown option $1 (see --help)." ;;
+      *)
+        if [[ "$1" =~ ^[0-9]+$ ]] && [ -z "$explicit" ] && [ -z "$target" ]; then
+          explicit="$1"
+        elif [ -z "$target" ]; then
+          target="$1"
+        else
+          die "Too many arguments (see --help)."
+        fi
+        ;;
+    esac
     shift
+  done
+  if [ "$all" = "1" ]; then
+    [ -z "$explicit" ] || die "--all and a container ID don't go together."
+    update_all "$target"
+    return
   fi
   choose_ct "$explicit"
   ensure_running "$CTID"
-  pct exec "$CTID" -- bash "$APP_DIR/deploy/update.sh" "$@"
+  update_one "$CTID" "$target" || rc=$?
+  case "$rc" in
+    0|10) return 0 ;;
+    11) echo "Cancelled."; return 0 ;;
+    *) return "$rc" ;;
+  esac
 }
 
 cmd_status() {
-  local ver state ip
+  local ver state ip latest
   choose_ct "${1:-}"
   ensure_running "$CTID"
   ver="$(ct_version "$CTID")"
@@ -287,6 +512,14 @@ cmd_status() {
   echo "Container: $CTID ($(pct config "$CTID" | sed -n 's/^hostname: *//p'))"
   echo "Version:   ${ver:-unknown}"
   echo "Service:   ${state:-unknown}"
+  latest="$(latest_release "$CTID")"
+  if [ -z "$latest" ]; then
+    echo "Latest:    unknown (couldn't reach the repository)"
+  elif [ "$(norm "$latest")" = "$(norm "$ver")" ]; then
+    echo "Latest:    $latest (up to date)"
+  else
+    echo "Latest:    $latest - update with: pve-flr-portal update $CTID"
+  fi
   if [ -n "$ip" ]; then
     echo "Address:   $ip"
   fi

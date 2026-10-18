@@ -4,6 +4,7 @@ the management tools in the container's own checkout. Run against a fake
 `pct` (tests/fakes/pct)."""
 
 import shutil
+from pathlib import Path
 
 import pytest
 from pve_fakes import DEPLOY, FakePve
@@ -18,11 +19,19 @@ def pve():
     fake.close()
 
 
-def stub(pve: FakePve, *args: str, stdin: str | None = None, name: str = "pve-flr-portal"):
+def stub(
+    pve: FakePve,
+    *args: str,
+    stdin: str | None = None,
+    name: str = "pve-flr-portal",
+    env: dict[str, str] | None = None,
+):
     script = pve.root / name
     if not script.exists():
         shutil.copy(STUB, script)
-    return pve.run_script(script, list(args), stdin=stdin)
+    sbin = pve.root / "sbin"
+    sbin.mkdir(exist_ok=True)
+    return pve.run_script(script, list(args), {"PFR_SBIN": sbin.as_posix(), **(env or {})}, stdin)
 
 
 def test_list_shows_only_tagged_containers_with_their_versions(pve):
@@ -107,13 +116,13 @@ def test_config_on_a_release_without_the_tools_says_to_update_first(pve):
 
 def test_update_passes_its_arguments_to_update_sh_in_the_container(pve):
     pve.add_ct(207, tags="pve-flr-portal")
-    assert stub(pve, "update", "207", "v1.4.0").returncode == 0
+    assert stub(pve, "update", "207", "v1.4.0", "-y", "--no-snapshot").returncode == 0
     assert "bash /opt/pve-flr-portal/deploy/update.sh v1.4.0" in pve.log("exec.log")
 
 
 def test_the_config_and_update_names_dispatch_to_their_commands(pve):
     pve.add_ct(207, tags="pve-flr-portal")
-    assert stub(pve, name="pve-flr-portal-update").returncode == 0
+    assert stub(pve, "-y", "--no-snapshot", name="pve-flr-portal-update").returncode == 0
     assert "deploy/update.sh" in pve.log("exec.log")
     result = stub(pve, name="pve-flr-portal-config")
     assert "predates the management tools" in result.stderr
@@ -166,3 +175,150 @@ def test_the_host_command_leaves_no_temp_files_behind(pve):
     pve.install_tools(207)
     stub(pve, "config")  # runs the management tool, which refuses without a terminal
     assert list(pve.tmpdir.iterdir()) == []
+
+
+# --- update ------------------------------------------------------------------
+
+
+def _updatable(pve: FakePve, ctid: int = 207, version: str = "1.9.0", tags: str = "v1.8.0\nv1.9.0\nv1.10.0\n", **kw):
+    pve.add_ct(ctid, tags="pve-flr-portal", version=version, **kw)
+    (pve.ct(ctid) / "remote_tags").write_text(tags, encoding="utf-8", newline="\n")
+
+
+def _write(path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def _new_release_files(pve: FakePve, ctid: int = 207) -> Path:
+    return pve.ct(ctid) / "after_update" / "opt" / "pve-flr-portal" / "deploy"
+
+
+def test_update_says_so_when_already_at_the_latest_release(pve):
+    _updatable(pve, version="1.10.0")
+    result = stub(pve, "update", "-y")
+    assert result.returncode == 0
+    assert "up to date (v1.10.0)" in result.stdout
+    assert "update.sh" not in pve.log("exec.log")  # nothing was run
+
+
+def test_update_shows_old_and_new_version_and_runs_update_sh(pve):
+    _updatable(pve)
+    result = stub(pve, "update", "-y")
+    assert result.returncode == 0, result.stderr
+    assert "v1.9.0 -> v1.10.0" in result.stdout
+    assert "https://github.com/octo/portal/releases/tag/v1.10.0" in result.stdout
+    assert "bash /opt/pve-flr-portal/deploy/update.sh" in pve.log("exec.log")
+    assert "now at v1.10.0" in result.stdout
+    assert pve.read(207, "/opt/pve-flr-portal/VERSION").strip() == "1.10.0"
+
+
+def test_update_refuses_to_guess_without_a_terminal(pve):
+    _updatable(pve)
+    result = stub(pve, "update")
+    assert result.returncode != 0 and "-y" in result.stderr
+    assert "update.sh" not in pve.log("exec.log")
+
+
+def test_update_refreshes_the_host_command_and_the_patch_script_from_the_new_checkout(pve):
+    _updatable(pve)
+    sbin = pve.root / "sbin"
+    _write(sbin / "pve-flr-portal", "#!/usr/bin/env bash\necho old\n")
+    _write(sbin / "pve-flr-portal-patch-host-backups.sh", "#!/usr/bin/env bash\necho old\n")
+    new = _new_release_files(pve)
+    _write(new / "host" / "pve-flr-portal", "#!/usr/bin/env bash\necho new-host-command\n")
+    _write(new / "patch-pve-host-backups.sh", "#!/usr/bin/env bash\necho new-patch\n")
+    result = stub(pve, "update", "-y")
+    assert result.returncode == 0, result.stderr
+    assert "new-host-command" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
+    assert "new-patch" in (sbin / "pve-flr-portal-patch-host-backups.sh").read_text(encoding="utf-8")
+    assert (sbin / "pve-flr-portal-config").exists()
+    assert (sbin / "pve-flr-portal-update").exists()
+
+
+def test_the_patch_script_is_left_alone_if_it_was_never_installed(pve):
+    _updatable(pve)
+    _write(_new_release_files(pve) / "patch-pve-host-backups.sh", "#!/usr/bin/env bash\n")
+    stub(pve, "update", "-y")
+    assert not (pve.root / "sbin" / "pve-flr-portal-patch-host-backups.sh").exists()
+
+
+def test_a_replacement_that_does_not_parse_is_not_installed(pve):
+    _updatable(pve)
+    sbin = pve.root / "sbin"
+    _write(sbin / "pve-flr-portal", "#!/usr/bin/env bash\necho keep-me\n")
+    _write(_new_release_files(pve) / "host" / "pve-flr-portal", "if then fi (((\n")
+    result = stub(pve, "update", "-y")
+    assert "keep-me" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
+    assert "doesn't parse" in result.stderr
+
+
+def test_pinning_an_older_version_leaves_the_host_tools_alone(pve):
+    _updatable(pve)
+    sbin = pve.root / "sbin"
+    _write(sbin / "pve-flr-portal", "#!/usr/bin/env bash\necho keep-me\n")
+    _write(_new_release_files(pve) / "host" / "pve-flr-portal", "#!/usr/bin/env bash\necho old-release\n")
+    assert stub(pve, "update", "207", "v1.4.0", "-y").returncode == 0
+    assert "keep-me" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
+
+
+def test_update_can_take_a_snapshot_first(pve):
+    _updatable(pve)
+    result = stub(pve, "update", "-y", "--snapshot")
+    assert result.returncode == 0
+    assert "snapshot 207 pfr-pre-update-" in pve.log("set.log")
+    assert "pct delsnapshot 207 pfr-pre-update-" in result.stdout
+
+
+def test_update_goes_on_without_a_snapshot_if_the_storage_cannot_take_one(pve):
+    _updatable(pve)
+    _write(pve.ct(207) / "no_snapshot", "x\n")
+    result = stub(pve, "update", "-y", "--snapshot")
+    assert result.returncode == 0  # not a reason to refuse the update
+    assert "Could not take a snapshot" in result.stderr
+    assert "update.sh" in pve.log("exec.log")
+
+
+def test_a_failed_update_points_at_the_snapshot_to_roll_back_to(pve):
+    _updatable(pve)
+    _write(pve.ct(207) / "update_fails", "x\n")
+    result = stub(pve, "update", "-y", "--snapshot")
+    assert result.returncode != 0
+    assert "pct rollback 207 pfr-pre-update-" in result.stderr
+
+
+def test_update_all_updates_running_containers_and_summarises(pve):
+    _updatable(pve, 207, version="1.9.0")
+    _updatable(pve, 208, version="1.10.0")
+    _updatable(pve, 209, version="1.9.0", status="stopped")
+    result = stub(pve, "update", "--all", "-y")
+    assert result.returncode == 0, result.stderr
+    assert "Skipping container 209" in result.stdout
+    assert "Updated: 1, already up to date: 1, skipped: 1, failed: 0." in result.stdout
+    assert pve.read(207, "/opt/pve-flr-portal/VERSION").strip() == "1.10.0"
+    assert pve.read(209, "/opt/pve-flr-portal/VERSION").strip() == "1.9.0"
+
+
+def test_update_all_reports_failures_in_its_exit_status(pve):
+    _updatable(pve, 207)
+    _updatable(pve, 208)
+    _write(pve.ct(208) / "update_fails", "x\n")
+    result = stub(pve, "update", "--all", "-y")
+    assert result.returncode != 0
+    assert "Updated: 1, already up to date: 0, skipped: 0, failed: 1." in result.stdout
+
+
+def test_update_rejects_unknown_options_and_conflicting_arguments(pve):
+    _updatable(pve)
+    assert stub(pve, "update", "--bogus").returncode != 0
+    assert stub(pve, "update", "--all", "207", "-y").returncode != 0
+
+
+def test_status_says_whether_an_update_is_available(pve):
+    _updatable(pve)
+    assert "v1.10.0 - update with: pve-flr-portal update 207" in stub(pve, "status").stdout
+
+
+def test_status_says_when_up_to_date(pve):
+    _updatable(pve, version="1.10.0")
+    assert "(up to date)" in stub(pve, "status").stdout

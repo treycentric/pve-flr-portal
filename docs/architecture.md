@@ -356,6 +356,15 @@ portal already keeps:
   the changed keys to `.env` and restarts the service. `.env` is patched
   in place by a small Python script inside the container, so JSON values
   such as `RESTORE_DATA_NICS` need no shell escaping.
+- **`update`** is host-resident logic in the stub (it has to work on a
+  release that predates the management tools, so it can't come from the
+  container): the installed version from the container's `VERSION`, the latest
+  from `git ls-remote --tags origin` run *in* the container, an optional
+  `pct snapshot` as a rollback point, then `deploy/update.sh` in the
+  container. Afterwards the stub and (if installed) the host-backup patch
+  script are replaced from the new checkout - atomically, and only if they
+  parse - unless an older version was pinned. `--all` repeats this per running
+  container.
 - **Direct Network Transfer follows the container.** With no subnet/address
   entered by hand, the installer and `config` derive `RESTORE_DATA_NICS` from
   the container's own IPv4 address; `config` re-derives it when that address
