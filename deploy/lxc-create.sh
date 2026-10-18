@@ -305,7 +305,7 @@ fi
 if [ -n "$CREATE_ROLES" ]; then
   msg_info "Creating the PVE roles: ${CREATE_ROLES//,/, }"
   pfr_mktemp ROLES_SCRIPT
-  if pfr_pull "$CTID" "$PFR_APP_DIR/deploy/pfr-roles.sh" "$ROLES_SCRIPT"; then
+  if pfr_pull "$CTID" "$PFR_APP_DIR/deploy/host/pfr-roles.sh" "$ROLES_SCRIPT"; then
     # shellcheck disable=SC2086 # CREATE_ROLES is deliberately split into role names
     bash "$ROLES_SCRIPT" create ${CREATE_ROLES//,/ } \
       || msg_err "Not every role could be created - see above. Check with: pve-flr-portal roles status"

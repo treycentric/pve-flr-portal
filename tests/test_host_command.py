@@ -623,7 +623,7 @@ def test_install_leaves_no_temp_files_behind(pve):
 def _roles_tool(pve: FakePve, ref: str = "v1.9.0", content: str | None = None) -> Path:
     from pve_fakes import DEPLOY as D
 
-    text = content if content is not None else (D / "pfr-roles.sh").read_text(encoding="utf-8")
+    text = content if content is not None else (D / "host" / "pfr-roles.sh").read_text(encoding="utf-8")
     return _raw(pve, ref, **{"pfr-roles.sh": text})
 
 

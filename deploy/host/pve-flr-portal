@@ -736,7 +736,7 @@ cmd_install() {
 cmd_roles() {
   local script
   note "Fetching the roles tool from GitHub - please wait..."
-  download_deploy_file pfr-roles.sh script '^PFR_ROLES_SCRIPT=1' \
+  download_deploy_file host/pfr-roles.sh script '^PFR_ROLES_SCRIPT=1' \
     || die "Could not download the roles tool from GitHub. Check the network."
   echo "Using the roles tool from $GOT_REF." >&2
   bash "$script" "$@"

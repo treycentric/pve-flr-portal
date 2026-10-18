@@ -356,7 +356,7 @@ portal already keeps:
   the changed keys to `.env` and restarts the service. `.env` is patched
   in place by a small Python script inside the container, so JSON values
   such as `RESTORE_DATA_NICS` need no shell escaping.
-- **`roles`** (`deploy/pfr-roles.sh`) defines the three roles' privileges in
+- **`roles`** (`deploy/host/pfr-roles.sh`) defines the three roles' privileges in
   one place and creates, inspects (`status`: missing / ok / differs, and how
   many ACL grants use each) or deletes them with `pveum`. Every `pveum` call
   is checked individually, an existing role is only changed on confirmation,

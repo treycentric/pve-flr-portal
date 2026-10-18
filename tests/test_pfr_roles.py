@@ -1,10 +1,10 @@
-"""deploy/pfr-roles.sh - creating, inspecting and deleting the Proxmox roles the
+"""deploy/host/pfr-roles.sh - creating, inspecting and deleting the Proxmox roles the
 portal's users need, against a fake pveum/pveversion (tests/fakes/)."""
 
 import pytest
 from pve_fakes import DEPLOY, FakePve
 
-SCRIPT = DEPLOY / "pfr-roles.sh"
+SCRIPT = DEPLOY / "host" / "pfr-roles.sh"
 
 READER = "Datastore.AllocateSpace,VM.Backup,VM.Audit"
 OPERATOR = "VM.GuestAgent.Audit,VM.GuestAgent.FileWrite"
@@ -201,7 +201,7 @@ def test_the_script_is_executable_in_git():
     import subprocess
 
     out = subprocess.run(
-        ["git", "ls-files", "--stage", "deploy/pfr-roles.sh"],
+        ["git", "ls-files", "--stage", "deploy/host/pfr-roles.sh"],
         cwd=DEPLOY.parent,
         capture_output=True,
         text=True,

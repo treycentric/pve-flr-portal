@@ -477,7 +477,8 @@ def test_the_installer_creates_the_chosen_roles_from_the_containers_checkout(pve
     pve.add_ct(207)
     deploy = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy"
     deploy.mkdir(parents=True, exist_ok=True)
-    shutil.copy(D / "pfr-roles.sh", deploy / "pfr-roles.sh")
+    (deploy / "host").mkdir(exist_ok=True)
+    shutil.copy(D / "host" / "pfr-roles.sh", deploy / "host" / "pfr-roles.sh")
     result = pve.bash(
         f'set -uo pipefail\nsource "{LIB}"\nCTID=207\nCREATE_ROLES=FileRestoreReader,FileRestoreReaderHost\n{block}\n'
     )
@@ -494,7 +495,7 @@ def test_the_installer_says_what_to_do_when_the_release_lacks_the_roles_tool(pve
 
     text = (D / "lxc-create.sh").read_text(encoding="utf-8")
     block = re.search(r'^if \[ -n "\$CREATE_ROLES" \]; then\n.*?^fi\n', text, re.S | re.M).group(0)
-    pve.add_ct(207)  # no deploy/pfr-roles.sh in this container's release
+    pve.add_ct(207)  # no deploy/host/pfr-roles.sh in this container's release
     result = pve.bash(f'set -uo pipefail\nsource "{LIB}"\nCTID=207\nCREATE_ROLES=FileRestoreReader\n{block}\n')
     assert result.returncode == 0, result.stderr
     assert "doesn't include the roles tool yet" in result.stdout
