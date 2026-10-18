@@ -83,7 +83,7 @@ with the fix, test, and commit.
   restarts the service), `INSTALL_CERTBOT`/`CERTBOT_DNS_PLUGIN` in
   `install.sh`/`lxc-create.sh`. Docker's own path isn't covered (no
   systemd/certbot.timer inside the container image) — out of scope for
-  now, LXC is the primary deployment target. See docs/plan.md §7.3.
+  now, LXC is the primary deployment target. See the TLS section of docs/architecture.md.
 
 ## PH.6 — Directory-listing cache — SHIPPED (issue #109)
 
