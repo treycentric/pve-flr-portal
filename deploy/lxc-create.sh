@@ -976,7 +976,7 @@ fi
 # DNS only when given; otherwise the container uses the PVE host's settings.
 DNS_ARGS=()
 if [ -n "$DNS_SERVERS" ]; then
-  DNS_ARGS+=(--nameserver "${DNS_SERVERS//,/ }")
+  DNS_ARGS+=(--nameserver "$(printf '%s' "$DNS_SERVERS" | tr -s ', ' ' ' | sed 's/^ //; s/ $//')")
 fi
 if [ -n "$SEARCH_DOMAIN" ]; then
   DNS_ARGS+=(--searchdomain "$SEARCH_DOMAIN")
