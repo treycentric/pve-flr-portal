@@ -375,7 +375,14 @@ fi
 # deploy/patch-pve-host-backups.sh and docs/api-reference.md for the
 # full detail behind this prompt's wording.
 if [ -z "$ENABLE_HOST_BACKUPS" ]; then
-  if [ -t 0 ]; then
+  if [ "$IS_TTY" = "1" ] && [ "$HAS_WHIPTAIL" = "1" ]; then
+    if whiptail --backtitle "pve-flr-portal setup" --title "Host-backup support" --defaultno \
+      --yesno "This modifies the Proxmox Storage PBS backend on this PVE host to remove a limitation that prevents browsing and file-level restore of host backups, which this application needs in order to support them.\n\nA side benefit: host backups also become browsable in the PVE UI.\n\nThe change reapplies itself automatically after pve-storage package updates. See deploy/patch-pve-host-backups.sh for details.\n\nEnable host-backup support now?" 18 70; then
+      ENABLE_HOST_BACKUPS=true
+    else
+      ENABLE_HOST_BACKUPS=false
+    fi
+  elif [ "$IS_TTY" = "1" ]; then
     echo
     echo "This modifies the Proxmox Storage PBS backend to remove a"
     echo "limitation preventing the browsing and file-level restore of"
