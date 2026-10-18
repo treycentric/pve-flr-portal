@@ -794,7 +794,7 @@ review_hub() {
     for k in "${BASIC_LAYOUT[@]}"; do
       if [[ "$k" == H:* ]]; then
         nsep=$((nsep + 1))
-        items+=("SEP$nsep" "--- ${k#H:} ---")
+        items+=("SEP$nsep" "[ ${k#H:} ]")
       else
         items+=("$k" "$(row "$k")")
       fi
