@@ -302,7 +302,7 @@ SAN; the portal won't touch an admin-supplied cert, it only logs a
 UI cert is unaffected — it's keyed to `PVE_HOST`/`localhost`, not the
 container IP.)
 
-**TLS certificates → Let's Encrypt (DNS-01, issue #52).** The
+**TLS certificates → Let's Encrypt (DNS-01).** The
 self-signed cert above works fine but triggers a browser warning.
 `deploy/install.sh` installs `certbot` + a DNS-01 plugin
 (`CERTBOT_DNS_PLUGIN`, default `rfc2136`) by default

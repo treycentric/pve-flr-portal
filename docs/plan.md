@@ -739,7 +739,7 @@ admin hasn't supplied their own.
   which is about *this app* trusting *PVE's* self-signed cert when
   calling out to it — don't conflate the two in docs/config naming.
 
-**Real, CA-issued certs (issue #52, 2026-09-29):** the self-signed
+**Real, CA-issued certs (2026-09-29):** the self-signed
 default above works but triggers a browser warning. `deploy/install.sh`
 installs `certbot` + a DNS-01 plugin (`CERTBOT_DNS_PLUGIN`, default
 `rfc2136`) by default; `deploy/certbot-setup.sh <domain>...` issues a
