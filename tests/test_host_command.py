@@ -343,10 +343,11 @@ def test_a_container_without_update_sh_gets_manual_commands_and_nothing_is_chang
     result = stub(pve, "update", "-y", "--snapshot")
     assert result.returncode != 0
     assert "installed before update.sh existed" in result.stderr
+    assert "isn't a git checkout" in result.stderr
     assert (
         "pct exec 207 -- bash -c 'git config --system --add safe.directory /opt/pve-flr-portal"
         " && cd /opt/pve-flr-portal && git fetch --tags origin && git checkout --quiet v1.10.0"
-        " && bash deploy/install.sh'" in result.stderr
+        " && INSTALL_CERTBOT=0 bash deploy/install.sh'" in result.stderr
     )
     assert "'pve-flr-portal update' works normally" in result.stderr
     # it stopped before asking, snapshotting or running anything
@@ -374,3 +375,102 @@ def test_update_all_carries_on_past_a_container_that_needs_a_manual_update(pve):
     assert result.returncode != 0
     assert "Updated: 1, already up to date: 0, skipped: 0, failed: 1." in result.stdout
     assert pve.read(208, "/opt/pve-flr-portal/VERSION").strip() == "1.10.0"
+
+
+# --- legacy installs the command can update for the person ---------------------------
+
+
+def _legacy(pve: FakePve, ctid: int = 207, version: str = "1.0.0", **kw):
+    _updatable(pve, ctid, version=version, update_script=False, git_checkout=True, **kw)
+
+
+def _exec_script(pve: FakePve) -> str:
+    log = pve.log("exec.log")
+    return log[log.index("bash -c") :]
+
+
+def test_a_legacy_container_is_updated_by_running_the_equivalent_steps(pve):
+    _legacy(pve)
+    _write(_new_release_files(pve) / "update.sh", "#!/usr/bin/env bash\n")  # the release it moves to has update.sh
+    result = stub(pve, "update", "-y")
+    assert result.returncode == 0, result.stderr
+    assert "installed before update.sh existed: the equivalent steps are run" in result.stdout
+    script = _exec_script(pve)
+    assert "git config --system --add safe.directory /opt/pve-flr-portal" in script
+    assert "git fetch --quiet --tags origin" in script
+    assert "git checkout --quiet v1.10.0" in script
+    assert "INSTALL_CERTBOT=0 bash deploy/install.sh" in script  # an update doesn't add certbot
+    assert "now at v1.10.0" in result.stdout
+    # it ends up with update.sh, so the next update takes the normal path
+    assert pve.read(207, "/opt/pve-flr-portal/deploy/update.sh") is not None
+
+
+def test_a_legacy_update_is_confirmed_and_can_snapshot_first(pve):
+    _legacy(pve)
+    assert stub(pve, "update", "207").returncode != 0  # no terminal, no -y: it refuses to guess
+    result = stub(pve, "update", "-y", "--snapshot")
+    assert result.returncode == 0, result.stderr
+    assert "snapshot 207 pfr-pre-update-" in pve.log("set.log")
+
+
+def test_a_legacy_update_follows_the_requested_version(pve):
+    _legacy(pve)
+    assert stub(pve, "update", "207", "1.4.0", "-y").returncode == 0
+    assert "git checkout --quiet v1.4.0" in _exec_script(pve)
+
+
+def test_a_legacy_update_with_local_changes_fails_and_names_the_snapshot(pve):
+    _legacy(pve)
+    _write(pve.ct(207) / "dirty", "x\n")
+    result = stub(pve, "update", "-y", "--snapshot")
+    assert result.returncode != 0
+    assert "local changes" in result.stderr
+    assert "The update failed in container 207" in result.stderr
+    assert "pct rollback 207 pfr-pre-update-" in result.stderr
+
+
+def test_a_container_without_git_gets_the_manual_commands_instead(pve):
+    _legacy(pve)
+    _write(pve.ct(207) / "nogit", "x\n")
+    result = stub(pve, "update", "-y")
+    assert result.returncode != 0
+    assert "isn't a git checkout" in result.stderr
+    assert "bash -c" not in pve.log("exec.log")
+
+
+# --- host-tools ---------------------------------------------------------------------
+
+
+def test_host_tools_installs_the_command_from_a_containers_checkout(pve):
+    _updatable(pve)
+    deploy = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy"
+    _write(deploy / "host" / "pve-flr-portal", "#!/usr/bin/env bash\necho from-the-container\n")
+    sbin = pve.root / "sbin"
+    result = stub(pve, "host-tools", "207")
+    assert result.returncode == 0, result.stderr
+    assert "from-the-container" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
+    assert (sbin / "pve-flr-portal-config").exists()
+    assert (sbin / "pve-flr-portal-update").exists()
+    assert "Updated" in result.stdout
+    # again: nothing to do, and it says so
+    assert "Already up to date" in stub(pve, "host-tools", "207").stdout
+
+
+def test_host_tools_also_refreshes_the_patch_script_if_it_was_installed(pve):
+    _updatable(pve)
+    deploy = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy"
+    _write(deploy / "host" / "pve-flr-portal", "#!/usr/bin/env bash\necho new\n")
+    _write(deploy / "patch-pve-host-backups.sh", "#!/usr/bin/env bash\necho new-patch\n")
+    sbin = pve.root / "sbin"
+    _write(sbin / "pve-flr-portal-patch-host-backups.sh", "#!/usr/bin/env bash\necho old-patch\n")
+    assert stub(pve, "host-tools", "207").returncode == 0
+    assert "new-patch" in (sbin / "pve-flr-portal-patch-host-backups.sh").read_text(encoding="utf-8")
+
+
+def test_host_tools_on_a_release_without_the_command_says_to_update_first(pve):
+    _updatable(pve)
+    result = stub(pve, "host-tools", "207")
+    assert result.returncode != 0
+    assert "doesn't include the host command" in result.stderr
+    assert "pve-flr-portal update 207" in result.stderr
+    assert not (pve.root / "sbin" / "pve-flr-portal").exists()

@@ -356,12 +356,20 @@ portal already keeps:
   the changed keys to `.env` and restarts the service. `.env` is patched
   in place by a small Python script inside the container, so JSON values
   such as `RESTORE_DATA_NICS` need no shell escaping.
+- **Installing the host command** needs no container: `deploy/install-host-tools.sh`
+  (curl-pipeable) fetches the stub from the latest release - or `PFR_VERSION`,
+  or `main` if the release predates it - or copies it from a container's
+  checkout, and refuses an empty, unparsable or foreign file. `pve-flr-portal
+  host-tools` then refreshes it (and the host-backup patch script) from any
+  container's checkout.
 - **`update`** is host-resident logic in the stub (it has to work on a
   release that predates the management tools, so it can't come from the
   container): the installed version from the container's `VERSION`, the latest
   from `git ls-remote --tags origin` run *in* the container, an optional
   `pct snapshot` as a rollback point, then `deploy/update.sh` in the
-  container. Afterwards the stub and (if installed) the host-backup patch
+  container - or, for an install that predates `update.sh` but is a git
+  checkout with `install.sh`, the equivalent steps (fetch, check out,
+  `install.sh`, without certbot). Afterwards the stub and (if installed) the host-backup patch
   script are replaced from the new checkout - atomically, and only if they
   parse - unless an older version was pinned. `--all` repeats this per running
   container.

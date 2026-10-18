@@ -511,6 +511,7 @@ on the node that hosts the container:
 | `pve-flr-portal status [CTID]` | Installed version, whether a newer release is available, service state and address. |
 | `pve-flr-portal list` | The containers it manages, with their versions. |
 | `pve-flr-portal adopt [CTID...]` | Starts managing existing installs (below). |
+| `pve-flr-portal host-tools [CTID]` | Installs or updates the host-side pieces (this command, its `-config`/`-update` links, and the host-backup patch script if installed) from that container's release. |
 
 Containers are found by their Proxmox tag, `pve-flr-portal`, which the
 installer sets - so they show up in the Proxmox UI too. With more than one you
@@ -538,18 +539,23 @@ Several Direct Network Transfer networks (more than one entry in
 `RESTORE_DATA_NICS`) show as "Custom" and are left untouched; edit `.env` for
 those.
 
-*Installs made before the management command existed.* Update the container
-once so it has the tools - `pct exec <CTID> -- bash
-/opt/pve-flr-portal/deploy/update.sh` - then install the command on the host
-and adopt it:
+*Installs made before the management command existed, or a host that doesn't
+have it yet.* Install the command on the PVE host (as root):
 
 ```
-pct pull <CTID> /opt/pve-flr-portal/deploy/host/pve-flr-portal /usr/local/sbin/pve-flr-portal
-chmod 755 /usr/local/sbin/pve-flr-portal
-ln -s pve-flr-portal /usr/local/sbin/pve-flr-portal-config
-ln -s pve-flr-portal /usr/local/sbin/pve-flr-portal-update
-pve-flr-portal adopt
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)"
+pve-flr-portal adopt      # start managing the existing install(s)
+pve-flr-portal update     # bring them up to date - older installs are handled too
 ```
+
+`install-host-tools.sh` downloads the command from the latest release (falling
+back to `main` if the release predates it; `PFR_VERSION=<tag or branch>` picks
+another), or copies it out of a container's own checkout if you give it a
+container ID (`bash install-host-tools.sh 207`). It refuses to install anything
+that isn't the command - an empty or truncated download never replaces a
+working copy. Once the command is there, `pve-flr-portal host-tools [CTID]`
+keeps it - and the host-backup patch script, if you enabled host-backup
+support - in step with a container's release without touching the container.
 
 **Updating**:
 
@@ -575,10 +581,14 @@ container's checkout: the `pve-flr-portal` command itself and, if you ever
 enabled host-backup support, the host-backup patch script that the apt hook
 runs. A copy that doesn't parse is never installed.
 
-A container installed before `update.sh` existed can't update itself that
-way: the command says so and prints the manual commands (fetch, check out the
-release, run `install.sh`, which keeps `.env`) without changing anything; after
-that, `pve-flr-portal update` works normally.
+A container installed before `update.sh` existed can't use it, so the command
+runs the equivalent steps itself - after the same confirmation and snapshot
+offer: fetch the tags, check out the release, and run `install.sh`, which keeps
+`.env` and reinstalls the dependencies, the systemd unit and the service
+(certbot is not added). It refuses if the install directory has local changes.
+If the container isn't a git checkout, or has no `git` or `install.sh`, nothing
+is changed and the command prints the same steps for you to run by hand. After
+the update the container has `update.sh`, so later updates take the normal path.
 
 `deploy/update.sh` can also be run yourself inside the container: `bash
 deploy/update.sh` for the latest release, `bash deploy/update.sh v1.4.0` (or

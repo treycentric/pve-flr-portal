@@ -14,6 +14,8 @@
 #   ct/<id>/no_snapshot present: `pct snapshot` fails (storage can't do them)
 #   ct/<id>/update_fails present: update.sh exits non-zero
 #   ct/<id>/after_update/  files copied into the container when update.sh runs
+#   ct/<id>/dirty       present: the checkout has local changes (legacy update refuses)
+#   ct/<id>/nogit       present: no git binary in the container
 #   calls.log           every invocation, one per line
 set -uo pipefail
 d="${FAKE_PVE:?FAKE_PVE not set}"
@@ -125,7 +127,14 @@ case "$cmd" in
     prog="$1"; shift
     case "$prog" in
       true) broken "$id" && exit 1; exit 0 ;;
-      test) [ "$1" = "-f" ] && [ -f "$(ct "$id")/fs$2" ]; exit $? ;;
+      test)
+        case "$1" in
+          -f) [ -f "$(ct "$id")/fs$2" ] ;;
+          -d) [ -d "$(ct "$id")/fs$2" ] ;;
+          *) false ;;
+        esac
+        exit $?
+        ;;
       cat) [ -f "$(ct "$id")/fs$1" ] && cat "$(ct "$id")/fs$1"; exit $? ;;
       rm) shift; rm -f "$(ct "$id")/fs$1" ;;
       python3)
@@ -142,6 +151,18 @@ case "$cmd" in
       hostname) echo "192.168.1.50" ;;
       bash)
         echo "bash $*" >> "$d/exec.log"
+        if [ "$1" = "-c" ]; then
+          # the legacy (pre-update.sh) update script: fetch, check out, install.sh
+          [ -f "$(ct "$id")/dirty" ] && { echo "The install directory has local changes" >&2; exit 1; }
+          [ -f "$(ct "$id")/update_fails" ] && exit 1
+          ref=$(printf '%s' "$2" | sed -n 's/^git checkout --quiet \([^ "]*\).*/\1/p' | head -1)
+          [ -z "$ref" ] && ref="$(tail -1 "$(ct "$id")/remote_tags" 2>/dev/null)"
+          echo "${ref#v}" > "$(ct "$id")/fs/opt/pve-flr-portal/VERSION"
+          if [ -d "$(ct "$id")/after_update" ]; then
+            cp -r "$(ct "$id")/after_update/." "$(ct "$id")/fs/"
+          fi
+          exit 0
+        fi
         if [ "${1##*/}" = "update.sh" ]; then
           [ -f "$(ct "$id")/update_fails" ] && exit 1
           target="${2:-}"
@@ -173,6 +194,7 @@ case "$cmd" in
         case "$script" in
           *"ip -4"*) broken "$id" || cat "$(ct "$id")/addr" 2>/dev/null ;;
           *"command -v ping"*) [ ! -f "$(ct "$id")/noping" ]; exit $? ;;
+          *"command -v git"*) [ ! -f "$(ct "$id")/nogit" ]; exit $? ;;
           *sysctl*) echo "sysctl-script: $script" >> "$d/exec.log" ;;
           *) echo "fake pct: unsupported sh -c: $script" >&2; exit 1 ;;
         esac

@@ -69,6 +69,7 @@ class FakePve:
         version: str | None = "1.9.0",
         addr: str | None = "192.168.1.50/24",
         update_script: bool = True,
+        git_checkout: bool = False,
     ) -> Path:
         c = self.ct(ctid)
         (c / "fs" / "opt" / "pve-flr-portal").mkdir(parents=True)
@@ -82,6 +83,11 @@ class FakePve:
             (c / "fs" / "opt" / "pve-flr-portal" / ".env").write_text(env_text, encoding="utf-8", newline="\n")
         if version is not None:
             (c / "fs" / "opt" / "pve-flr-portal" / "VERSION").write_text(version + "\n", encoding="utf-8", newline="\n")
+        if git_checkout:
+            app = c / "fs" / "opt" / "pve-flr-portal"
+            (app / ".git").mkdir(parents=True, exist_ok=True)
+            (app / "deploy").mkdir(parents=True, exist_ok=True)
+            (app / "deploy" / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8", newline="\n")
         if update_script:
             deploy = c / "fs" / "opt" / "pve-flr-portal" / "deploy"
             deploy.mkdir(parents=True, exist_ok=True)

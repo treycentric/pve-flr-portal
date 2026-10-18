@@ -4,6 +4,7 @@
 #   pve-flr-portal config [CTID]            change settings (portal and network)
 #   pve-flr-portal update [CTID] [VERSION]  update (--all, -y, --snapshot: see --help)
 #   pve-flr-portal status [CTID]            version, service state, address
+#   pve-flr-portal host-tools [CTID]        install/update this command from a container
 #   pve-flr-portal list                     the containers it manages
 #   pve-flr-portal adopt [CTID...]          start managing existing installs
 #
@@ -69,6 +70,9 @@ Commands:
                            --no-snapshot  don't ask about a snapshot
                            --force        update even if already up to date
   status [CTID]          Show the installed version, service state and address.
+  host-tools [CTID]      Install or update the host-side pieces (this command, its
+                         -config/-update links, and the host-backup patch script
+                         if installed) from that container's release.
   list                   List the containers managed from this node.
   adopt [CTID...]        Start managing existing installs: tag them so they
                          are found (with no CTID, scan the running containers).
@@ -319,6 +323,8 @@ install_from_container() {
     install -m 755 "$tmp" "$dest.new"
     mv -f "$dest.new" "$dest"
     echo "Updated $dest"
+  elif [ "${VERBOSE_REFRESH:-0}" = "1" ]; then
+    echo "Already up to date: $dest"
   fi
   rm -f "$tmp"
 }
@@ -360,27 +366,60 @@ ask_yes() {
 # update.sh existed can't update itself that way. install.sh keeps its .env
 # and reinstalls dependencies, the systemd unit and the service, so checking
 # out the release and running it is the manual equivalent.
-manual_update_help() {
-  local ctid="$1" target="$2" latest="$3" name version checkout
-  name=$(pct config "$ctid" | sed -n 's/^hostname: *//p')
-  version="$(ct_version "$ctid")"
-  case "$target" in
-    main) checkout="git checkout --quiet main && git merge --quiet --ff-only origin/main" ;;
+# legacy_checkout TARGET LATEST - the git command that selects the release.
+legacy_checkout() {
+  case "$1" in
+    main) echo "git checkout --quiet main && git merge --quiet --ff-only origin/main" ;;
     ""|latest)
-      if [ -n "$latest" ]; then
-        checkout="git checkout --quiet $latest"
+      if [ -n "$2" ]; then
+        echo "git checkout --quiet $2"
       else
-        checkout='git checkout --quiet "$(git tag -l "v*.*.*" --sort=-v:refname | head -1)"'
+        echo 'git checkout --quiet "$(git tag -l "v*.*.*" --sort=-v:refname | head -1)"'
       fi
       ;;
-    *) checkout="git checkout --quiet v$(norm "$target")" ;;
+    *) echo "git checkout --quiet v$(norm "$1")" ;;
   esac
-  cat >&2 <<EOF
-Container $ctid ($name) was installed before update.sh existed (it runs v${version#v}), so it
-can't update itself. Update it by hand - its .env is kept, and afterwards
-'pve-flr-portal update' works normally:
+}
 
-  pct exec $ctid -- bash -c 'git config --system --add safe.directory $APP_DIR && cd $APP_DIR && git fetch --tags origin && $checkout && bash deploy/install.sh'
+# legacy_script TARGET LATEST - what update.sh would do for a container that
+# predates it: fetch, check out the release, run install.sh (which keeps .env
+# and reinstalls dependencies, the systemd unit and restarts the service).
+# certbot isn't installed - an update doesn't add packages the install lacked.
+legacy_script() {
+  cat <<EOF
+set -e
+cd $APP_DIR
+git config --system --add safe.directory $APP_DIR
+if [ -n "\$(git status --porcelain)" ]; then
+  echo "The install directory has local changes - check 'git status' in $APP_DIR first." >&2
+  exit 1
+fi
+git fetch --quiet --tags origin
+$(legacy_checkout "$1" "$2")
+INSTALL_CERTBOT=0 bash deploy/install.sh
+EOF
+}
+
+# legacy_possible CTID - is the container a git checkout with install.sh,
+# and does it have git? Then the steps above can be run for the person.
+legacy_possible() {
+  pct exec "$1" -- test -d "$APP_DIR/.git" 2>/dev/null \
+    && pct exec "$1" -- test -f "$APP_DIR/deploy/install.sh" 2>/dev/null \
+    && pct exec "$1" -- sh -c 'command -v git >/dev/null 2>&1' 2>/dev/null
+}
+
+# manual_update_help CTID TARGET LATEST - for an install that predates
+# update.sh and can't be updated for the person (no git checkout, ...).
+manual_update_help() {
+  local ctid="$1" name version
+  name=$(pct config "$ctid" | sed -n 's/^hostname: *//p')
+  version="$(ct_version "$ctid")"
+  cat >&2 <<EOF
+Container $ctid ($name) was installed before update.sh existed (it runs v${version#v}), and it
+isn't a git checkout this command can update for you. Update it by hand - its
+.env is kept, and afterwards 'pve-flr-portal update' works normally:
+
+  pct exec $ctid -- bash -c 'git config --system --add safe.directory $APP_DIR && cd $APP_DIR && git fetch --tags origin && $(legacy_checkout "$2" "$3") && INSTALL_CERTBOT=0 bash deploy/install.sh'
 
 EOF
 }
@@ -388,7 +427,7 @@ EOF
 # update_one CTID TARGET -> 0 updated, 10 already up to date, 11 declined,
 # anything else failed. TARGET is empty/latest, main, or a version.
 update_one() {
-  local ctid="$1" target="$2" name current latest want url snapshot="" take=0 args=()
+  local ctid="$1" target="$2" name current latest want url snapshot="" take=0 legacy=0 rc=0 args=()
   name=$(pct config "$ctid" | sed -n 's/^hostname: *//p')
   current="$(norm "$(ct_version "$ctid")")"
   latest="$(latest_release "$ctid")"
@@ -413,8 +452,14 @@ update_one() {
   fi
   # Checked before anything is asked or snapshotted.
   if ! pct exec "$ctid" -- test -f "$APP_DIR/deploy/update.sh" 2>/dev/null; then
-    manual_update_help "$ctid" "$target" "$latest"
-    return 12
+    if legacy_possible "$ctid"; then
+      legacy=1
+      echo "  (installed before update.sh existed: the equivalent steps are run - fetch, check out the"
+      echo "   release, install.sh - and .env is kept)"
+    else
+      manual_update_help "$ctid" "$target" "$latest"
+      return 12
+    fi
   fi
   if [ "$ASSUME_YES" != "1" ]; then
     have_tty || die "Updating without a terminal needs -y."
@@ -445,8 +490,13 @@ update_one() {
   if [ -n "$target" ] && [ "$target" != "latest" ]; then
     args=("$target")
   fi
-  if ! pct exec "$ctid" -- bash "$APP_DIR/deploy/update.sh" "${args[@]}"; then
-    echo "update.sh failed in container $ctid." >&2
+  if [ "$legacy" = "1" ]; then
+    pct exec "$ctid" -- bash -c "$(legacy_script "$target" "$latest")" || rc=$?
+  else
+    pct exec "$ctid" -- bash "$APP_DIR/deploy/update.sh" "${args[@]}" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "The update failed in container $ctid." >&2
     if [ -n "$snapshot" ]; then
       echo "Roll back with: pct rollback $ctid $snapshot" >&2
     fi
@@ -536,6 +586,19 @@ cmd_update() {
   esac
 }
 
+# host-tools [CTID] - install or update the host-side pieces from a
+# container's checkout, without touching the container.
+cmd_host_tools() {
+  choose_ct "${1:-}"
+  ensure_running "$CTID"
+  if ! pct exec "$CTID" -- test -f "$APP_DIR/deploy/host/pve-flr-portal" 2>/dev/null; then
+    die "Container $CTID runs a release that doesn't include the host command. Update it first: pve-flr-portal update $CTID"
+  fi
+  VERBOSE_REFRESH=1
+  refresh_host_pieces "$CTID"
+  echo "The host tools match container $CTID's release."
+}
+
 cmd_status() {
   local ver state ip latest
   choose_ct "${1:-}"
@@ -585,6 +648,7 @@ main() {
     config) cmd_config "$@" ;;
     update) cmd_update "$@" ;;
     status) cmd_status "$@" ;;
+    host-tools) cmd_host_tools "$@" ;;
     list) cmd_list ;;
     adopt) cmd_adopt "$@" ;;
     *) usage >&2; exit 2 ;;
