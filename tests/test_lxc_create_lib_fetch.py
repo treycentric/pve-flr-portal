@@ -4,6 +4,7 @@ first, then main if that release predates the library or has a different
 API. Uses a fake curl (tests/fakes/curl)."""
 
 import re
+import shutil
 
 import pytest
 from pve_fakes import DEPLOY, FakePve
@@ -100,3 +101,41 @@ def test_uses_the_library_next_to_the_script_in_a_checkout(pve, tmp_path):
     result = pve.run_script(script, [])
     assert result.returncode == 0, result.stderr
     assert "from=checkout" in result.stdout
+
+
+def test_the_real_library_survives_being_sourced_from_inside_a_function(pve, tmp_path):
+    # The installer sources the library from load_lib(). A plain `declare -A`
+    # at the top of the library would make its arrays local to that function
+    # and lose them ("CTID: unbound variable" on first use).
+    checkout = tmp_path / "deploy"
+    (checkout / "lib").mkdir(parents=True)
+    shutil.copy(DEPLOY / "lib" / "settings.sh", checkout / "lib" / "settings.sh")
+    script = checkout / "run.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        'REPO_URL="https://github.com/octo/portal.git"\n'
+        "PFR_LIB_API_WANTED=1\n" + LOAD_LIB + "load_lib\n"
+        "pfr_init_install\n"
+        'echo "ctid=$CTID default_port=${S_DEF[PORTAL_PORT]} groups=${G_TITLE[portal]}"\n'
+        "ORIG[CTID]=1\n"
+        'echo "orig=${ORIG[CTID]}"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    result = pve.run_script(script, [])
+    assert result.returncode == 0, result.stderr
+    assert "default_port=8008" in result.stdout
+    assert "groups=Portal" in result.stdout
+    assert "orig=1" in result.stdout
+
+
+def test_the_installer_gets_through_its_settings_phase_to_the_first_proxmox_command(pve):
+    # Runs the actual script (no terminal, so no dialogs). A stand-in `pveam`
+    # that fails marks where it reached.
+    pveam = pve.bin / "pveam"
+    pveam.write_text('#!/usr/bin/env bash\necho "fake pveam: reached" >&2\nexit 1\n', encoding="utf-8", newline="\n")
+    pveam.chmod(0o755)
+    result = pve.run_script(DEPLOY / "lxc-create.sh", [], {"PVE_STORAGE": "pbs-a", "PVE_HOST": "pve.example"})
+    assert "unbound variable" not in result.stderr
+    assert "fake pveam: reached" in result.stderr
+    assert "Looking up the latest debian-12-standard template" in result.stdout

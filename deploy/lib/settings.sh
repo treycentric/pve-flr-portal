@@ -161,7 +161,9 @@ ui_confirm() {
 #   the container's .env (blank = installer-only). cond "OTHER=value" hides
 #   the setting unless OTHER has that value.
 # ---------------------------------------------------------------------
-declare -A S_LABEL S_TYPE S_DEF S_ENV S_GROUP S_OPTS S_COND S_HELP PRESET
+# -g: this file is also sourced from inside a function (the installer's
+# load_lib), where a plain declare would make these local and lose them.
+declare -gA S_LABEL S_TYPE S_DEF S_ENV S_GROUP S_OPTS S_COND S_HELP PRESET
 ALL_KEYS=()
 def() {
   S_LABEL[$1]="$2"; S_TYPE[$1]="$3"; S_DEF[$1]="$4"; S_ENV[$1]="$5"; S_GROUP[$1]="$6"
@@ -235,7 +237,7 @@ BASIC_KEYS=(CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG IP IP6 DNS PVE_HOST PVE_STO
 # The review screen groups them under headings ("H:" rows are headings).
 BASIC_LAYOUT=("H:Container" CTID CT_HOSTNAME STORAGE "H:Network" BRIDGE VLAN_TAG IP IP6 DNS "H:Portal" PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
 ADV_GROUPS=(resources portal access limits dnt cert)
-declare -A G_TITLE=(
+declare -gA G_TITLE=(
   [resources]="Container resources"
   [portal]="Portal"
   [access]="Restore-job visibility"
@@ -1080,7 +1082,7 @@ PFR_ORIG_NICS=""
 PFR_OVERRIDES_TMP="/tmp/pfr-overrides.env"
 
 # The values at the start of a config session, so changes can be listed.
-declare -A ORIG
+declare -gA ORIG
 pfr_snapshot() {
   local k
   ORIG=()
