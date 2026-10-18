@@ -204,3 +204,27 @@ def test_config_layout_leaves_out_what_cannot_change_after_install(pve):
         assert hidden not in layout.split()
     assert "resources" not in groups.split()
     assert "cert" not in groups.split()
+
+
+def _dialog_args(pve: FakePve, body: str) -> str:
+    run(pve, f"IS_TTY=1; HAS_WHIPTAIL=1; export FAKE_WT_ANSWER=x\n{body}")
+    return pve.log("wt.log")
+
+
+def test_menus_and_checklists_do_not_start_focus_in_the_text(pve):
+    # --scrolltext moves the initial focus onto the text's scroll arrow, so
+    # people had to tab to reach the list - it is only used when the text
+    # really can't fit.
+    log = _dialog_args(
+        pve,
+        'BRIDGE=vmbr0; ui_pick BRIDGE "Bridge" "Choose a bridge." "vmbr0" "vmbr1"\n'
+        'PVE_STORAGE=a; ui_multi PVE_STORAGE "Storage" "Pick some." "a" "b"',
+    )
+    assert "--menu" in log and "--checklist" in log
+    assert "--scrolltext" not in log
+
+
+def test_very_long_text_scrolls_instead_of_being_cut_off(pve):
+    long_text = "word " * 600
+    log = _dialog_args(pve, f'BRIDGE=vmbr0; ui_pick BRIDGE "Bridge" "{long_text}" "vmbr0" "vmbr1"')
+    assert "--scrolltext" in log

@@ -129,7 +129,12 @@ ui_msg() {
 ui_ask_yes() {
   local reply
   if [ "$HAS_WHIPTAIL" = "1" ]; then
-    wt --title "$TITLE" --scrolltext --yesno "$1" "$(cap_h $(($(box_h "$1" 7 "$(dlg_w)"))))" "$(dlg_w)"
+    local need scroll=""
+    need=$(box_h "$1" 7 "$(dlg_w)")
+    if [ "$need" -ge "$(($(term_rows) - 2))" ]; then
+      scroll="--scrolltext"
+    fi
+    wt --title "$TITLE" ${scroll:+$scroll} --yesno "$1" "$(cap_h "$need")" "$(dlg_w)"
   else
     printf '%b
 ' "$1"
@@ -441,7 +446,7 @@ ui_input() {
 # current value of VAR is preselected. Only the descriptions are shown
 # (a plain option shows its own text).
 ui_pick() {
-  local var="$1" title="$2" text="$3" cur="${!1}" val o n i=1 desc
+  local var="$1" title="$2" text="$3" cur="${!1}" val o n i=1 desc need scroll
   shift 3
   if [ "$HAS_WHIPTAIL" = "1" ]; then
     local items=() mh=$#
@@ -455,8 +460,15 @@ ui_pick() {
       fi
       items+=("${o%%=*}" "$desc")
     done
+    # --scrolltext only when the text can't fit: it moves the initial focus
+    # into the text area, which makes people tab to reach the list.
+    need=$(($(box_h "$text" 0 "$(dlg_w)") + mh + 9))
+    scroll=""
+    if [ "$need" -gt "$(($(term_rows) - 2))" ]; then
+      scroll="--scrolltext"
+    fi
     val=$(wt --title "$title" --notags --cancel-button "$NAV_CANCEL" --default-item "$cur" \
-      --scrolltext --menu "$text" "$(cap_h $(($(box_h "$text" 0 "$(dlg_w)") + mh + 9)))" "$(dlg_w)" "$mh" "${items[@]}") || return 1
+      ${scroll:+$scroll} --menu "$text" "$(cap_h "$need")" "$(dlg_w)" "$mh" "${items[@]}") || return 1
   else
     printf '%b\n' "$text"
     for o in "$@"; do
@@ -485,7 +497,7 @@ ui_pick() {
 # Starts with the current selection checked, or everything checked if none
 # of the current value is on offer.
 ui_multi() {
-  local var="$1" title="$2" text="$3" cur=",${!1}," val o n i=1 j picked=()
+  local var="$1" title="$2" text="$3" cur=",${!1}," val o n i=1 j picked=() need scroll
   shift 3
   local full="${text}\n\nSpace selects or clears an entry; Enter confirms."
   local mh=$#
@@ -507,8 +519,13 @@ ui_multi() {
           items[j]=ON
         done
       fi
+      need=$(($(box_h "$full" 0 "$(dlg_w)") + mh + 9))
+      scroll=""
+      if [ "$need" -gt "$(($(term_rows) - 2))" ]; then
+        scroll="--scrolltext"
+      fi
       val=$(wt --title "$title" --cancel-button "$NAV_CANCEL" --separate-output \
-        --scrolltext --checklist "$full" "$(cap_h $(($(box_h "$full" 0 "$(dlg_w)") + mh + 9)))" "$(dlg_w)" "$mh" "${items[@]}") || return 1
+        ${scroll:+$scroll} --checklist "$full" "$(cap_h "$need")" "$(dlg_w)" "$mh" "${items[@]}") || return 1
       val=$(printf '%s' "$val" | tr '\n' ',' | sed 's/,$//')
     else
       printf '%b\n' "$text"

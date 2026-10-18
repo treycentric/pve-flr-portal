@@ -37,6 +37,9 @@ class FakePve:
         pct = self.bin / "pct"
         shutil.copy(ROOT / "tests" / "fakes" / "pct", pct)
         pct.chmod(pct.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        wt = self.bin / "whiptail"
+        shutil.copy(ROOT / "tests" / "fakes" / "whiptail", wt)
+        wt.chmod(wt.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         curl = self.bin / "curl"
         shutil.copy(ROOT / "tests" / "fakes" / "curl", curl)
         curl.chmod(curl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
