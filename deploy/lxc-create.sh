@@ -32,6 +32,10 @@ BRIDGE="${BRIDGE:-vmbr0}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"   # or e.g. "10.0.0.50/24,gw=10.0.0.1"
 VLAN_TAG="${VLAN_TAG:-}"        # optional, e.g. "100" - leave unset for no tag
 REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
+# Passed straight through to install.sh - see its own
+# comment for what these do.
+INSTALL_CERTBOT="${INSTALL_CERTBOT:-1}"
+CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-rfc2136}"
 ENABLE_HOST_BACKUPS="${ENABLE_HOST_BACKUPS:-}"  # "true"/"false" to skip the prompt below
 
 echo "==> pve-flr-portal LXC setup"
@@ -141,7 +145,8 @@ pct exec "$CTID" -- bash -c "
 # own header comment documents first), where "$0" is just "bash" and
 # `dirname "$0"` resolves to "." Confirmed live 2026-09-01: a curl-piped
 # run failed with "failed to open ./install.sh for reading".
-pct exec "$CTID" -- bash /opt/pve-flr-portal/deploy/install.sh
+pct exec "$CTID" -- env "INSTALL_CERTBOT=${INSTALL_CERTBOT}" "CERTBOT_DNS_PLUGIN=${CERTBOT_DNS_PLUGIN}" \
+  bash /opt/pve-flr-portal/deploy/install.sh
 
 if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
   echo "==> Enabling host-backup support on this PVE node"

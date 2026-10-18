@@ -288,6 +288,42 @@ This is orthogonal to `PVE_VERIFY_SSL`, which is about this app
 trusting *PVE's* cert when calling out to it, not this app's own
 listener.
 
+#### CA-issued certificates (certbot, DNS-01)
+
+The self-signed default works but triggers a browser warning.
+`deploy/install.sh` installs `certbot` + a DNS-01 plugin
+(`CERTBOT_DNS_PLUGIN`, default `rfc2136`) by default;
+`deploy/certbot-setup.sh <domain>...` issues a cert via DNS-01 (chosen
+over `http-01` since this app is often deployed internally, with no port
+80/443 exposed to the internet), installs it at
+`TLS_CERT_FILE`/`TLS_KEY_FILE` via `deploy/certbot-deploy-hook.sh`, and
+registers that hook as the cert's `renew_hook` so `certbot.timer` renews
+automatically from then on. `PFR_ACME_DATA_PLANE=1` extends the same
+hook to also install the issued cert at
+`RESTORE_DATA_NIC_TLS_CERT_FILE`/`_KEY_FILE` (see Direct Network
+Transfer in [`push-to-guest.md`](push-to-guest.md)) when the domain also
+covers the data-plane hostname. Safe by construction:
+`ensure_self_signed_cert`/`ensure_data_plane_cert` never overwrite or
+delete an admin-supplied cert (only a broken *self-signed* one), so a
+certbot-managed path is just another admin-supplied cert as far as
+`tls.py` is concerned.
+
+`certbot-setup.sh` also takes an `ACME_SERVER` override (a directory
+URL) so an internal ACME server — e.g. an
+[acme2certifier](https://github.com/grindsa/acme2certifier) instance
+fronting an internal PKI — can be used instead of Let's Encrypt. certbot
+writes the server into the certificate's own `renewalparams`, so
+`certbot renew` (and `certbot-deploy-hook.sh` as its `renew_hook`) keeps
+targeting the same server with no extra plumbing. If that server's own
+TLS cert isn't from a publicly-trusted CA, its issuing CA has to be
+trusted by the container first (`update-ca-certificates`); certbot has
+no flag to skip verifying the ACME connection itself.
+
+`CERTBOT_KEY_TYPE`/`CERTBOT_RSA_KEY_SIZE` cover an internal CA that only
+issues against RSA (certbot's default moved to ECDSA) and/or wants a
+non-default key size. Both land in the same `renewalparams` as
+`--server`, so renewal stays consistent automatically.
+
 ## Stack
 
 - **Backend:** Python, FastAPI — one process, typed surface for a
