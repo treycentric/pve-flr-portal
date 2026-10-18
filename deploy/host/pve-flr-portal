@@ -26,6 +26,25 @@ die() {
   exit 1
 }
 
+# Temp files/directories are removed when the command exits, however it
+# exits (success, die, Ctrl-C, a failed command under set -e).
+TMP_PATHS=()
+
+# tmp_new VAR [mktemp args] - create one and store its path in VAR.
+tmp_new() {
+  local p
+  p=$(mktemp "${@:2}")
+  TMP_PATHS+=("$p")
+  printf -v "$1" '%s' "$p"
+}
+
+cleanup() {
+  if [ "${#TMP_PATHS[@]}" -gt 0 ]; then
+    rm -rf "${TMP_PATHS[@]}"
+  fi
+}
+trap cleanup EXIT
+
 # note TEXT - a progress line, on stderr so scripted output stays clean.
 note() {
   echo "$*" >&2
@@ -218,7 +237,7 @@ ensure_running() {
 pull_file() {
   local tmp
   pct exec "$1" -- test -f "$2" 2>/dev/null || return 1
-  tmp=$(mktemp)
+  tmp_new tmp
   if pct pull "$1" "$2" "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
     cp "$tmp" "$3"
     rm -f "$tmp"
@@ -230,8 +249,7 @@ pull_file() {
 
 fetch_tools() {
   note "Fetching the management tools from container $1 - please wait..."
-  TOOLS_DIR=$(mktemp -d)
-  trap 'rm -rf "$TOOLS_DIR"' EXIT
+  tmp_new TOOLS_DIR -d
   mkdir -p "$TOOLS_DIR/lib"
   if ! pull_file "$1" "$APP_DIR/deploy/pfr-manage.sh" "$TOOLS_DIR/pfr-manage.sh" \
     || ! pull_file "$1" "$APP_DIR/deploy/lib/settings.sh" "$TOOLS_DIR/lib/settings.sh"; then

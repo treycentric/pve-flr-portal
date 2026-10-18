@@ -156,3 +156,13 @@ def test_progress_is_reported_before_the_slow_steps(pve):
     result = stub(pve, "config")  # an old release: it still says what it was doing
     assert "Looking for pve-flr-portal containers" in result.stderr
     assert "Fetching the management tools from container 207" in result.stderr
+
+
+def test_the_host_command_leaves_no_temp_files_behind(pve):
+    pve.add_ct(207, tags="pve-flr-portal")
+    stub(pve, "config")  # fetches the tools directory, then fails on an old release
+    stub(pve, "list")
+    assert list(pve.tmpdir.iterdir()) == []
+    pve.install_tools(207)
+    stub(pve, "config")  # runs the management tool, which refuses without a terminal
+    assert list(pve.tmpdir.iterdir()) == []

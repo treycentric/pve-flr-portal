@@ -288,7 +288,7 @@ if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
   # a file that only exists on the host. The patch script is taken from the
   # container's own checkout, so it is exactly the release that was just
   # installed rather than whatever is on main today.
-  PATCH_SCRIPT=$(mktemp)
+  pfr_mktemp PATCH_SCRIPT
   if pfr_pull "$CTID" /opt/pve-flr-portal/deploy/patch-pve-host-backups.sh "$PATCH_SCRIPT"; then
     bash "$PATCH_SCRIPT"
   elif [ -f "$(dirname "$0")/patch-pve-host-backups.sh" ]; then

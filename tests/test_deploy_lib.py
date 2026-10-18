@@ -363,3 +363,21 @@ def test_choosing_a_setting_edits_it_and_the_list_keeps_the_selection(pve):
     assert len(reviews) == 2
     assert "--default-item" not in reviews[0]
     assert "--default-item VLAN_TAG" in reviews[1]
+
+
+# --- temp files are always cleaned up -------------------------------------------
+
+
+@pytest.mark.parametrize("ending", ["true", "exit 3", "false", "kill -TERM $$"])
+def test_temp_files_registered_with_the_library_are_removed_however_the_script_ends(pve, ending):
+    pve.bash(
+        f'set -e\nsource "{LIB}"\npfr_mktemp a\npfr_mktemp -d 2>/dev/null; pfr_mktemp d -d\n'
+        f'echo x > "$a"; touch "$d/inner"\n{ending}\n'
+    )
+    assert list(pve.tmpdir.iterdir()) == []
+
+
+def test_a_failed_copy_out_of_a_container_leaves_no_temp_files(pve, tmp_path):
+    pve.add_ct(207)
+    _pull(pve, "/opt/pve-flr-portal/missing", tmp_path / "out")
+    assert list(pve.tmpdir.iterdir()) == []

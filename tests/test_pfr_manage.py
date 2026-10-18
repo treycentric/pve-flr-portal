@@ -239,3 +239,9 @@ def test_loading_says_what_it_is_doing(pve):
     pve.add_ct(207)
     result = run(pve, LOAD)
     assert "Reading the configuration of container 207 - please wait" in result.stdout
+
+
+def test_loading_leaves_no_temp_files_behind(pve):
+    pve.add_ct(207)
+    run(pve, LOAD)
+    assert list(pve.tmpdir.iterdir()) == []

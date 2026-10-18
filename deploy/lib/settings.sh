@@ -30,6 +30,28 @@ pfr_cancel() {
   exit "${PFR_CANCEL_RC:-1}"
 }
 
+# Temporary files and directories are registered here and removed when the
+# script exits, however it exits (success, `die`, Ctrl-C, a failed command
+# under `set -e`).
+PFR_TMP_PATHS=()
+
+# pfr_mktemp VAR [mktemp args] - create a temp file (or directory with -d)
+# and store its path in VAR. Not used in a $(...), which would lose the
+# registration.
+pfr_mktemp() {
+  local p
+  p=$(mktemp "${@:2}")
+  PFR_TMP_PATHS+=("$p")
+  printf -v "$1" '%s' "$p"
+}
+
+pfr_cleanup() {
+  if [ "${#PFR_TMP_PATHS[@]}" -gt 0 ]; then
+    rm -rf "${PFR_TMP_PATHS[@]}"
+  fi
+}
+trap pfr_cleanup EXIT
+
 # Status helpers - the scripts that source this normally define their own.
 if ! declare -F msg_info >/dev/null; then
   if [ -t 1 ]; then
@@ -590,8 +612,7 @@ for n in sorted(nics, key=lambda x: x.get("iface", "")):
 }
 
 start_prefetch() {
-  PREFETCH_DIR=$(mktemp -d)
-  trap 'rm -rf "$PREFETCH_DIR"' EXIT
+  pfr_mktemp PREFETCH_DIR -d
   (
     if command -v pvesm >/dev/null 2>&1; then
       pvesm status --content rootdir 2>/dev/null | awk 'NR>1{print $1}' > "$PREFETCH_DIR/rootdir" || true
@@ -1233,7 +1254,7 @@ pfr_apply_ipv6_sysctl() {
 pfr_pull() {
   local tmp
   pct exec "$1" -- test -f "$2" 2>/dev/null || return 1
-  tmp=$(mktemp)
+  pfr_mktemp tmp
   if pct pull "$1" "$2" "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
     cp "$tmp" "$3"
     rm -f "$tmp"
@@ -1249,7 +1270,7 @@ pfr_pull() {
 # Returns 1, creating nothing, if that release doesn't have it yet.
 pfr_install_host_command() {
   local sbin="${PFR_SBIN:-/usr/local/sbin}" tmp
-  tmp=$(mktemp)
+  pfr_mktemp tmp
   if ! pfr_pull "$1" "$PFR_APP_DIR/deploy/host/pve-flr-portal" "$tmp"; then
     rm -f "$tmp"
     return 1
@@ -1339,7 +1360,7 @@ pfr_write_env() {
   if [ "${#ENV_OVERRIDES[@]}" -eq 0 ]; then
     return 0
   fi
-  tmp=$(mktemp)
+  pfr_mktemp tmp
   printf '%s\n' "${ENV_OVERRIDES[@]}" > "$tmp"
   pct push "$1" "$tmp" "$PFR_OVERRIDES_TMP"
   rm -f "$tmp"

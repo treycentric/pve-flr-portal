@@ -78,7 +78,7 @@ load_current() {
     IPV6_MODE="disabled"
   fi
 
-  tmp=$(mktemp)
+  pfr_mktemp tmp
   pfr_pull "$ctid" "$PFR_ENV_FILE" "$tmp" || die "Could not read $PFR_ENV_FILE from container $ctid."
   pfr_load_env "$tmp"
   rm -f "$tmp"

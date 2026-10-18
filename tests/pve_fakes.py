@@ -33,6 +33,9 @@ class FakePve:
         self.state = self.root / "pve"
         self.bin = self.root / "bin"
         (self.state / "ct").mkdir(parents=True)
+        # Where the scripts' mktemp puts things, so tests can check it is left empty.
+        self.tmpdir = self.root / "tmp"
+        self.tmpdir.mkdir()
         self.bin.mkdir()
         pct = self.bin / "pct"
         shutil.copy(ROOT / "tests" / "fakes" / "pct", pct)
@@ -94,6 +97,7 @@ class FakePve:
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "HOME": os.environ.get("HOME", str(self.root)),
             "FAKE_PVE": self.state.as_posix(),
+            "TMPDIR": self.tmpdir.as_posix(),
             "PFR_WAIT_TRIES": "2",
             "PFR_WAIT_SLEEP": "0",
         }
