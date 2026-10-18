@@ -137,3 +137,14 @@ Companion docs, kept separate on purpose:
   from them. See `docs/dev/versioning.md`.
 - Every commit cites the GitHub issue it addresses — `(#N)` at the end
   of the subject line. See `docs/dev/versioning.md`.
+- **No ticket references outside the history docs.** Never write issue/PR
+  numbers (`issue #52`, `#47`, `(#N)`) in code, comments, docstrings,
+  tests, scripts, config examples (`.env.example`), `README.md` or the
+  living docs under `docs/`. State the reason in words instead. Issue
+  numbers belong only in commit subjects, PR bodies, `TODO.md`,
+  `CHANGELOG.md` and `docs/archive/` (the design-rationale and findings
+  "journals" that exist to record history and lessons learned). Before
+  finishing a change, grep the diff for `#\d+` and `issue \d+`.
+- No "confirmed live" / "verified live" / dated test-result remarks in
+  code, script or config comments — features are assumed to be tested.
+  Test evidence goes in the PR's test plan.

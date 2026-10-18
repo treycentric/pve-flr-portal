@@ -1,4 +1,4 @@
-"""Checks on deploy/patch-pve-host-backups.sh (issue #155).
+"""Checks on deploy/patch-pve-host-backups.sh.
 
 Can't exercise the real thing end-to-end - it needs root and a real PVE
 host's PBSPlugin.pm. What's checked here: the script is valid bash, and
@@ -122,7 +122,7 @@ def test_patch_py_refuses_rather_than_guesses_on_a_changed_line(tmp_path):
 
 
 def test_patch_py_resumes_when_only_some_lines_were_patched_before(tmp_path):
-    # Real scenario hit live (#155): an earlier version of this script
+    # Real scenario hit live: an earlier version of this script
     # only patched the first two lines. Re-running the current version
     # must finish the remaining two, not treat "some lines already new,
     # some still old" as an error - that's the normal resume case, not
@@ -139,7 +139,7 @@ def test_patch_py_resumes_when_only_some_lines_were_patched_before(tmp_path):
 
 
 def test_patch_py_upgrades_a_fully_patched_pre_sentinel_install(tmp_path):
-    # Hit live (#155): all four lines already patched by the version of
+    # Hit live: all four lines already patched by the version of
     # this script from before the sentinel comment existed - must add
     # the sentinel (an upgrade), not refuse the whole file as a mismatch
     # just because line 1's exact text changed between script versions.

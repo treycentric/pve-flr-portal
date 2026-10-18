@@ -29,7 +29,7 @@ async def _run_exec(
     """Thin wrapper around pve_client.run_guest_exec translating its
     timeout into this module's own ListingError, so callers below don't
     need their own try/except at every call site. `node` is the guest's
-    real PVE node (issue #51)."""
+    real PVE node."""
     try:
         return await run_guest_exec(session, guest_type, vmid, argv, node=node)
     except GuestExecTimeout as exc:
@@ -82,9 +82,8 @@ async def list_directories(
 ) -> dict:
     """{"path", "parent", "separator", "entries": [{"name", "path"}, ...]}.
     `path` of None/"" means "show the top level" - drives on Windows,
-    "/" on everything else. `node` is the guest's real PVE node (issue
-    #51, normally resolved by guest_agent.get_restore_capabilities and
-    passed in as caps.node)."""
+    "/" on everything else. `node` is the guest's real PVE node (normally resolved by
+    guest_agent.get_restore_capabilities and passed in as caps.node)."""
     is_windows = guest_os_family == "windows"
     sep = "\\" if is_windows else "/"
 
@@ -125,8 +124,8 @@ async def list_directories(
         # locale-dependent date/time columns.
         #
         # Real-world finding: passing `path` as a trailing argv element
-        # after -Command and referencing it as $args[0] does NOT work -
-        # confirmed live ("Cannot bind argument to parameter 'LiteralPath'
+        # after -Command and referencing it as $args[0] does NOT work
+        # ("Cannot bind argument to parameter 'LiteralPath'
         # because it is null"). With -Command, PowerShell appends trailing
         # CLI arguments onto the end of the *command string itself* rather
         # than binding them to $args inside the script, so $args[0] was

@@ -97,7 +97,7 @@ shown only when `Unrestricted` is available:
   @<ts>` on Linux/BSD; PowerShell `(Get-Item).LastWriteTime = ...` on
   Windows — `cmd` has no built-in for this).
 - **Restore original owner/permissions** (Linux/BSD only; separate
-  checkbox from metadata, issue #20) — a *second* `file-restore/
+  checkbox from metadata) — a *second* `file-restore/
   download?tar=1` call on the same `source_filepath` recovers real
   uid/gid/mode from the tar header (`_fetch_source_ownership`, reads
   only a bounded 16KB prefix, never re-downloads full content), applied
@@ -116,8 +116,8 @@ shown only when `Unrestricted` is available:
   (`sha256sum` on Linux/BSD; `certutil -hashfile <path> SHA256` on
   Windows — a `cmd`-only tool, no PowerShell dependency).
 
-**Guest-exec reliability notes, all confirmed live, all current
-behavior:**
+**Guest-exec reliability notes (all current
+behavior):**
 - Windows commands needing more than one embedded double-quoted segment
   on a single `cmd /c` line are unreliable (`cmd.exe`'s own quoting).
   `_ensure_destination_dir()`, `_verify_destination_exists()`, and
@@ -318,7 +318,7 @@ directory root already nests everything under it.
   hash computation — no second pass over content. Directory-marker
   entries in a fetched source zip are skipped, not treated as
   zero-byte manifest lines. Not yet built: a true zero-buffer
-  `os.pipe()` bridge (tracked separately, issue #25) — staging through
+  `os.pipe()` bridge (a follow-on) — staging through
   local temp files is simpler and accepted unless disk usage/throughput
   becomes a real problem.
 - **Direct Network Transfer applies to bundles too** — the
@@ -353,7 +353,7 @@ directory root already nests everything under it.
   up** — needs a staged `.vbs` script via `agent/file-write`, which
   `_try_direct_network_transfer()` doesn't do. Falls back to the
   chunked guest-exec path.
-- **"Original location" restore (issue #68) for a plain (non-LVM)
+- **"Original location" restore for a plain (non-LVM)
   partition is ordinal-position-only** — correlated to the running
   guest's own disk numbering purely by position in PVE's own
   file-restore root listing, since nothing in the API exposes a

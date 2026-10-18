@@ -3,7 +3,7 @@
 binds its SSL context, which is too late to do from a FastAPI startup
 event - hence a small script instead of `uvicorn backend.main:app` directly.
 
-Direct Network Transfer (docs/push-to-guest.md, issue #22, step 5): when
+Direct Network Transfer (docs/push-to-guest.md, step 5): when
 RESTORE_DATA_NICS is configured, this also binds one additional listener
 per distinct configured data-NIC IP, for the network-pull download route
 (`GET /api/restore-downloads/{token}`). Those listeners have to run in
@@ -22,9 +22,9 @@ skipped with a clear log line and the main portal runs normally - DNT
 just isn't offered for that subnet (guests there fall back to the
 chunked write path).
 
-Data-plane TLS (issue #47, docs/push-to-guest.md): those data listeners
+Data-plane TLS (docs/push-to-guest.md): those data listeners
 are plain HTTP when RESTORE_DATA_NIC_TLS_PREFERRED is `plaintext`
-(unchanged from before #47) and HTTPS otherwise, using a dedicated
+(unchanged from before data-plane TLS) and HTTPS otherwise, using a dedicated
 self-signed data-plane cert (IP SANs for the configured NICs) unless the
 admin drops their own at RESTORE_DATA_NIC_TLS_CERT_FILE/_KEY_FILE.
 """
@@ -171,7 +171,7 @@ async def _serve_with_data_nics(cert_path: Path, key_path: Path, data_nics) -> N
 
 
 if __name__ == "__main__":
-    ensure_data_dir()  # issue #30 - provision the app-state dir before serving
+    ensure_data_dir()  # provision the app-state dir before serving
     cert_path = Path(settings.tls_cert_file)
     key_path = Path(settings.tls_key_file)
     ensure_self_signed_cert(cert_path, key_path, common_name=settings.pve_host)

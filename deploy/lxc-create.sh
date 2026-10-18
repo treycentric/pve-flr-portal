@@ -19,7 +19,7 @@ CTID="${CTID:-$(pvesh get /cluster/nextid)}"
 # silently pick up e.g. the PVE host's own name instead of the intended
 # default the moment this runs anywhere HOSTNAME is already set (which is
 # effectively always - it's not something a clean environment lacks).
-# CT_HOSTNAME avoids the collision. Confirmed live 2026-09-01: an actual
+# CT_HOSTNAME avoids the collision. An actual
 # run named the container after the PVE host itself ("titan") instead of
 # "pve-flr-portal".
 CT_HOSTNAME="${CT_HOSTNAME:-pve-flr-portal}"
@@ -70,8 +70,7 @@ fi
 # bash deploy/lxc-create.sh) for a pinned/offline/reproducible run - but the
 # default now discovers whatever the latest debian-12-standard build
 # actually is, rather than a hardcoded version string that inevitably goes
-# stale as Debian ships point releases (issue #16 - confirmed live
-# 2026-09-01: a run failed outright with "no such template" against the
+# stale as Debian ships point releases (a run failed outright with "no such template" against the
 # previously pinned 12.7-1, which pveam's catalog had already moved past).
 if [ -z "${TEMPLATE:-}" ]; then
   echo "==> Looking up the latest debian-12-standard template"
@@ -124,7 +123,7 @@ pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq git ca
 # history to search - depth-1 clones don't fetch tags at all. Then pin
 # to the latest tagged GitHub Release (docs/dev/versioning.md) rather
 # than leaving the checkout on whatever unreleased commit happens to be
-# on main - issue #89. `deploy/update.sh` (also cloned in) is the
+# on main. `deploy/update.sh` (also cloned in) is the
 # supported way to move to a different/later release afterwards.
 pct exec "$CTID" -- bash -c "git clone '${REPO_URL}' /opt/pve-flr-portal"
 pct exec "$CTID" -- bash -c "
@@ -143,7 +142,7 @@ pct exec "$CTID" -- bash -c "
 # when run as `bash deploy/lxc-create.sh` from a local checkout - not
 # when curl-piped (`bash -c "$(curl ...)"`, the invocation this file's
 # own header comment documents first), where "$0" is just "bash" and
-# `dirname "$0"` resolves to "." Confirmed live 2026-09-01: a curl-piped
+# `dirname "$0"` resolves to "." A curl-piped
 # run failed with "failed to open ./install.sh for reading".
 pct exec "$CTID" -- env "INSTALL_CERTBOT=${INSTALL_CERTBOT}" "CERTBOT_DNS_PLUGIN=${CERTBOT_DNS_PLUGIN}" \
   bash /opt/pve-flr-portal/deploy/install.sh

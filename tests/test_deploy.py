@@ -1,6 +1,6 @@
 """Static checks on the deploy/ shell scripts and systemd unit template.
 
-Issue #137: a compromised service process (runs as the unprivileged
+A compromised service process (runs as the unprivileged
 APP_USER) must not be able to write anywhere under the app dir except
 certs/ - a broad `chown -R APP_USER:APP_USER "$APP_DIR"` (or an
 equally broad `ReadWritePaths=` in the unit) would let it modify code,

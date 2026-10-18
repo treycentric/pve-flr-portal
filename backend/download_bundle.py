@@ -1,4 +1,4 @@
-"""Streaming multi-select archive download (issue #7) - the engine behind
+"""Streaming multi-select archive download - the engine behind
 `/api/download-bundle`.
 
 The old implementation buffered every selected item whole in RAM (several
@@ -266,7 +266,7 @@ def _add_item(
     """Reads one item's tar front to back and re-emits each regular file
     and directory (empty folders included) into the output archive. A directory's members keep PVE's own names -
     PVE already roots them under the directory's name, so re-prefixing
-    would double it (issue #66/#26). A leaf's single member is named by
+    would double it. A leaf's single member is named by
     the item itself. Returns whether anything was written - a leaf that
     isn't a regular file under `tar=1` (a symlink: /initrd.img is
     typically one) yields nothing, and the caller falls back to

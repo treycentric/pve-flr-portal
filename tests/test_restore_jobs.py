@@ -183,7 +183,7 @@ async def test_create_and_every_mark_method_persist_to_job_history(manager, sess
 
 
 async def test_job_log_persists_immediately_not_just_at_status_transitions(manager, session_data):
-    """Follow-up to #124: a plain job.log() call mid-run (no status
+    """A plain job.log() call mid-run (no status
     change) must still be visible in the persisted record right away -
     this is what keeps an interrupted job's log current up to the last
     line actually logged, not just up to its last status change."""
@@ -225,7 +225,7 @@ def test_progress_percent_none_when_not_active(manager, session_data):
 
 
 def test_progress_percent_none_before_any_total_is_set(manager, session_data):
-    # Confirmed live 2026-09-02: progress_total used to default to 1, so
+    # progress_total used to default to 1, so
     # a freshly-started active job (progress_current=0) computed a
     # real-looking "0%" before restore_runner.py ever set a real total -
     # e.g. the whole bundle-restore build phase, downloading an item PVE

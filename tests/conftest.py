@@ -13,7 +13,7 @@ os.environ.setdefault("PVE_HOST", "pve.test.local")
 os.environ.setdefault("PVE_STORAGE", "pbs")
 os.environ.setdefault("PVE_VERIFY_SSL", "false")
 os.environ.setdefault("SESSION_IDLE_TIMEOUT_MINUTES", "30")
-# PH.6 (issue #109)'s dir_cache persists to a real file under this dir -
+# PH.6's dir_cache persists to a real file under this dir -
 # an isolated tmp dir for the whole test session, same "never leak into
 # a hermetic test run" reasoning as RESTORE_DATA_NICS below, so tests
 # never touch (or get polluted by) a developer's real ./data directory.
@@ -24,7 +24,7 @@ os.environ.setdefault("PFR_DATA_DIR", tempfile.mkdtemp(prefix="pve-flr-portal-te
 # own real .env (e.g. while setting up live verification) must never leak
 # into what's supposed to be a hermetic test run.
 os.environ.setdefault("RESTORE_DATA_NICS", "[]")
-# Issue #122's job-visibility scoping is opt-in - pinned off here for the
+# Job-visibility scoping is opt-in - pinned off here for the
 # same "a developer's real .env must never leak into a hermetic test
 # run" reason as the rest of this block. Individual tests that want it
 # on monkeypatch `main.settings` directly (dataclasses.replace(), since
@@ -120,7 +120,7 @@ def clear_guest_agent_locks():
 @pytest.fixture(autouse=True)
 def clear_list_path_state():
     """Same leak-between-tests/event-loop convention as
-    clear_guest_agent_locks above, for issue #60's per-(user, volume,
+    clear_guest_agent_locks above, for the per-(user, volume,
     filepath) in-flight coalescing and its semaphore."""
     from backend import pve_client
 
@@ -131,7 +131,7 @@ def clear_list_path_state():
 
 @pytest.fixture(autouse=True)
 def clear_dir_cache():
-    """PH.6 (issue #109): dir_cache persists to disk (PFR_DATA_DIR, set
+    """PH.6: dir_cache persists to disk (PFR_DATA_DIR, set
     to a shared tmp dir for the whole test session above) - without
     this, a listing cached by one test would silently short-circuit a
     later test's own mocked PVE response, same leak-between-tests
@@ -157,7 +157,7 @@ def clear_job_history():
 @pytest.fixture(autouse=True)
 def clear_windows_disk_cache():
     """Same leak-between-tests convention as sessions/restore jobs above,
-    for issue #77's per-vmid whole-VM disk-bus/drive-letter cache -
+    for the per-vmid whole-VM disk-bus/drive-letter cache -
     tests widely reuse vmid "133", so a cached hit from an earlier test
     would silently short-circuit a later test's own fake guest-exec
     response."""

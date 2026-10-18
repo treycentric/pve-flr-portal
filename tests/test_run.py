@@ -1,4 +1,4 @@
-"""Light coverage for run.py's data-plane wiring (issue #47). The actual
+"""Light coverage for run.py's data-plane wiring. The actual
 socket bind / uvicorn serve isn't exercised here - just the cert-prep
 and the plaintext/HTTPS decision."""
 import importlib

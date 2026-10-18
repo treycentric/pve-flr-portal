@@ -184,7 +184,7 @@ a storage a user has no access to is simply skipped, not an error.
 appear, no matter how permissions are configured.** PVE's own
 `PVE::Storage::PBSPlugin::list_volumes` drops `host`-type backups from
 every storage content listing unconditionally, before any permission
-check ever runs — confirmed live: even `root@pam` can't see one in
+check ever runs — even `root@pam` can't see one in
 PVE's own GUI. There's no supported PVE API path around this. Run
 `deploy/patch-pve-host-backups.sh` on every PVE node first (opt-in,
 explained in full there and offered during `lxc-create.sh`) — only
@@ -235,7 +235,7 @@ whether or not PVE itself made the backup.
 **This also unlocks host backups in PVE's own native "Backups" tab**,
 including its own File Restore button — not just this app, since
 `deploy/patch-pve-host-backups.sh` works by fixing what PVE itself
-hands back, the same way regardless of caller. Confirmed live: `Restore`,
+hands back, the same way regardless of caller. `Restore`,
 `Show Configuration`, and `Change Protection` on a host backup's row in
 PVE's GUI don't work correctly - PVE didn't design those for a backup
 with no VM/CT behind it. `File Restore` is the one that matters and
@@ -255,9 +255,9 @@ pveum role add FileRestoreReaderHost -privs "Datastore.Allocate,Datastore.Audit"
 (what makes a backup show up in the portal at all) accepts
 `Datastore.Audit` *or* `Datastore.AllocateSpace`, and `Allocate` isn't
 either of those; they're independent privilege bits in PVE, not a
-hierarchy, confirmed against PVE's own built-in `PVEDatastoreAdmin`
-role, which bundles all of them together rather than relying on
-`Allocate` alone. See `docs/api-reference.md` for the full trace
+hierarchy (PVE's own built-in `PVEDatastoreAdmin`
+role bundles all of them together rather than relying on
+`Allocate` alone). See `docs/api-reference.md` for the full trace
 through PVE's source.
 
 **2. Grant it to each user:**
@@ -364,7 +364,7 @@ restore-jobs list is one shared task list — any logged-in user sees
 every job, same as before this setting existed. Set
 `RESTRICT_JOBS_TO_OWN=true` to scope it per user instead; each user
 then sees only jobs they submitted, with no option to switch to "all"
-unless they hold a bypass privilege (issue #122).
+unless they hold a bypass privilege.
 
 **Grant the bypass** (e.g. for a small admin group) by adding
 `Sys.Audit` — already implied by most "can view PVE at all" roles — at
@@ -505,7 +505,7 @@ docker run -d -p 8008:8008 \
   ghcr.io/treycentric/pve-flr-portal:latest
 ```
 
-**Image signing (issue #111).** Every published image is signed with
+**Image signing.** Every published image is signed with
 [cosign](https://github.com/sigstore/cosign), keyless via the publishing
 workflow's own GitHub Actions OIDC identity - there's no key to manage,
 rotate, or leak. Verify an image actually came from this repo's own
@@ -623,7 +623,7 @@ volumes), i.e. what a fresh install or a container *recreate* loses:
 
 Not persisted anywhere by design: the in-memory session store
 (`backend/auth.py`) — a backend restart or container reboot logs
-everyone out (accepted tradeoff, issue #14).
+everyone out (accepted tradeoff).
 
 **Can the portal's own LXC be backed up with PBS?** Yes — PBS backs up
 LXC (CT) guests as well as VMs, and this container is nothing special.

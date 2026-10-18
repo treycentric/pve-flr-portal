@@ -7,12 +7,12 @@ content-only write path (no guest-exec) is usable; more than one means
 the per-chunk-scratch-file + guest-exec concatenation path is required
 instead.
 
-**Live-verified 2026-09-01** against a real guest (PVE 9.2.11, QGA
+Against a real guest (PVE 9.2.11, QGA
 110.0.2, Windows 10, see docs/api-reference.md):
 - The `content` field is a **raw literal string, not base64** - neither
   direction is decoded/encoded by the server regardless of the
   `encode` param (tried 0 and 1, no observable effect on this
-  version). This contradicts the archived §7.4 doc's "content is
+  version). This contradicts an earlier design doc's "content is
   base64" assumption, which most likely described `pvesh`'s own
   convenience encoding for shell safety, not the raw HTTP API.
 - The exact per-call ceiling is **61440 characters** - confirmed via
@@ -29,8 +29,8 @@ instead.
 pre-build a full list of every chunk's wire-ready string (`Chunk`
 objects from `split_into_chunks()`) *in addition to* the raw downloaded
 bytes it already held - roughly doubling peak memory, for content that
-Direct Network Transfer (docs/push-to-guest.md, issue #22) doesn't even use
-in wire-string form at all. Confirmed live: a large restore on a
+Direct Network Transfer (docs/push-to-guest.md) doesn't even use
+in wire-string form at all. A large restore on a
 memory-constrained deployment (512 MB LXC default) got OOM-killed by
 the kernel before the restore ever got far enough to check Direct
 Network Transfer's eligibility. `Chunk`/`split_into_chunks()`/

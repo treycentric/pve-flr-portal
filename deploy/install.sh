@@ -65,7 +65,7 @@ if [ ! -f "$APP_DIR/.env" ]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"
 fi
 
-# App dir is root-owned and read-only to the service (#137); certs/ is
+# App dir is root-owned and read-only to the service; certs/ is
 # the one subtree it can write, .env readable only by root + the service.
 chown -R root:root "$APP_DIR"
 mkdir -p "$APP_DIR/certs"

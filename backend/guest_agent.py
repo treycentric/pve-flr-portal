@@ -52,7 +52,7 @@ class RestoreCapabilities:
     file_write: PathAvailability
     guest_exec: PathAvailability
     verify_supported: bool  # sha256-via-guest-exec verification available (implies guest_exec)
-    # The guest's real PVE node (issue #51) - resolved once by
+    # The guest's real PVE node - resolved once by
     # get_restore_capabilities() and carried here so callers (main.py's
     # /api/restore, /api/restore-browse) can pass it on to every
     # subsequent guest-scoped call for this guest without re-resolving.
@@ -197,8 +197,7 @@ async def get_guest_ip_addresses(
     VM.GuestAgent.Audit, LXC container with no QGA at all) just gets an
     empty list back, which select_data_nic() correctly treats as "no
     match" rather than this raising and failing the whole restore over a
-    capability check. `node` is the guest's real PVE node (issue #51,
-    normally `job.node` - see RestoreJob)."""
+    capability check. `node` is the guest's real PVE node (normally `job.node` - see RestoreJob)."""
     node_type = api_node_type(guest_type)
     if node_type != "qemu":  # LXC containers have no qemu-guest-agent
         return []
@@ -220,7 +219,7 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
     "vm"/"ct" value (matching the rest of the app - task picker, groups,
     etc.), translated to PVE's "qemu"/"lxc" API node segment here.
 
-    Resolves the guest's real node once (issue #51) and uses it for
+    Resolves the guest's real node once and uses it for
     every guest-scoped call below, carrying it on the returned
     RestoreCapabilities.node so callers can reuse it for the rest of a
     restore without re-resolving."""
@@ -238,7 +237,7 @@ async def get_restore_capabilities(session: SessionData, guest_type: str, vmid: 
             f"{_API_ROOT}/access/permissions", params={"path": f"/vms/{vmid}"}, headers=headers
         )
         perms_resp.raise_for_status()
-        # Confirmed live: the response nests the
+        # The response nests the
         # privilege dict under the path key itself, even with a single
         # `path` filter given - e.g. {"/vms/202": {"VM.GuestAgent...": 1}},
         # not a flat {"VM.GuestAgent...": 1}. Unwrap it here so

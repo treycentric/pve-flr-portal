@@ -31,7 +31,7 @@ _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 # PVE ticket lifetime.
 _TICKET_REFRESH_AGE_SECONDS = 90 * 60
 
-# list_realms() retry/fallback (issue #31). A transient failure of the
+# list_realms() retry/fallback. A transient failure of the
 # unauthenticated /access/domains call must not leave the login page
 # with an empty realm <select> - the browser omits an option-less
 # select from the POST entirely, which surfaces as a baffling
@@ -53,9 +53,9 @@ class SessionData:
     csrf_token: str
     ticket_issued_at: float
     last_activity_at: float
-    # Issue #122: PVE's own computed-permissions summary, straight from
+    # PVE's own computed-permissions summary, straight from
     # /access/ticket's "cap" field (both the password and OIDC login
-    # paths return it - confirmed against PVE's own source, pve-access-
+    # paths return it - per PVE's own source, pve-access-
     # control's AccessControl.pm/OpenId.pm). Bucketed by broad area
     # ("dc", "nodes", "vms", "storage", ...), not by arbitrary path -
     # see is_job_admin() below for what that means in practice. Kept
@@ -79,7 +79,7 @@ async def list_realms() -> list[dict]:
     populate its realm dropdown.
 
     Retries a few times on failure, then returns the pam/pve fallback
-    rather than raising or returning an empty list (issue #31): the
+    rather than raising or returning an empty list: the
     login page must always have at least one selectable realm.
     """
     last_exc: Exception | None = None
@@ -103,7 +103,7 @@ async def list_realms() -> list[dict]:
 
 
 def _store_ticket(data: dict) -> str:
-    """Common tail of every login path (password or OIDC, issue #56):
+    """Common tail of every login path (password or OIDC):
     both `/access/ticket` and `/access/openid/login` hand back the same
     {username, ticket, CSRFPreventionToken} shape, so this is the one
     place a SessionData gets built and stashed in the session store."""
@@ -121,7 +121,7 @@ def _store_ticket(data: dict) -> str:
 
 
 def is_job_admin(session: SessionData) -> bool:
-    """Issue #122: does this session bypass RESTRICT_JOBS_TO_OWN? Checks
+    """Does this session bypass RESTRICT_JOBS_TO_OWN? Checks
     `cap["dc"]` - the bucket PVE's compute_api_permission uses for a
     privilege granted at the bare root path "/" specifically, not
     scoped to a storage/VM/node subtree - against settings.job_admin_privilege
@@ -131,7 +131,7 @@ def is_job_admin(session: SessionData) -> bool:
 
 
 class TFARequired(Exception):
-    """Issue #15: raised by login() when the account has a second factor
+    """Raised by login() when the account has a second factor
     (TOTP or a recovery key - PVE's own second /access/ticket call
     doesn't distinguish which) configured. `challenge` is PVE's own
     signed, opaque intermediate value - not a real session ticket yet -
@@ -168,7 +168,7 @@ _TOTP_CODE_RE = re.compile(r"^\d{6,8}$")
 
 
 async def finish_tfa_login(username: str, code: str, challenge: str) -> str:
-    """Issue #15, second factor: `code` is whatever the user entered - a
+    """Second factor: `code` is whatever the user entered - a
     TOTP code or a one-time recovery key, PVE accepts either the same
     way here, in `password` (mixing it with the unrelated `otp` param is
     explicitly rejected server-side: "TFA response should be in
@@ -177,7 +177,7 @@ async def finish_tfa_login(username: str, code: str, challenge: str) -> str:
     against PVE's own web UI (proxmox-widget-toolkit's TfaWindow.js,
     `finishChallenge('totp:' + code)` / `finishChallenge('recovery:' +
     key)`); a bare code is silently rejected regardless of whether it's
-    actually correct. This was a real, live-reported bug - the Perl
+    actually correct. This was a real bug - the Perl
     API2 schema alone doesn't document the prefix requirement, only
     PVE's own client does.
 
@@ -197,8 +197,8 @@ async def finish_tfa_login(username: str, code: str, challenge: str) -> str:
 
 
 async def oidc_auth_url(realm: str, redirect_url: str) -> str:
-    """Issue #56: the first leg of an OIDC/SSO login. Wraps PVE's
-    `POST /access/openid/auth-url` (confirmed against pve-access-
+    """The first leg of an OIDC/SSO login. Wraps PVE's
+    `POST /access/openid/auth-url` (see pve-access-
     control's PVE/API2/OpenId.pm - same call PVE's own web UI makes),
     which returns the identity provider's authorization URL to send the
     browser to. `redirect-url` is caller-supplied - PVE just forwards it
@@ -218,7 +218,7 @@ async def oidc_auth_url(realm: str, redirect_url: str) -> str:
 
 
 async def oidc_login(state: str, code: str, redirect_url: str) -> str:
-    """Issue #56: the second leg - the identity provider redirected the
+    """The second leg - the identity provider redirected the
     browser back to our callback with `state`/`code`; exchange them via
     PVE's `POST /access/openid/login` (same `redirect-url` as the
     auth-url call, required for PVE to complete the token exchange with
@@ -281,7 +281,7 @@ async def _resolve_session(request: Request, *, touch: bool) -> SessionData:
     # Only genuine user activity resets the idle clock. Background polls
     # (the restore-jobs list + log pollers) pass touch=False, so a tab
     # left open on an otherwise-idle session still times out on schedule
-    # (issue #27, docs/architecture.md) - the poll's own next 401 is then
+    # (docs/architecture.md) - the poll's own next 401 is then
     # what bounces the browser to /login.
     if touch:
         session.last_activity_at = now
@@ -291,7 +291,7 @@ async def _resolve_session(request: Request, *, touch: bool) -> SessionData:
         # PVE rejected the ticket refresh (ticket fully expired, account
         # disabled, PVE unreachable at the moment it was needed). The
         # session can't be kept alive - evict it and treat it as expired
-        # so the caller redirects to /login rather than 500ing (issue #27).
+        # so the caller redirects to /login rather than 500ing.
         _sessions.pop(session_id, None)
         raise HTTPException(
             status_code=401, detail="Session expired (PVE ticket refresh failed)"

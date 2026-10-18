@@ -101,7 +101,7 @@ def _patch_download(monkeypatch, content: bytes, *, content_length: bool = False
 
 
 async def test_small_file_no_flags_writes_directly_after_checking_capabilities(manager, session_data, monkeypatch):
-    # Issue #72: capabilities are now checked even in this no-metadata/
+    # Capabilities are now checked even in this no-metadata/
     # no-verify case - purely so a ReadOnly-attributed destination can be
     # cleared before the write when Unrestricted happens to be available
     # (see test_readonly_destination_is_cleared_before_write_when_available
@@ -133,7 +133,7 @@ async def test_small_file_no_flags_writes_directly_after_checking_capabilities(m
 
 
 async def test_readonly_destination_is_cleared_before_write_when_available(manager, session_data, monkeypatch):
-    """Issue #72: a ReadOnly-attributed destination (desktop.ini and
+    """A ReadOnly-attributed destination (desktop.ini and
     friends) makes CreateFile refuse write access no matter who's
     asking - cleared proactively before the write whenever Unrestricted
     happens to be available, even when the user didn't request metadata
@@ -166,7 +166,7 @@ async def test_readonly_destination_is_cleared_before_write_when_available(manag
 
 
 async def test_readonly_destination_is_cleared_on_linux_too(manager, session_data, monkeypatch):
-    """Issue #72: same treatment on Linux - clearing the owner-write bit
+    """Same treatment on Linux - clearing the owner-write bit
     and the immutable flag before the write, even without a confirmed
     real-world case yet (unlike the Windows ReadOnly-attribute one)."""
     job = _make_job(manager, session_data, destination="/etc/hosts")
@@ -226,7 +226,7 @@ async def test_readonly_clear_failure_does_not_fail_the_restore(manager, session
 
 
 async def test_job_on_a_non_localhost_node_threads_it_through_every_guest_call(manager, session_data, monkeypatch):
-    # Issue #51: a job for a guest on another cluster node must pass that
+    # A job for a guest on another cluster node must pass that
     # node - never the literal "localhost" - to every guest-scoped call
     # it makes (write_guest_file here; run_guest_exec is covered by the
     # guest-exec / metadata / verify tests, all of which go through the
@@ -300,7 +300,7 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
     concat_call = next(c for c in exec_calls if c[:2] == ["sh", "-c"])
     assert "cat" in concat_call[2] and job.destination in concat_call[2]
     assert any(c[:2] == ["test", "-f"] for c in exec_calls)
-    # Issue #72: readonly-clearing runs right before the concat, not just
+    # Readonly-clearing runs right before the concat, not just
     # for the single-chunk path.
     assert exec_calls.index(["chmod", "u+w", job.destination]) < exec_calls.index(concat_call)
     assert exec_calls.count(["mkdir", "-p", "/etc"]) == 1  # dest dir, not just scratch
@@ -314,7 +314,7 @@ async def test_multi_chunk_write_creates_scratch_writes_concats_and_cleans_up(ma
 
 
 async def test_concat_chunks_windows_uses_powershell_not_cmd_copy(manager, session_data, monkeypatch):
-    # Confirmed live 2026-09-02: cmd /c copy /b "a"+"b" "dest" failed
+    # cmd /c copy /b "a"+"b" "dest" failed
     # with "The filename, directory name, or volume label syntax is
     # incorrect" even against a single, perfectly valid chunk path -
     # cmd.exe's handling of multiple embedded double-quoted segments on
@@ -415,7 +415,7 @@ async def test_progress_updates_incrementally_during_multi_chunk_write(manager, 
 async def test_multi_chunk_progress_total_is_exact_with_content_length(manager, session_data, monkeypatch):
     """With a Content-Length on the download, the chunked single-file
     path knows the real chunk count up front instead of the growing
-    placeholder - so the bar tracks true progress (issue #47 testing)."""
+    placeholder - so the bar tracks true progress."""
     job = _make_job(manager, session_data, destination="/etc/hosts")
     _patch_download(monkeypatch, b"a" * (61440 * 4 + 10), content_length=True)  # 5 chunks
 
@@ -630,7 +630,7 @@ def _make_tar_bytes(name: str, uid: int, gid: int, mode: int, content: bytes = b
 
 
 def _patch_download_with_tar(monkeypatch, content: bytes, tar_content: bytes):
-    """Like _patch_download, but the tar=True call (Issue #20's
+    """Like _patch_download, but the tar=True call (the
     ownership-fetch probe) gets its own distinct payload - a real tar
     archive, rather than the same plain content."""
 
@@ -667,7 +667,7 @@ async def test_restore_ownership_runs_chown_and_chmod_on_linux(manager, session_
     assert job.status == RestoreStatus.DONE
     chown_call = next(c for c in exec_calls if c[0] == "chown")
     assert chown_call == ["chown", "1000:1000", "/etc/hosts"]
-    # _clear_readonly_if_present (#72) also issues its own unrelated
+    # _clear_readonly_if_present also issues its own unrelated
     # "chmod u+w" before the write - filter to the numeric-mode chmod
     # this step itself issues, not that earlier one.
     chmod_call = next(c for c in exec_calls if c[0] == "chmod" and c[1].isdigit())
@@ -676,7 +676,7 @@ async def test_restore_ownership_runs_chown_and_chmod_on_linux(manager, session_
 
 
 async def test_restore_ownership_handles_zstd_compressed_tar_too(manager, session_data, monkeypatch):
-    """Regression: live-reported 2026-09-28 - PVE's tar=1 output is not
+    """Regression: PVE's tar=1 output is not
     consistently one format. A real restore came back zstd-framed
     (starting with the zstd magic number) even though an earlier live
     test of the same endpoint/parameter came back as a genuine plain
@@ -743,7 +743,7 @@ async def test_restore_ownership_undetermined_is_skipped_not_failed(manager, ses
     await run_restore(job, manager)
 
     assert job.status == RestoreStatus.DONE
-    # _clear_readonly_if_present (#72) issues its own unrelated
+    # _clear_readonly_if_present issues its own unrelated
     # "chmod u+w" before the write - only chown, and a numeric-mode
     # chmod (this step's own), must be absent.
     assert not any(c[0] == "chown" for c in exec_calls)
@@ -820,7 +820,7 @@ async def test_verify_success_linux_marks_done(manager, session_data, monkeypatc
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         # Ensuring the destination directory exists runs first, then
-        # issue #72's best-effort readonly-clearing (chmod/chattr on
+        # the best-effort readonly-clearing (chmod/chattr on
         # Linux); the checksum verification command is the last exec call.
         if argv[:2] == ["mkdir", "-p"] or argv[0] in ("chmod", "chattr"):
             return 0, "", ""
@@ -835,7 +835,7 @@ async def test_verify_success_linux_marks_done(manager, session_data, monkeypatc
     await run_restore(job, manager)
     assert job.status == RestoreStatus.DONE
     assert any("Checksum verified" in line for line in job.log_lines)
-    # Hashing scales with file size - confirmed live 2026-09-01 that the
+    # Hashing scales with file size - the
     # default ~15s guest-exec budget isn't enough for a large file, so
     # this call needs the long-running timeout, not the default.
     long_timeout = restore_runner.settings.restore_long_running_exec_timeout_seconds
@@ -902,7 +902,7 @@ async def test_verify_windows_parses_certutil_output(manager, session_data, monk
 
 
 async def test_unsafe_destination_fails_before_any_exec_call(manager, session_data, monkeypatch):
-    # Issue #72: capabilities are now checked before this rejection fires
+    # Capabilities are now checked before this rejection fires
     # (needed to know whether exec - and so the path-safety requirement -
     # even applies), but no actual exec call must ever be made.
     job = _make_job(manager, session_data, destination="/etc/hosts; rm -rf /", verify=True)
@@ -962,7 +962,7 @@ async def test_dnt_unconfigured_falls_back_to_guest_exec_without_any_extra_calls
     assert job.status == RestoreStatus.DONE
     # Went through the ordinary guest-exec path (mkdir, sh -c cat ..., test -f).
     assert any(c[:2] == ["sh", "-c"] for c in exec_calls)
-    # ...and said why, rather than silently grinding (issue #47 live testing).
+    # ...and said why, rather than silently grinding.
     assert any("Direct Network Transfer is not configured" in line for line in job.log_lines)
 
 
@@ -1076,7 +1076,7 @@ async def test_dnt_used_when_nic_and_tool_are_both_available(manager, session_da
     assert any("fetching via curl" in line for line in job.log_lines)
     assert any("fetch complete" in line for line in job.log_lines)
     # The fetch itself scales with file size/network throughput, not the
-    # ~15s "fast command" default - confirmed live 2026-09-01 that the
+    # ~15s "fast command" default - the
     # default timed out mid-fetch on a real file.
     long_timeout = restore_runner.settings.restore_long_running_exec_timeout_seconds
     assert fetch_call_kwargs.get("timeout_seconds") == long_timeout
@@ -1170,7 +1170,7 @@ async def test_dnt_fetch_failure_fails_the_job_rather_than_falling_back(manager,
     assert "Direct Network Transfer failed" in job.error
 
 
-# --- data-plane TLS (issue #47) ------------------------------------------
+# --- data-plane TLS ------------------------------------------
 
 
 def _dnt_settings(monkeypatch, **kw):
@@ -1431,7 +1431,7 @@ async def test_dnt_verify_ca_install_failure_fails_when_minimum_is_verify(manage
 
 
 async def test_dnt_ca_anchor_is_chmodded_644_after_the_write(manager, session_data, monkeypatch):
-    # Issue #136: agent/file-write creates the anchor 0666.
+    # Agent/file-write creates the anchor 0666.
     _dnt_settings(monkeypatch, restore_data_nic_tls_install_ca="always")
     exec_log: list[list[str]] = []
     job, _curl, _written = await _run_dnt_verify_ca(manager, session_data, monkeypatch, exec_log=exec_log)
@@ -1466,7 +1466,7 @@ async def test_dnt_existing_ca_anchor_is_repaired_not_just_trusted(manager, sess
     assert any("already has the data-plane CA anchor" in line for line in job.log_lines)
 
 
-# --- quick-restore file mode (issue #136) ---------------------------------
+# --- quick-restore file mode ---------------------------------
 
 
 async def _run_quick_restore(manager, session_data, monkeypatch, *, family="linux", exec_ok=True, chmod_exit=0):
@@ -1656,7 +1656,7 @@ async def test_scratch_cleanup_failure_does_not_mask_a_successful_restore(manage
     assert job.status == RestoreStatus.DONE
 
 
-# --- multi-file/directory bundle restore (docs/push-to-guest.md, issue #24) ---
+# --- multi-file/directory bundle restore (docs/push-to-guest.md) ---
 
 
 def _bundle_job(manager, session_data, **overrides):
@@ -1781,7 +1781,7 @@ async def test_bundle_restore_happy_path(manager, session_data, monkeypatch, tmp
 
 
 async def test_bundle_restore_happy_path_windows_zip_fallback(manager, session_data, monkeypatch, tmp_path):
-    # Confirmed live 2026-09-02: a real Windows multi-item bundle restore
+    # A real Windows multi-item bundle restore
     # (zip fallback, one chunk) failed at the concat step - "The
     # filename, directory name, or volume label syntax is incorrect" -
     # from the old cmd /c copy /b approach. Locks in the PowerShell fix
@@ -1832,7 +1832,7 @@ async def test_bundle_restore_happy_path_windows_zip_fallback(manager, session_d
 async def test_bundle_restore_progress_total_reflects_real_chunk_count_from_the_start(
     manager, session_data, monkeypatch, tmp_path
 ):
-    # Confirmed live 2026-09-02: the write-loop's old "+1 ahead of
+    # The write-loop's old "+1 ahead of
     # current" placeholder scheme (built for the single-file path's
     # genuinely-unknown-length streaming download) rounded up to a
     # displayed 100% after only ~200 chunks against a several-thousand-
@@ -1885,7 +1885,7 @@ async def test_bundle_restore_progress_total_reflects_real_chunk_count_from_the_
 
 async def test_bundle_restore_logs_and_tracks_progress_during_build(manager, session_data, monkeypatch, tmp_path):
     # 2026-09-02: the build phase (download + add-to-bundle) had no
-    # progress signal at all - confirmed live to look indistinguishable
+    # progress signal at all, which looked indistinguishable
     # from a hang. build_bundle() is faked here to simulate a large
     # item's download in three chunks via the on_item_progress callback
     # _run_bundle_restore() passes it.
@@ -1950,7 +1950,7 @@ async def test_bundle_restore_logs_and_tracks_progress_during_build(manager, ses
 
 
 async def test_bundle_restore_progress_stays_none_without_content_length(manager, session_data, monkeypatch, tmp_path):
-    # Confirmed live 2026-09-02: PVE doesn't always send a Content-Length
+    # PVE doesn't always send a Content-Length
     # for a directory download - job.progress_percent used to read a
     # real-looking "0%" (progress_total defaulted to 1) for the whole
     # build phase in that case, a flat unmoving bar indistinguishable
@@ -2011,7 +2011,7 @@ async def test_bundle_restore_progress_stays_none_without_content_length(manager
 async def test_bundle_restore_uses_direct_network_transfer_when_available(manager, session_data, monkeypatch, tmp_path):
     # 2026-09-02, docs/push-to-guest.md: bundle restore now tries Direct
     # Network Transfer first (same as single-file) instead of always
-    # taking the chunked guest-agent-write path - confirmed live that a
+    # taking the chunked guest-agent-write path - a
     # several-thousand-chunk bundle write was impractically slow.
     job = _bundle_job(manager, session_data, guest_type="ct", vmid="104")
     content = b"a" * (DEFAULT_CHUNK_SIZE_BYTES * 10)  # >1 chunk, so DNT is even attempted

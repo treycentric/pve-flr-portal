@@ -162,9 +162,8 @@ async def _fake_sleep(*_args, **_kwargs):
 
 
 def _mock_cluster_node(vmid: str = "133", node: str = "localhost") -> None:
-    """get_restore_capabilities() resolves the guest's real node (issue
-    #51) via /cluster/resources before its own guest-scoped calls -
-    every live test needs this mocked too, same as /version and
+    """get_restore_capabilities() resolves the guest's real node via /cluster/resources before its own
+    guest-scoped calls - every live test needs this mocked too, same as /version and
     /access/permissions below."""
     respx.get(f"{API}/cluster/resources").mock(
         return_value=httpx.Response(200, json={"data": [{"vmid": int(vmid), "node": node, "name": "test-guest"}]})
@@ -288,7 +287,7 @@ async def test_get_restore_capabilities_happy_path(session_data):
 
 @respx.mock
 async def test_get_restore_capabilities_targets_the_guests_real_node(session_data):
-    # Issue #51: on a multi-node cluster, every guest-scoped call here
+    # On a multi-node cluster, every guest-scoped call here
     # must target the guest's real node, not the literal "localhost".
     _mock_cluster_node(node="pve2")
     respx.get(f"{API}/nodes/pve2/qemu/133/config").mock(
@@ -327,8 +326,7 @@ async def test_get_restore_capabilities_lxc_skips_agent_calls(session_data):
 @respx.mock
 async def test_get_restore_capabilities_unwraps_permissions_nested_under_path(session_data):
     # Regression test: /access/permissions?path=/vms/{vmid} nests the
-    # privilege dict under the path key itself - confirmed live against a
-    # real guest (docs/push-to-guest.md) - not a flat {"VM.GuestAgent...": 1}.
+    # privilege dict under the path key itself (docs/push-to-guest.md) - not a flat {"VM.GuestAgent...": 1}.
     # A response that also carries an unrelated path must not leak its
     # privileges onto this guest either.
     _mock_cluster_node()
