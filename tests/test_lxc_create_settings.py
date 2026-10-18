@@ -1,10 +1,9 @@
-"""deploy/lxc-create.sh's setting resolution, exercised for real.
+"""The installer's setting resolution (deploy/lib/settings.sh), exercised for real.
 
-Needs a PVE host to actually create a container, so these run only the
-part of the script that resolves settings (everything above "Container
-creation") in a bash subprocess with no terminal attached - the unattended
-path - and read the resulting variables back. The interactive whiptail
-screens can't be driven from here.
+Creating a container needs a PVE host, so these source the shared library
+in a bash subprocess with no terminal attached - the unattended path - run
+the installer's settings steps, and read the resulting variables back. The
+interactive whiptail screens can't be driven from here.
 """
 
 import os
@@ -13,12 +12,11 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "deploy" / "lxc-create.sh"
+LIB = ROOT / "deploy" / "lib" / "settings.sh"
 
 _GIT_BASH = Path(r"C:\Program Files\Git\usr\bin\bash.exe")
 BASH = str(_GIT_BASH) if _GIT_BASH.is_file() else "bash"
 
-_MARKER = "# Container creation, consuming the resolved variables above."
 _VARS = (
     "ENABLE_HOST_BACKUPS",
     "ENABLE_DNT",
@@ -30,21 +28,20 @@ _VARS = (
 )
 
 
-def _settings_section() -> str:
-    text = SCRIPT.read_text(encoding="utf-8")
-    head = text[: text.index(_MARKER)]
-    return head.rsplit("# ----", 1)[0]
-
-
 def _run(env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     echoes = "\n".join(f'echo "{v}=${{{v}:-}}"' for v in _VARS)
     env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp")}
     env.update(env_extra or {})
-    # Via a file, not `bash -c`: the section is too long for a Windows
-    # command line.
+    # Via a file rather than `bash -c`, to keep the command line short.
     with tempfile.TemporaryDirectory() as tmp:
-        script = Path(tmp) / "settings.sh"
-        script.write_text(_settings_section() + "\n" + echoes + "\n", encoding="utf-8", newline="\n")
+        script = Path(tmp) / "run.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            f'source "{LIB.as_posix()}"\n'
+            "pfr_detect_ui\npfr_init_install\npfr_run_install_ui\npfr_derive_install\n" + echoes + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         return subprocess.run(
             [BASH, script.as_posix()],
             stdin=subprocess.DEVNULL,
