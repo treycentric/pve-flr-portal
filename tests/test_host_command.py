@@ -333,3 +333,44 @@ def test_update_does_not_replace_the_host_command_with_an_empty_file_when_the_re
     assert result.returncode == 0, result.stderr
     assert "keep-me" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
     assert not (sbin / "pve-flr-portal-patch-host-backups.sh").exists()
+
+
+# --- installs that predate update.sh ---------------------------------------------
+
+
+def test_a_container_without_update_sh_gets_manual_commands_and_nothing_is_changed(pve):
+    _updatable(pve, update_script=False)
+    result = stub(pve, "update", "-y", "--snapshot")
+    assert result.returncode != 0
+    assert "installed before update.sh existed" in result.stderr
+    assert (
+        "pct exec 207 -- bash -c 'git config --system --add safe.directory /opt/pve-flr-portal"
+        " && cd /opt/pve-flr-portal && git fetch --tags origin && git checkout --quiet v1.10.0"
+        " && bash deploy/install.sh'" in result.stderr
+    )
+    assert "'pve-flr-portal update' works normally" in result.stderr
+    # it stopped before asking, snapshotting or running anything
+    assert "snapshot" not in pve.log("set.log")
+    assert "update.sh" not in pve.log("exec.log")
+
+
+def test_the_manual_commands_follow_the_requested_version(pve):
+    _updatable(pve, update_script=False)
+    assert "git checkout --quiet v1.4.0" in stub(pve, "update", "207", "1.4.0", "-y").stderr
+    main = stub(pve, "update", "207", "main", "-y").stderr
+    assert "git checkout --quiet main && git merge --quiet --ff-only origin/main" in main
+
+
+def test_the_manual_commands_work_out_the_latest_tag_when_it_cannot_be_looked_up(pve):
+    pve.add_ct(207, tags="pve-flr-portal", version="1.0.0", update_script=False)  # no remote_tags: offline
+    err = stub(pve, "update", "-y").stderr
+    assert 'git checkout --quiet "$(git tag -l "v*.*.*" --sort=-v:refname | head -1)"' in err
+
+
+def test_update_all_carries_on_past_a_container_that_needs_a_manual_update(pve):
+    _updatable(pve, 207, update_script=False)
+    _updatable(pve, 208)
+    result = stub(pve, "update", "--all", "-y")
+    assert result.returncode != 0
+    assert "Updated: 1, already up to date: 0, skipped: 0, failed: 1." in result.stdout
+    assert pve.read(208, "/opt/pve-flr-portal/VERSION").strip() == "1.10.0"

@@ -575,6 +575,11 @@ container's checkout: the `pve-flr-portal` command itself and, if you ever
 enabled host-backup support, the host-backup patch script that the apt hook
 runs. A copy that doesn't parse is never installed.
 
+A container installed before `update.sh` existed can't update itself that
+way: the command says so and prints the manual commands (fetch, check out the
+release, run `install.sh`, which keeps `.env`) without changing anything; after
+that, `pve-flr-portal update` works normally.
+
 `deploy/update.sh` can also be run yourself inside the container: `bash
 deploy/update.sh` for the latest release, `bash deploy/update.sh v1.4.0` (or
 `1.4.0`) to pin, or `bash deploy/update.sh main` for unreleased work. It

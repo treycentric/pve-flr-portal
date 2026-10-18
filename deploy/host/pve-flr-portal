@@ -356,6 +356,35 @@ ask_yes() {
   return 0
 }
 
+# manual_update_help CTID TARGET LATEST - a container installed before
+# update.sh existed can't update itself that way. install.sh keeps its .env
+# and reinstalls dependencies, the systemd unit and the service, so checking
+# out the release and running it is the manual equivalent.
+manual_update_help() {
+  local ctid="$1" target="$2" latest="$3" name version checkout
+  name=$(pct config "$ctid" | sed -n 's/^hostname: *//p')
+  version="$(ct_version "$ctid")"
+  case "$target" in
+    main) checkout="git checkout --quiet main && git merge --quiet --ff-only origin/main" ;;
+    ""|latest)
+      if [ -n "$latest" ]; then
+        checkout="git checkout --quiet $latest"
+      else
+        checkout='git checkout --quiet "$(git tag -l "v*.*.*" --sort=-v:refname | head -1)"'
+      fi
+      ;;
+    *) checkout="git checkout --quiet v$(norm "$target")" ;;
+  esac
+  cat >&2 <<EOF
+Container $ctid ($name) was installed before update.sh existed (it runs v${version#v}), so it
+can't update itself. Update it by hand - its .env is kept, and afterwards
+'pve-flr-portal update' works normally:
+
+  pct exec $ctid -- bash -c 'git config --system --add safe.directory $APP_DIR && cd $APP_DIR && git fetch --tags origin && $checkout && bash deploy/install.sh'
+
+EOF
+}
+
 # update_one CTID TARGET -> 0 updated, 10 already up to date, 11 declined,
 # anything else failed. TARGET is empty/latest, main, or a version.
 update_one() {
@@ -381,6 +410,11 @@ update_one() {
   fi
   if [ "$target" = "main" ]; then
     echo "  (unreleased work from main - not a tested release)"
+  fi
+  # Checked before anything is asked or snapshotted.
+  if ! pct exec "$ctid" -- test -f "$APP_DIR/deploy/update.sh" 2>/dev/null; then
+    manual_update_help "$ctid" "$target" "$latest"
+    return 12
   fi
   if [ "$ASSUME_YES" != "1" ]; then
     have_tty || die "Updating without a terminal needs -y."
