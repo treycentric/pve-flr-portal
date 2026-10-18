@@ -84,6 +84,19 @@ with the fix, test, and commit.
   `install.sh`/`lxc-create.sh`. Docker's own path isn't covered (no
   systemd/certbot.timer inside the container image) — out of scope for
   now, LXC is the primary deployment target. See the TLS section of docs/architecture.md.
+- #91 — guided, curl-pipeable `deploy/lxc-create.sh` (community-scripts-
+  style, without importing their heavyweight framework). **SHIPPED** —
+  Basic/Advanced whiptail flow (plain `read -rp` fallback), env-var
+  escape hatch on every prompt, resolved settings written into the
+  container's `.env` automatically, inline Let's Encrypt setup (#52).
+  See docs/archive/design-rationale.md.
+- #92 — submit pve-flr-portal to community-scripts.org (ProxmoxVED).
+  Deliberately separate from #91 — needs a purpose-built script pair
+  against their own conventions (root-run, `uv`, no dedicated service
+  user), not a retrofit of `deploy/`. Design in the issue.
+- #93 — `deploy/uninstall.sh`: container teardown plus an opt-in cleanup
+  of the `FileRestoreReader`/`FileRestoreOperator` roles and their ACL
+  grants. Design in the issue.
 
 ## PH.6 — Directory-listing cache — SHIPPED (issue #109)
 

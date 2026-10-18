@@ -263,3 +263,45 @@ inheritance might suggest. That's a real, separate gotcha and is
 documented as current fact in
 [`../api-reference.md`](../api-reference.md); it just isn't what that
 forum thread's title made it sound like.
+
+## Deployment: a guided installer, deliberately lighter than community-scripts (issue #91)
+
+`deploy/lxc-create.sh` is interactive at a real terminal — inspired by
+community-scripts.org's (Proxmox VE Helper-Scripts) guided-install UX,
+but deliberately a much lighter version of it: colored status lines and
+a Basic/Advanced whiptail flow, not their full multi-file `build.func`
+framework (no SDN vnets, GPU passthrough, cluster-wide CTID validation,
+or save-defaults diffing — overkill for a single-app tool; see the "no
+extra services"/"simplest thing that works" rule in `CLAUDE.md`).
+Getting pve-flr-portal actually *listed* on community-scripts.org is
+tracked separately as issue #92 — that requires a completely different,
+purpose-built script pair (root-run, `uv`-based, tarball-deployed, no
+dedicated service user) submitted to their own intake repo, not a
+retrofit of anything in `deploy/`; see that issue for the specific
+conflicts with this project's architecture.
+
+Every prompt is env-var-first (already-set variables skip their
+question entirely) and every prompt is skipped outright with no TTY
+attached, falling back silently to its default — so a fully scripted/
+piped invocation behaves exactly as before this issue, and `whiptail`
+(auto-installed via apt if missing) degrades to plain `read -rp`
+prompts if unavailable. Basic questions (CTID, hostname, network,
+container storage, and which PBS storage to browse) are asked
+regardless, since they're unavoidable per-install choices; Advanced
+(off by default) adds resource sizing, Direct Network Transfer + its
+TLS policy, and an inline Let's Encrypt setup step (issue #52) that
+runs `certbot-setup.sh` once the DNS plugin's credentials file is in
+place. Resolved answers are written straight into the container's
+`.env` (via a small Python patch script pushed in with `pct push`,
+rather than hand-rolled `sed`, so JSON values like `RESTORE_DATA_NICS`
+never need shell-delimiter escaping) instead of leaving that as a
+manual post-install edit.
+
+A companion `deploy/uninstall.sh` is tracked as issue #93 — container
+teardown plus an opt-in cleanup of the `FileRestoreReader`/
+`FileRestoreOperator` PVE roles and every ACL grant using them (safe to
+find via `pveum acl list` precisely because those role names are unique
+to this project; there's no recorded "what this install granted" to
+replay otherwise, since roles/ACLs are a manual `pveum` step, not
+something the app itself tracks — no database, per the top-level "no
+database" rule).

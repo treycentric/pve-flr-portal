@@ -445,15 +445,34 @@ needed on the portal's own side).
 Run on the PVE host itself:
 
 ```
-bash deploy/lxc-create.sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/lxc-create.sh)"
 ```
 
-Creates an unprivileged Debian 12 container, checks out the latest
-tagged release, installs the app, and starts it as a systemd service
-(`pve-flr-portal`). Override `CTID`/`STORAGE`/`BRIDGE`/`MEMORY_MB`/etc.
-via environment variables - see the top of the script. Already have a
-container? Run `deploy/install.sh` inside it instead. Rationale for LXC
-over a Debian package on the host or a full VM/OVA is in
+Guided setup at a real terminal - a welcome screen, then a short
+Back/Next wizard for the essentials (container ID, hostname, storage,
+network - bridge, VLAN, IPv4 and IPv6 configuration and DNS - PVE host, which PBS storage(s) to browse, Direct Network
+Transfer, and optional host-backup support), then a review screen where you can change
+anything before it starts. Advanced settings (resource sizing, portal
+port and theme, job visibility, performance limits, Direct Network
+Transfer's subnet/hostname/TLS policy, and a Let's Encrypt/ACME
+certificate) live
+behind "Advanced settings" on that screen and keep their defaults unless
+you change them. Creates an
+unprivileged Debian 12 container, checks out the latest tagged release,
+installs the app, writes your answers straight into the container's
+`.env`, and starts it as a systemd service (`pve-flr-portal`).
+
+Every question can also be answered up front via an environment
+variable (`CTID`/`STORAGE`/`BRIDGE`/`PVE_HOST`/etc. - see the top of the
+script for the full list), which skips that question in the wizard - so a
+scripted/unattended run (e.g. `STORAGE=local-zfs BRIDGE=vmbr1 bash
+deploy/lxc-create.sh`) works exactly as before, and a piped run with no
+terminal attached silently takes defaults for anything not pre-set
+instead of hanging on a prompt nobody can answer.
+
+Already have a container? Run `deploy/install.sh` inside it instead
+(non-interactive - edit `.env` by hand). Rationale for LXC over a
+Debian package on the host or a full VM/OVA is in
 `docs/archive/design-rationale.md`.
 
 **Updating**:
