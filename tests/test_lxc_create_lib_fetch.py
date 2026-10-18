@@ -30,6 +30,7 @@ def fetch(pve: FakePve, **env: str):
     script = (
         "set -euo pipefail\n"
         'msg_err() { echo "ERR: $*" >&2; }\n'
+        'msg_info() { echo "$*"; }\n'
         'REPO_URL="https://github.com/octo/portal.git"\n'
         "PFR_LIB_API_WANTED=1\n" + LOAD_LIB + "load_lib\n"
         'echo "from=$PFR_FROM"\n'
@@ -93,6 +94,7 @@ def test_uses_the_library_next_to_the_script_in_a_checkout(pve, tmp_path):
     script.write_text(
         "set -euo pipefail\n"
         'msg_err() { echo "ERR: $*" >&2; }\n'
+        'msg_info() { echo "$*"; }\n'
         'REPO_URL="https://github.com/octo/portal.git"\n'
         "PFR_LIB_API_WANTED=1\n" + LOAD_LIB + 'load_lib\necho "from=$PFR_FROM"\n',
         encoding="utf-8",
