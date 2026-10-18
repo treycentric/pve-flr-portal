@@ -159,9 +159,9 @@ def CT_HOSTNAME "Container hostname" str pve-flr-portal "" basic '^[A-Za-z0-9]([
 def STORAGE "Container storage" str local-lvm "" basic "" "" "Choose the storage that will hold the virtual disk (root filesystem) of this application's container. Only storages that can hold container disks are listed."
 def BRIDGE "Network bridge" str vmbr0 "" basic "" "" "Choose the network bridge the container's network interface will attach to. This decides which network the portal is reachable on."
 def VLAN_TAG "VLAN tag" str "" "" basic '^([0-9]{1,4})?$' "" "Leave blank for no VLAN tag."
-def USE_STATIC_IP "Static IP instead of DHCP" enum no "" basic "no=DHCP|yes=Static address" "" "Use a fixed address instead of DHCP?"
-def STATIC_CIDR "Static IP + prefix" str 10.0.0.50/24 "" basic '^[0-9.]+/[0-9]+$' "USE_STATIC_IP=yes" "For example 10.0.0.50/24."
-def STATIC_GW "Gateway" str 10.0.0.1 "" basic '^[0-9.]+$' "USE_STATIC_IP=yes" ""
+def USE_STATIC_IP "IPv4 configuration" enum no "" basic "no=DHCP - the address is assigned automatically|yes=Static - enter an address and gateway" "" "How should the container get its IPv4 address?"
+def STATIC_CIDR "IPv4/CIDR" str 10.0.0.50/24 "" basic '^[0-9.]+/[0-9]+$' "USE_STATIC_IP=yes" "The container's address and prefix length, e.g. 10.0.0.50/24."
+def STATIC_GW "Gateway (IPv4)" str 10.0.0.1 "" basic '^[0-9.]+$' "USE_STATIC_IP=yes" "The default gateway for the container."
 def PVE_HOST "PVE host" str "$DEFAULT_PVE_HOST" PVE_HOST basic '^[^[:space:]]+$' "" "The hostname or IP the portal uses to reach the Proxmox API (usually this host)."
 def PVE_STORAGE "PBS storage(s) to browse" str pbs PVE_STORAGE basic "" "" "Select the Proxmox Backup Server storage(s) the portal will browse backups from. Choose more than one if your backups are spread across several PBS storages or namespaces."
 def ENABLE_HOST_BACKUPS "Host-backup support" enum false "" basic "false=No|true=Yes - patch this PVE node now" "" "Lets the portal browse and restore from HOST-type backups.\n\nThis modifies the Proxmox Storage PBS backend on this PVE host to remove a limitation that prevents browsing and file-level restore of host backups. A side benefit: host backups also become browsable in the PVE UI.\n\nThe change reapplies itself automatically after pve-storage package updates. See deploy/patch-pve-host-backups.sh for details. On a cluster, run that script on every other node too."
@@ -263,7 +263,7 @@ ip_display() {
 
 label_of() {
   if [ "$1" = "IP" ]; then
-    echo "IP address"
+    echo "IPv4 address"
   else
     echo "${S_LABEL[$1]}"
   fi
