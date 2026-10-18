@@ -7,7 +7,7 @@
 # when it calls a deploy hook. This copies the freshly-issued
 # fullchain.pem/privkey.pem to wherever the portal's .env says its own
 # cert/key live, and restarts the service so it picks them up (the app
-# reads its cert only at startup - confirmed live while testing the data-plane TLS).
+# reads its cert only at startup).
 #
 # tls.py never overwrites or deletes an admin-supplied cert - only a
 # broken *self-signed* one - so pointing it at a certbot-managed path
