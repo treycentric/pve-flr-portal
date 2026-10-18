@@ -101,7 +101,7 @@ def test_config_on_a_release_without_the_tools_says_to_update_first(pve):
     pve.add_ct(207, tags="pve-flr-portal")
     result = stub(pve, "config")
     assert result.returncode != 0
-    assert "predates the management tools" in result.stderr
+    assert "runs v1.9.0, a release that predates the management tools" in result.stderr
     assert "pve-flr-portal update 207" in result.stderr
 
 
