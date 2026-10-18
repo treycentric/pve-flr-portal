@@ -162,8 +162,11 @@ def VLAN_TAG "VLAN tag" str "" "" basic '^([0-9]{1,4})?$' "" "Leave blank for no
 def USE_STATIC_IP "IPv4 configuration" enum no "" basic "no=DHCP - the address is assigned automatically|yes=Static - enter an address and gateway" "" "How should the container get its IPv4 network configuration?"
 def STATIC_CIDR "IPv4/CIDR" str 10.0.0.50/24 "" basic '^[0-9.]+/[0-9]+$' "USE_STATIC_IP=yes" "The container's address and prefix length, e.g. 10.0.0.50/24."
 def STATIC_GW "Gateway (IPv4)" str 10.0.0.1 "" basic '^[0-9.]+$' "USE_STATIC_IP=yes" "The default gateway for the container."
-def DNS_SERVERS "DNS servers" str "" "" basic '^([0-9A-Fa-f:.]+([ ,]+[0-9A-Fa-f:.]+)*)?$' "USE_STATIC_IP=yes" "One or more DNS server addresses, separated by spaces or commas. Leave blank to use the PVE host's DNS settings."
-def SEARCH_DOMAIN "DNS search domain" str "" "" basic '^([A-Za-z0-9.-]+)?$' "USE_STATIC_IP=yes" "For example example.com. Leave blank to use the PVE host's setting."
+def IPV6_MODE "IPv6 configuration" enum auto "" basic "auto=SLAAC - automatic, from router advertisements|dhcp=DHCPv6|static=Static - enter an address and gateway|disabled=Disabled - turn IPv6 off in the container" "" "How should the container get its IPv6 network configuration? Choose Disabled to turn IPv6 off inside the container."
+def STATIC6_CIDR "IPv6/CIDR" str "" "" basic '^([0-9A-Fa-f:]+/[0-9]{1,3})?$' "IPV6_MODE=static" "The container's IPv6 address and prefix length, e.g. 2001:db8::50/64."
+def STATIC6_GW "Gateway (IPv6)" str "" "" basic '^([0-9A-Fa-f:]+)?$' "IPV6_MODE=static" "The default IPv6 gateway. Leave blank for none."
+def DNS_SERVERS "DNS servers" str "" "" basic '^([0-9A-Fa-f:.]+([ ,]+[0-9A-Fa-f:.]+)*)?$' "USE_STATIC_IP=yes||IPV6_MODE=static" "One or more DNS server addresses (IPv4 or IPv6), separated by spaces or commas. Leave blank to use the PVE host's DNS settings."
+def SEARCH_DOMAIN "DNS search domain" str "" "" basic '^([A-Za-z0-9.-]+)?$' "USE_STATIC_IP=yes||IPV6_MODE=static" "For example example.com. Leave blank to use the PVE host's setting."
 def PVE_HOST "PVE host" str "$DEFAULT_PVE_HOST" PVE_HOST basic '^[^[:space:]]+$' "" "The hostname or IP the portal uses to reach the Proxmox API (usually this host)."
 def PVE_STORAGE "PBS storage(s) to browse" str pbs PVE_STORAGE basic "" "" "Select the Proxmox Backup Server storage(s) the portal will browse backups from. Choose more than one if your backups are spread across several PBS storages or namespaces."
 def ENABLE_HOST_BACKUPS "Host-backup support" enum false "" basic "false=No|true=Yes - patch this PVE node now" "" "Lets the portal browse and restore from HOST-type backups.\n\nThis modifies the Proxmox Storage PBS backend on this PVE host to remove a limitation that prevents browsing and file-level restore of host backups. A side benefit: host backups also become browsable in the PVE UI.\n\nThe change reapplies itself automatically after pve-storage package updates. See deploy/patch-pve-host-backups.sh for details. On a cluster, run that script on every other node too."
@@ -206,9 +209,9 @@ def CERTBOT_KEY_TYPE "Key type" enum ecdsa "" cert "ecdsa=ECDSA - certbot's defa
 def CERTBOT_RSA_KEY_SIZE "RSA key size" int 2048 "" cert "2048:16384" "CERTBOT_KEY_TYPE=rsa" ""
 def PFR_ACME_DATA_PLANE "Also use it for the data plane" enum 0 PFR_ACME_DATA_PLANE cert "0=No|1=Yes - the domains must include the data-plane hostname" "ENABLE_DNT=yes" ""
 
-BASIC_KEYS=(CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG IP PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
+BASIC_KEYS=(CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG IP IP6 DNS PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
 # The review screen groups them under headings ("H:" rows are headings).
-BASIC_LAYOUT=("H:Container" CTID CT_HOSTNAME STORAGE "H:Network" BRIDGE VLAN_TAG IP "H:Portal" PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
+BASIC_LAYOUT=("H:Container" CTID CT_HOSTNAME STORAGE "H:Network" BRIDGE VLAN_TAG IP IP6 DNS "H:Portal" PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
 ADV_GROUPS=(resources portal access limits dnt cert)
 declare -A G_TITLE=(
   [resources]="Container resources"
@@ -244,31 +247,60 @@ if [ -n "${RESTORE_DATA_NICS_JSON:-}" ]; then
   PRESET[DNT_CIDR]=1; PRESET[DNT_LOCAL_IP]=1; PRESET[DNT_HOSTNAME]=1
 fi
 
+# A condition is "KEY=value", or alternatives joined with "||".
 cond_ok() {
-  local c="${S_COND[$1]}" ref
+  local c="${S_COND[$1]:-}" alt ref
   if [ -z "$c" ]; then
     return 0
   fi
-  ref="${c%%=*}"
-  [ "${!ref}" = "${c#*=}" ]
+  for alt in ${c//||/ }; do
+    ref="${alt%%=*}"
+    if [ "${!ref}" = "${alt#*=}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# DNS is only asked for when an address is entered by hand (DHCP hands it out).
+dns_needed() {
+  [ "$USE_STATIC_IP" = "yes" ] || [ "$IPV6_MODE" = "static" ]
 }
 
 ip_display() {
   if [ -n "${IP_CONFIG:-}" ]; then
     echo "$IP_CONFIG"
   elif [ "$USE_STATIC_IP" = "yes" ]; then
-    echo "$STATIC_CIDR (gateway $STATIC_GW${DNS_SERVERS:+, DNS $DNS_SERVERS})"
+    echo "$STATIC_CIDR (gateway $STATIC_GW)"
   else
     echo "DHCP"
   fi
 }
 
-label_of() {
-  if [ "$1" = "IP" ]; then
-    echo "IPv4 address"
-  else
-    echo "${S_LABEL[$1]}"
+ip6_display() {
+  case "$IPV6_MODE" in
+    auto) echo "SLAAC" ;;
+    dhcp) echo "DHCPv6" ;;
+    static) echo "${STATIC6_CIDR:-(not set)}${STATIC6_GW:+ (gateway $STATIC6_GW)}" ;;
+    *) echo "Disabled" ;;
+  esac
+}
+
+dns_display() {
+  local v="$DNS_SERVERS"
+  if [ -z "$v" ]; then
+    v="PVE host settings"
   fi
+  echo "${v}${SEARCH_DOMAIN:+ (search $SEARCH_DOMAIN)}"
+}
+
+label_of() {
+  case "$1" in
+    IP) echo "IPv4 address" ;;
+    IP6) echo "IPv6 address" ;;
+    DNS) echo "DNS" ;;
+    *) echo "${S_LABEL[$1]}" ;;
+  esac
 }
 
 # show_val KEY -> the value as a person would read it (Yes/No, a label).
@@ -297,11 +329,12 @@ show_val() {
 
 row() {
   local v max
-  if [ "$1" = "IP" ]; then
-    v="$(ip_display)"
-  else
-    v="$(show_val "$1")"
-  fi
+  case "$1" in
+    IP) v="$(ip_display)" ;;
+    IP6) v="$(ip6_display)" ;;
+    DNS) v="$(dns_display)" ;;
+    *) v="$(show_val "$1")" ;;
+  esac
   if [ -z "$v" ]; then
     v="(none)"
   fi
@@ -613,10 +646,21 @@ edit_IP() {
   if [ "$USE_STATIC_IP" = "yes" ]; then
     edit_setting STATIC_CIDR || return 1
     edit_setting STATIC_GW || return 1
-    edit_setting DNS_SERVERS || return 1
-    edit_setting SEARCH_DOMAIN || return 1
   fi
   IP_CONFIG=""
+}
+
+edit_IP6() {
+  edit_setting IPV6_MODE || return 1
+  if [ "$IPV6_MODE" = "static" ]; then
+    edit_setting STATIC6_CIDR || return 1
+    edit_setting STATIC6_GW || return 1
+  fi
+}
+
+edit_DNS() {
+  edit_setting DNS_SERVERS || return 1
+  edit_setting SEARCH_DOMAIN || return 1
 }
 
 edit_setting() {
@@ -664,6 +708,9 @@ validate_all() {
   fi
   if [ "$SETUP_LE" = "yes" ] && [ -z "$LE_DOMAINS" ]; then
     problems="${problems}- A certificate was requested but no domain was given.\n"
+  fi
+  if [ "$IPV6_MODE" = "static" ] && [ -z "$STATIC6_CIDR" ]; then
+    problems="${problems}- Static IPv6 was chosen but no IPv6 address was given.\n"
   fi
   if [ -z "$PVE_STORAGE" ]; then
     problems="${problems}- No PBS storage is selected.\n"
@@ -792,13 +839,17 @@ adv_total_summary() {
 # ---------------------------------------------------------------------
 review_hub() {
   local last="GO" choice k n problems nsep rows
+  local PLAIN_MAP
   while :; do
     local items=()
+    PLAIN_MAP=()
     nsep=0
     for k in "${BASIC_LAYOUT[@]}"; do
       if [[ "$k" == H:* ]]; then
         nsep=$((nsep + 1))
         items+=("SEP$nsep" "[ ${k#H:} ]")
+      elif [ "$k" = "DNS" ] && ! dns_needed; then
+        continue
       else
         items+=("$k" "$(row "$k")")
       fi
@@ -825,8 +876,11 @@ review_hub() {
       for k in "${BASIC_LAYOUT[@]}"; do
         if [[ "$k" == H:* ]]; then
           echo "  --- ${k#H:} ---"
+        elif [ "$k" = "DNS" ] && ! dns_needed; then
+          continue
         else
           echo "  $n) $(row "$k")"
+          PLAIN_MAP[n]="$k"
           n=$((n + 1))
         fi
       done
@@ -836,7 +890,7 @@ review_hub() {
         "") choice="GO" ;;
         a|A) choice="ADV" ;;
         q|Q) msg_err "Cancelled."; exit 1 ;;
-        *) choice="${BASIC_KEYS[$((n - 1))]:-}"; if [ -z "$choice" ]; then continue; fi ;;
+        *) choice="${PLAIN_MAP[$n]:-}"; if [ -z "$choice" ]; then continue; fi ;;
       esac
     fi
     last="$choice"
@@ -865,7 +919,7 @@ review_hub() {
 # ---------------------------------------------------------------------
 WELCOME_TEXT="Welcome to the pve-flr-portal installer.\n\nFile Level Restore Portal for Proxmox Backup Server: a scrubbable snapshot timeline for browsing and restoring files from your PBS backups.\n\nThis will create an unprivileged Debian 12 container on this PVE host, install the portal in it, and write your answers into its .env.\n\nA few essential questions come first (use Back to step back). A review screen then lets you change anything - including Advanced options - before anything is created.\n\nAnything you pre-set through environment variables is skipped."
 
-WIZARD=(WELCOME CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG USE_STATIC_IP STATIC_CIDR STATIC_GW DNS_SERVERS SEARCH_DOMAIN PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
+WIZARD=(WELCOME CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG USE_STATIC_IP STATIC_CIDR STATIC_GW IPV6_MODE STATIC6_CIDR STATIC6_GW DNS_SERVERS SEARCH_DOMAIN PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
 
 step_skipped() {
   if [ "$1" = "WELCOME" ]; then
@@ -972,6 +1026,16 @@ NET0="name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG}"
 if [ -n "$VLAN_TAG" ]; then
   NET0="${NET0},tag=${VLAN_TAG}"
 fi
+case "$IPV6_MODE" in
+  auto) NET0="${NET0},ip6=auto" ;;
+  dhcp) NET0="${NET0},ip6=dhcp" ;;
+  static)
+    NET0="${NET0},ip6=${STATIC6_CIDR}"
+    if [ -n "$STATIC6_GW" ]; then
+      NET0="${NET0},gw6=${STATIC6_GW}"
+    fi
+    ;;
+esac
 
 # DNS only when given; otherwise the container uses the PVE host's settings.
 DNS_ARGS=()
@@ -996,6 +1060,12 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --onboot 1 \
   --start 1
 msg_ok "Created container $CTID"
+
+# No ip6 setting leaves the kernel free to autoconfigure from router
+# advertisements, so "Disabled" also turns IPv6 off inside the container.
+if [ "$IPV6_MODE" = "disabled" ]; then
+  pct exec "$CTID" -- sh -c "printf 'net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv6.conf.default.disable_ipv6 = 1\n' > /etc/sysctl.d/99-disable-ipv6.conf; sysctl -p /etc/sysctl.d/99-disable-ipv6.conf >/dev/null 2>&1 || true"
+fi
 
 msg_info "Waiting for network..."
 for _ in $(seq 1 30); do
@@ -1159,15 +1229,20 @@ if [ "$SETUP_LE" = "yes" ] && [ -n "$LE_DOMAINS" ]; then
 fi
 
 if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
-  echo "==> Enabling host-backup support on this PVE node"
+  msg_info "Enabling host-backup support on this PVE node"
   # Runs on the PVE HOST, not inside the container - this script patches
-  # a file that only exists on the host. Same local-clone-vs-curl-piped
-  # fallback install.sh above already has to handle.
-  if [ -f "$(dirname "$0")/patch-pve-host-backups.sh" ]; then
+  # a file that only exists on the host. The patch script is taken from the
+  # container's own checkout, so it is exactly the release that was just
+  # installed rather than whatever is on main today.
+  PATCH_SCRIPT=$(mktemp)
+  if pct pull "$CTID" /opt/pve-flr-portal/deploy/patch-pve-host-backups.sh "$PATCH_SCRIPT" 2>/dev/null; then
+    bash "$PATCH_SCRIPT"
+  elif [ -f "$(dirname "$0")/patch-pve-host-backups.sh" ]; then
     bash "$(dirname "$0")/patch-pve-host-backups.sh"
   else
-    bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/patch-pve-host-backups.sh)"
+    msg_err "Could not get the host-backup patch script from the container - run deploy/patch-pve-host-backups.sh from the repository on this node."
   fi
+  rm -f "$PATCH_SCRIPT"
 fi
 
 CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')

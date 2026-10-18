@@ -450,7 +450,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-port
 
 Guided setup at a real terminal - a welcome screen, then a short
 Back/Next wizard for the essentials (container ID, hostname, storage,
-network, PVE host, which PBS storage(s) to browse, Direct Network
+network - bridge, VLAN, IPv4 and IPv6 configuration and DNS - PVE host, which PBS storage(s) to browse, Direct Network
 Transfer, and optional host-backup support), then a review screen where you can change
 anything before it starts. Advanced settings (resource sizing, portal
 port and theme, job visibility, performance limits, Direct Network

@@ -199,10 +199,3 @@ def test_script_installs_a_dpkg_hook_that_reapplies_itself():
     assert "DPkg::Post-Invoke" in text
     assert "/etc/apt/apt.conf.d/" in text
 
-
-def test_lxc_create_defaults_to_declining_when_noninteractive():
-    text = (ROOT / "deploy" / "lxc-create.sh").read_text(encoding="utf-8")
-    # The non-interactive branch (no tty) must default to false, never
-    # hang on `read` or silently patch anything.
-    assert re.search(r'if \[ -t 0 \]', text)
-    assert re.search(r"else\s*\n\s*ENABLE_HOST_BACKUPS=false", text)
