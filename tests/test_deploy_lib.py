@@ -307,3 +307,59 @@ def test_a_release_without_the_host_command_installs_nothing(pve, tmp_path):
     )
     assert "rc=1" in result.stdout
     assert list(sbin.iterdir()) == []
+
+
+# --- the review screen's own proceed button -----------------------------------
+
+
+def _hub(pve: FakePve, script_lines: list[str], mode_setup: str = "pfr_init_install", extra: str = "") -> tuple:
+    script = pve.root / "wt_script.txt"
+    script.write_text("\n".join(script_lines) + "\n", encoding="utf-8", newline="\n")
+    result = pve.bash(
+        f'set -uo pipefail\nsource "{LIB}"\nIS_TTY=1; HAS_WHIPTAIL=1\n{mode_setup}\n{extra}\n'
+        'review_hub; echo "returned=$?"\n',
+        extra_env={"FAKE_WT_SCRIPT": script.as_posix()},
+    )
+    return result, pve.log("wt.log")
+
+
+def test_install_now_is_the_dialogs_own_button_not_a_row_in_the_list(pve):
+    result, log = _hub(pve, ["1|"])  # the Cancel button (carrying "Install now") pressed
+    assert "returned=0" in result.stdout, result.stderr
+    first = log.splitlines()[0]
+    assert "--cancel-button Install now" in first
+    assert "--ok-button Edit" in first
+    assert ">>> Install now" not in first  # no longer an (off-screen) row
+    assert "press Esc to quit" in first
+    assert "Advanced settings" in first
+
+
+def test_the_configurator_uses_apply_changes_as_its_button(pve):
+    result, log = _hub(pve, ["1|"], mode_setup="pfr_init_install; pfr_snapshot; pfr_use_config_layout")
+    # nothing changed, but the screen itself must offer the button
+    first = log.splitlines()[0]
+    assert "--cancel-button Apply changes" in first
+    assert "returned=" in result.stdout
+
+
+def test_esc_on_the_review_screen_offers_to_quit(pve):
+    # Esc, then "yes" to the quit question: the installer exits non-zero
+    result, log = _hub(pve, ["255|", "0|"])
+    assert result.returncode == 1
+    assert "Cancelled" in result.stderr
+    assert "Quit without installing anything?" in log
+
+
+def test_declining_to_quit_returns_to_the_review_screen(pve):
+    # Esc, "no" to quitting, then the proceed button
+    result, _ = _hub(pve, ["255|", "1|", "1|"])
+    assert "returned=0" in result.stdout, result.stderr
+
+
+def test_choosing_a_setting_edits_it_and_the_list_keeps_the_selection(pve):
+    result, log = _hub(pve, ["0|VLAN_TAG", "0|30", "1|"])
+    assert "returned=0" in result.stdout, result.stderr
+    reviews = [line for line in log.splitlines() if "--title Review" in line]
+    assert len(reviews) == 2
+    assert "--default-item" not in reviews[0]
+    assert "--default-item VLAN_TAG" in reviews[1]

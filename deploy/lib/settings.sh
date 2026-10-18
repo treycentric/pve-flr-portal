@@ -17,8 +17,10 @@ PFR_LIB_API=1
 PFR_MODE="${PFR_MODE:-install}"
 
 # Wording of the review screen's last row, text and quit prompt.
-HUB_GO_LABEL=">>> Install now"
-HUB_TEXT="Select a setting to change it, or choose \"Install now\" when you're ready."
+# The review screen's proceed action is the dialog's own button (whiptail
+# has OK and Cancel only, so Cancel carries it); Esc quits.
+HUB_GO_BUTTON="Install now"
+HUB_TEXT="Select a setting and choose Edit to change it. Choose \"Install now\" when you're ready, or press Esc to quit."
 HUB_QUIT_TEXT="Quit without installing anything?"
 
 # pfr_cancel - the person quit. A non-zero status for the installer (nothing
@@ -910,7 +912,7 @@ adv_total_summary() {
 # Review screen: every basic setting, Advanced, and Install.
 # ---------------------------------------------------------------------
 review_hub() {
-  local last="GO" choice k n problems nsep rows
+  local last="" choice k n problems nsep rows rc
   local PLAIN_MAP
   while :; do
     local items=()
@@ -926,20 +928,25 @@ review_hub() {
         items+=("$k" "$(row "$k")")
       fi
     done
-    items+=("ADV" "Advanced settings...  ($(adv_total_summary))" "GO" "$HUB_GO_LABEL")
+    items+=("ADV" "Advanced settings...  ($(adv_total_summary))")
     if [ "$HAS_WHIPTAIL" = "1" ]; then
       rows=$((${#items[@]} / 2))
       if [ "$rows" -gt 16 ]; then
         rows=16
       fi
-      choice=$(wt --title "Review" --notags --ok-button "Select" --cancel-button "Quit" --default-item "$last" \
-        --menu "$HUB_TEXT" \
-        "$(cap_h $((rows + 2 + 7)))" "$(dlg_w)" "$rows" "${items[@]}") || {
+      rc=0
+      choice=$(wt --title "Review" --notags --ok-button "Edit" --cancel-button "$HUB_GO_BUTTON" \
+        ${last:+--default-item "$last"} --menu "$HUB_TEXT" \
+        "$(cap_h $((rows + 2 + 7)))" "$(dlg_w)" "$rows" "${items[@]}") || rc=$?
+      if [ "$rc" -eq 1 ]; then
+        choice="GO"
+      elif [ "$rc" -ne 0 ]; then
+        # Esc (or the dialog failing): offer to quit
         if ui_confirm "$HUB_QUIT_TEXT"; then
           pfr_cancel
         fi
         continue
-      }
+      fi
     else
       echo
       msg_info "Review"
@@ -964,7 +971,9 @@ review_hub() {
         *) choice="${PLAIN_MAP[$n]:-}"; if [ -z "$choice" ]; then continue; fi ;;
       esac
     fi
-    last="$choice"
+    if [ "$choice" != "GO" ]; then
+      last="$choice"
+    fi
     NAV_CANCEL="Cancel"
     case "$choice" in
       SEP*) ;;
@@ -1439,8 +1448,8 @@ pfr_use_config_layout() {
   BASIC_KEYS=(CT_HOSTNAME BRIDGE VLAN_TAG IP IP6 DNS PVE_HOST PVE_STORAGE ENABLE_DNT)
   BASIC_LAYOUT=("H:Container" CT_HOSTNAME "H:Network" BRIDGE VLAN_TAG IP IP6 DNS "H:Portal" PVE_HOST PVE_STORAGE ENABLE_DNT)
   ADV_GROUPS=(portal access limits dnt)
-  HUB_GO_LABEL=">>> Apply changes"
-  HUB_TEXT="Select a setting to change it. Changed settings are marked with *. Choose \"Apply changes\" when you're ready."
+  HUB_GO_BUTTON="Apply changes"
+  HUB_TEXT="Select a setting and choose Edit to change it. Changed settings are marked with *. Choose \"Apply changes\" when you're ready, or press Esc to quit."
   HUB_QUIT_TEXT="Quit without applying any changes?"
   WELCOME_TEXT="Welcome to the pve-flr-portal configurator.
 

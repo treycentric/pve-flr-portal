@@ -26,6 +26,11 @@ die() {
   exit 1
 }
 
+# note TEXT - a progress line, on stderr so scripted output stays clean.
+note() {
+  echo "$*" >&2
+}
+
 usage() {
   cat <<'EOF'
 Usage: pve-flr-portal <command> [CTID] [arguments]
@@ -144,6 +149,7 @@ choose_ct() {
     CTID="$explicit"
     return 0
   fi
+  note "Looking for pve-flr-portal containers on this node - please wait..."
   while IFS= read -r row; do
     rows+=("$row")
   done < <(list_rows)
@@ -223,6 +229,7 @@ pull_file() {
 }
 
 fetch_tools() {
+  note "Fetching the management tools from container $1 - please wait..."
   TOOLS_DIR=$(mktemp -d)
   trap 'rm -rf "$TOOLS_DIR"' EXIT
   mkdir -p "$TOOLS_DIR/lib"
@@ -269,6 +276,7 @@ cmd_status() {
 
 cmd_list() {
   local row id name status ver
+  note "Looking for pve-flr-portal containers on this node - please wait..."
   printf '%-6s %-24s %-9s %s\n' "CTID" "NAME" "STATUS" "VERSION"
   while IFS= read -r row; do
     IFS='|' read -r id name status ver <<< "$row"

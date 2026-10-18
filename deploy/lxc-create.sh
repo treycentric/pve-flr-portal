@@ -83,6 +83,7 @@ load_lib() {
   esac
   slug="${REPO_URL#https://github.com/}"
   slug="${slug%.git}"
+  msg_info "Fetching the installer's shared library - please wait..."
   tag="${PFR_VERSION:-}"
   if [ -z "$tag" ]; then
     tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${slug}/releases/latest" 2>/dev/null || true)

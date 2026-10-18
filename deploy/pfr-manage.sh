@@ -49,6 +49,7 @@ OLD_ADDR=""
 # portal's .env.
 load_current() {
   local ctid="$1" cfg k tmp
+  msg_info "Reading the configuration of container $ctid - please wait..."
   cfg=$(pct config "$ctid" 2>/dev/null) || die "Container $ctid was not found on this node."
   CT_STATUS=$(pct status "$ctid" | awk '{print $2}')
   if [ "$CT_STATUS" != "running" ]; then

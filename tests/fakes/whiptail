@@ -1,7 +1,26 @@
 #!/usr/bin/env bash
-# A stand-in for whiptail: records its arguments, answers with $FAKE_WT_ANSWER.
-#   $FAKE_PVE/wt.log   one line per call
+# A stand-in for whiptail: records its arguments to $FAKE_PVE/wt.log, then
+# answers with either
+#   FAKE_WT_SCRIPT  a file of "rc|output" lines, one per call in order
+#                   (running out of lines is a test bug: exit 99), or
+#   FAKE_WT_ANSWER / FAKE_WT_RC  the same answer for every call.
 printf '%s\n' "$*" >> "${FAKE_PVE:?}/wt.log"
+if [ -n "${FAKE_WT_SCRIPT:-}" ]; then
+  pos_file="$FAKE_PVE/wt.pos"
+  n=$(cat "$pos_file" 2>/dev/null || echo 1)
+  echo $((n + 1)) > "$pos_file"
+  line=$(sed -n "${n}p" "$FAKE_WT_SCRIPT")
+  if [ -z "$line" ]; then
+    echo "fake whiptail: script exhausted at call $n" >&2
+    exit 99
+  fi
+  rc="${line%%|*}"
+  out="${line#*|}"
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" >&2
+  fi
+  exit "$rc"
+fi
 if [ -n "${FAKE_WT_ANSWER:-}" ]; then
   printf '%s\n' "$FAKE_WT_ANSWER" >&2
 fi

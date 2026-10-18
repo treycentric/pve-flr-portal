@@ -233,3 +233,9 @@ def test_the_welcome_screen_names_the_container_being_configured(pve):
     assert "Welcome to the pve-flr-portal configurator" in log
     assert "container 207 (flr-prod)" in log
     assert "Nothing is applied until you choose" in log
+
+
+def test_loading_says_what_it_is_doing(pve):
+    pve.add_ct(207)
+    result = run(pve, LOAD)
+    assert "Reading the configuration of container 207 - please wait" in result.stdout

@@ -148,3 +148,11 @@ def test_an_empty_tools_file_in_the_container_is_never_run(pve):
     result = stub(pve, "config")
     assert result.returncode != 0
     assert "predates the management tools" in result.stderr
+
+
+def test_progress_is_reported_before_the_slow_steps(pve):
+    pve.add_ct(207, tags="pve-flr-portal")
+    assert "please wait" in stub(pve, "list").stderr
+    result = stub(pve, "config")  # an old release: it still says what it was doing
+    assert "Looking for pve-flr-portal containers" in result.stderr
+    assert "Fetching the management tools from container 207" in result.stderr
