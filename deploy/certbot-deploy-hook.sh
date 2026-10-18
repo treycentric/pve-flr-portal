@@ -58,7 +58,7 @@ _install_cert() {
 
 _install_cert "TLS_CERT_FILE" "TLS_KEY_FILE" "main UI"
 
-# Data-plane cert (docs/plan.md §7.6.1) opts in separately - it needs a
+# Data-plane cert (docs/push-to-guest.md) opts in separately - it needs a
 # hostname SAN matching a RESTORE_DATA_NICS entry, which not every
 # certbot-managed domain necessarily is.
 if [ "$(_env_get "RESTORE_DATA_NIC_TLS_PREFERRED" "verify")" != "plaintext" ] \

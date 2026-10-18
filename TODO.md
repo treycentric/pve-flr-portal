@@ -6,7 +6,9 @@ stories worth knowing before touching `backend/static/app.js`'s
 timeline code) is archived at
 [`docs/archive/plan-phases-0-4.md`](docs/archive/plan-phases-0-4.md).
 Current architecture/reference docs live in
-[`docs/plan.md`](docs/plan.md).
+[`docs/architecture.md`](docs/architecture.md),
+[`docs/api-reference.md`](docs/api-reference.md), and
+[`docs/push-to-guest.md`](docs/push-to-guest.md).
 
 ## PH.5 — Push-to-guest — SHIPPED (v1.1.0, #5/#22/#24)
 
@@ -20,11 +22,12 @@ multi-file/directory bundle restore with an embedded, guest-side-verified
 checksum manifest (issue #24). Live-verified against a real Linux CT
 (multi-item bundle via Direct Network Transfer) and a real Windows VM
 (single-directory restore, zip-fallback + chunked write). Full
-design/build/live-testing history is in `docs/plan.md` §7.5–§7.7 — each
-real bug found along the way (directory double-nesting, disk exhaustion,
-misleading progress display, timeouts, memory blow-ups, Windows quoting)
-has its own "Real-world finding" entry there with the fix, test, and
-commit.
+design/build/live-testing history is in `docs/push-to-guest.md`
+(mechanism) and `docs/archive/push-to-guest-findings.md` (bug history)
+— each real bug found along the way (directory double-nesting, disk
+exhaustion, misleading progress display, timeouts, memory blow-ups,
+Windows quoting) has its own "Real-world finding" entry in the latter,
+with the fix, test, and commit.
 
 ### Push-to-guest follow-ons (open, not blockers)
 
@@ -38,8 +41,8 @@ commit.
   "Restore original owner/permissions" checkbox, sourced from a second
   `file-restore/download?tar=1` call (confirmed live 2026-09-28 that
   PVE's tar output carries real uid/gid/mode, unlike the JSON listing
-  API — docs/plan.md §7.5). **Windows ACLs confirmed infeasible** via
-  any Proxmox-exposed API (investigated 2026-09-28, docs/plan.md §7.5)
+  API — docs/push-to-guest.md). **Windows ACLs confirmed infeasible** via
+  any Proxmox-exposed API (investigated 2026-09-28, docs/push-to-guest.md)
   — neither tar nor zip has a field for an NTFS Security Descriptor,
   and no other Proxmox API surfaces it either; the checkbox is disabled
   for a Windows guest for exactly this reason. A real upstream Proxmox
@@ -59,9 +62,9 @@ commit.
   ownership checkbox). Windows ACLs remain infeasible, same reason as
   #20.
 - #7 — `/api/download-bundle` (the plain browser download feature,
-  separate from restore-to-guest) still buffers the whole archive in
-  RAM; the streaming techniques #24 built are directly reusable there
-  but haven't been applied yet.
+  separate from restore-to-guest). **FIXED** — now streams (see
+  `backend/download_bundle.py`): archive built on a worker thread and
+  streamed out through a bounded queue, nothing staged on disk.
 - #47 — HTTPS on the Direct Network Transfer data plane. **SHIPPED** —
   live-verified (2026-09-08, Windows + Linux VMs, self-signed and
   step-ca certs) and merged into `main`. `verify`/`insecure`/`plaintext`
@@ -69,7 +72,8 @@ commit.
   too), self-signed data-plane cert with IP SANs, HTTPS data listener,
   per-fetch-tool skip-verify, per-NIC `hostname`, minimum TLS version,
   automatic guest CA install, `PREFERRED` default `verify`, `curl.exe`
-  preferred on Windows. Design + shakeout log: `docs/plan.md` §7.6.1.
+  preferred on Windows. Design: `docs/push-to-guest.md`; shakeout log:
+  `docs/archive/push-to-guest-findings.md`.
   Deferred follow-ups: `openssl s_client` POSIX candidate;
   `UNINSTALL_CA_AFTER`; `bitsadmin` over HTTPS.
 - #52 — bake certbot + a DNS-01 plugin into the LXC/Docker build, with a
@@ -81,15 +85,32 @@ commit.
   systemd/certbot.timer inside the container image) — out of scope for
   now, LXC is the primary deployment target. See docs/plan.md §7.3.
 
-## PH.6 — Directory-listing cache (optional, perf only)
+## PH.6 — Directory-listing cache — SHIPPED (issue #109)
 
-A lazily-populated SQLite `dir_cache` keyed by `(volid, path)`, written
-on `/api/browse` cache-miss (schema already sketched in
-`docs/plan.md` §6). Every uncached `file-restore/list` costs ~3s (cold
-helper-VM boot); scrubbing N snapshots in the same folder currently
-pays that N times. The app is correct without this — it's purely "stop
-paying the same 3s tax repeatedly." Single SQLite file, no background
-job, per CLAUDE.md's "no extra services" constraint. Est. 1-2 days.
+A lazily-populated SQLite `dir_cache`, written on `/api/browse`
+cache-miss (schema in `docs/architecture.md`, `backend/dir_cache.py`). Keyed
+by `(username, volume, path)` — not just `(volid, path)` as originally
+sketched, matching `pve_client.list_path()`'s existing per-user
+authorization threat model (a cache shared across users would let one
+user see a listing PVE never actually authorized for them). Every
+uncached `file-restore/list` costs ~3s (cold helper-VM boot); scrubbing
+N snapshots in the same folder used to pay that N times. Single SQLite
+file, no background job, per CLAUDE.md's "no extra services" constraint.
+
+**No longer "optional, perf only" (2026-09-30):** issue #109 confirmed
+PVE's own privileged API worker pool is a small (default 3), shared,
+node-wide resource that this app's `file-restore/list` calls compete
+for against every other operation on the node — a real host-instability
+report traced back to it. `FILE_RESTORE_LIST_MAX_CONCURRENCY` (lowered
+to 2) caps how many calls this app makes *at once*, but doesn't reduce
+how *often* it needs to call PVE at all. Timeline scrubbing is
+disproportionately revisit-heavy — dragging back and forth over
+already-seen points is normal scrub UX — so a cache turns most of that
+traffic into free local hits instead of new calls competing for one of
+PVE's few shared worker slots. It does **not** fully replace the
+concurrency cap: a first-time visit to N distinct new snapshots still
+needs N live calls regardless of caching. Both mitigations matter
+together.
 
 **More motivated after #80:** hiding unmountable partitions/disks/LVM
 volumes (main.py's `_filter_unmountable_children`/
@@ -104,6 +125,43 @@ during tree-sync fetches, since it wasn't shown there at all before and
 made the slow-but-working case look identical to broken) rather than
 by caching - this cache is the real fix for the underlying cost.
 
+## Restore job retention & visibility — split from #121
+
+Originally one issue, split into three on review (separately scoped:
+viewing vs. cancelling vs. retention) plus a restart-reconciliation
+requirement folded into the retention ticket:
+
+- #122 — **SHIPPED.** Job list shows who submitted each job
+  (`requested_by`), with an opt-in `RESTRICT_JOBS_TO_OWN` config
+  (default off — unscoped, unchanged behavior) and a `BackupAdmins`-
+  style bypass (`JOB_ADMIN_PRIVILEGE`, default `Sys.Audit`, checked via
+  PVE's own `cap["dc"]` bucket — a privilege granted at the bare root
+  path `/`, not scoped to any particular storage/VM). See
+  `docs/architecture.md`'s "Auth & sessions" section and README's
+  "Provisioning access" → "Restore Job Visibility".
+- #123 — **SHIPPED.** `POST /api/restore-jobs/{id}/cancel` now checks
+  `job.requested_by == session.username` or `auth.is_job_admin(session)`
+  (reusing #122's exact bypass check, not a separate privilege) before
+  honoring a cancel — previously any logged-in user could cancel any
+  job regardless of who submitted it. A non-owner, non-admin gets 403.
+  The job list's per-job dicts also gained `can_cancel` so the UI can
+  grey out the Cancel button proactively. See `docs/architecture.md`'s
+  "Auth & sessions" section.
+- #124 — **SHIPPED.** Persisted job + log history in a dedicated
+  `job_history.sqlite` under `PFR_DATA_DIR` (separate from PH.6's
+  `dir_cache.sqlite3`), with a configurable retention window
+  (`JOB_HISTORY_RETENTION_DAYS`, default 7) swept opportunistically on
+  every job-list load. A row is written at job creation and every
+  status transition, not just at completion. New
+  `RestoreStatus.INTERRUPTED`: `main.py`'s `lifespan` startup hook
+  reconciles any row still `queued`/`running`/`verifying` at boot
+  (necessarily left over from a previous process) to this status
+  instead of leaving it looking perpetually in-progress.
+  `GET /api/restore-jobs`/the detail endpoint merge this process's
+  live, in-memory jobs with persisted rows from previous processes,
+  within the retention window. See `docs/architecture.md`'s "Data
+  model" section.
+
 ## Server-side per-user preferences store (follow-up to #29)
 
 The colour theme (#29) persists per-browser in `localStorage` today, plus
@@ -115,27 +173,46 @@ no service" shape as PH.6). The storage *location* is now sorted:
 `PFR_DATA_DIR` (#30). Remaining is the feature itself — a
 `preferences.json` under `config.ensure_data_dir()`, read at page
 render and written from a small `POST /api/preferences` (or similar),
-and the `docs/plan.md` §4 note that state is actually being written.
+and the `docs/architecture.md` note that state is actually being written.
 Deferred out of #29 deliberately to keep that change small.
 **Still needs its own GitHub issue.**
 
+## Security hardening (from the CSRF review + the IT-BAER `sms-hardening` fork review)
+
+Analysis lives in each issue; the fork is based on an older `main`, so
+adopt by re-implementing/cherry-picking, not merging.
+
+- [x] #135 CSRF guard / POST logout / OIDC state binding / anti-framing
+      (PR #144; SSO + TOTP login verified on a live PVE)
+- [x] #136 Restored files + guest CA anchor created `0666` by
+      `agent/file-write` - fixed in PR #143 (chmod after write; existing
+      anchors repaired), verified on a live Linux guest
+- [ ] #137 Root-owned app dir in `deploy/` (only `certs/` service-writable)
+- [ ] #138 Serve Open Sans locally (drop Google Fonts)
+- [ ] #139 Hash-locked `requirements.lock` - needs a Dependabot and
+      multi-Python plan first; generate our own, don't copy the fork's
+- [ ] #140 TLS key `0600` from creation; `PFR_RELOAD` off by default
+- [ ] #141 Restore directory owner/mode/mtime in bundle restores
+
 ## Known limitations / tech debt
 
-Detailed in `docs/plan.md` §9.1 ("Scaling & limits") — condensed here
+Detailed in `docs/architecture.md` ("Scaling & limits") — condensed here
 as an actionable list. None of these are correctness bugs; they're
 ceilings the single-admin/single-worker design hits under load it
 wasn't built for.
 
-- [ ] **`/api/download-bundle` buffers the whole archive in RAM and
-  compresses synchronously on the event loop** — a large multi-file
-  selection can OOM the worker and stalls every other request
-  (including auth) while it compresses. Single-file `/api/download` is
-  unaffected (it streams). Fix: stream the archive as it's built; move
-  compression to a thread via `run_in_executor`.
+- [x] **`/api/download-bundle` buffered the whole archive in RAM and
+  compressed on the event loop** — fixed in #7: the archive is built on
+  a worker thread (`backend/download_bundle.py`) and streamed with
+  bounded memory; every item is fetched as `tar=1` and read front to
+  back, so nothing is staged on disk either. Concurrent builds are
+  capped (`MAX_CONCURRENT_BUNDLES`, a dedicated thread pool).
 - [x] **No request coalescing/throttle on `file-restore/list` calls** —
   fixed in #60: `pve_client.list_path()` caps in-flight calls
   (`FILE_RESTORE_LIST_MAX_CONCURRENCY`) and coalesces identical
-  concurrent requests per-user. (Mostly moot once PH.6's cache lands.)
+  concurrent requests per-user. Mostly moot on a cache hit now that
+  PH.6's cache has landed (#109) — this still matters for first-time
+  visits to new snapshots, which always need a live call regardless.
 - [ ] **No pagination on huge directories** (Maildir, `node_modules`,
   WinSxS-scale folders) — full listing renders into one HTML partial
   and gets sorted/filtered entirely in JS. Fix: paginate or virtualize
@@ -145,12 +222,13 @@ wasn't built for.
   systemd unit should own restart-on-crash, not uvicorn's reloader).
   Fix: gate `reload` behind an env var, default off.
 - [ ] **One `httpx.AsyncClient` per PVE call, no connection pooling** —
-  wasteful (fresh TLS handshake each time) but negligible at homelab
-  volume. Fix: one shared client instance.
+  wasteful (fresh TLS handshake each time) but negligible at the scale
+  this app runs at. Fix: one shared client instance.
 - [ ] **`index()` reprocesses every archive on the datastore on every
   page load** — `list_backup_archives()` pulls the full list, then
   `index()` parses/groups all of it, uncached, per request. Fine at
-  homelab scale; would matter on a busy shared datastore.
+  a single-admin deployment's scale; would matter on a busy shared
+  datastore.
 - [ ] **`renderTimeline()` tears down and rebuilds every SVG node each
   pan frame**, and `groupsInView()` walks all snapshots per frame —
   smooth at a few hundred dots, drops frames at multi-year retention
@@ -160,8 +238,16 @@ wasn't built for.
   can't run multiple uvicorn workers (each would have its own
   `_sessions` dict) or scale horizontally; a backend restart logs
   everyone out. Accepted tradeoff for now; would need session storage
-  moved to disk (SQLite, if PH.6 lands) to lift.
-- [ ] **PVE 2FA/TOTP not handled** — if a target user has a second
-  factor on their PVE account, `/access/ticket` needs an extra
-  round-trip the login flow doesn't do yet (`backend/auth.py`).
-  Revisit if/when actually needed by a real user.
+  moved to disk to lift — PH.6 (#109) already added the SQLite
+  infrastructure this could reuse, but sessions themselves aren't
+  persisted there; that's still open, separate work.
+- [x] **PVE 2FA/TOTP** — SHIPPED (issue #15). `auth.login()` raises
+  `TFARequired` when PVE's `/access/ticket` response carries `NeedTFA`;
+  `auth.finish_tfa_login()` does the second round-trip (the code goes
+  in `password`, the intermediate ticket in `tfa-challenge`, per PVE's
+  own source - confirmed against `PVE/API2/AccessControl.pm`, not
+  guessed). `login.html` reveals a code-entry step in place, carrying
+  username/realm/challenge as hidden fields - no server-side pending-
+  login state needed. Covers TOTP and recovery keys (PVE accepts either
+  the same way here); WebAuthn is out of scope (needs browser
+  credential-API JS, real additional work). See `docs/architecture.md`.

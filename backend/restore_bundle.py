@@ -1,5 +1,5 @@
-"""Multi-file/directory restore-to-guest (docs/plan.md §7.7, issue #24,
-shipped v1.1.0). See docs/plan.md §7.7 for the full design and the
+"""Multi-file/directory restore-to-guest (docs/push-to-guest.md, issue #24,
+shipped v1.1.0). See docs/push-to-guest.md for the full design and the
 live-testing log.
 
 - **`BundleItem`** - one selected file or directory, the same shape as
@@ -25,7 +25,8 @@ live-testing log.
   extractable format (`.zip`/`.tar.gz`) when the guest can't.
 - **`build_extract_command()`/`build_verify_command()`** - the actual
   guest-exec commands per bundle format, mirroring
-  `restore_network_pull.build_fetch_command()`'s role for Design C.
+  `restore_network_pull.build_fetch_command()`'s role for Direct
+  Network Transfer.
 - **`build_bundle()`** - the actual builder: downloads each selected
   item to its own local temp file (streamed, never a whole item in
   memory) and adds it to the output bundle one item at a time, deleting
@@ -82,7 +83,7 @@ class BundleItem:
     already does, and (confirmed by that existing code path) already
     covers the *full recursive tree* under it, not just one level."""
 
-    filepath: str  # opaque file-restore filepath token (docs/plan.md §3)
+    filepath: str  # opaque file-restore filepath token (docs/api-reference.md)
     name: str  # display/archive-relative name
     leaf: bool = True
 
@@ -181,7 +182,7 @@ def build_extract_command(fmt: BundleFormat, bundle_path: str, dest_dir: str, gu
 def build_verify_command(manifest_path: str, dest_dir: str, guest_os_family: str | None) -> list[str]:
     """The guest-exec command that verifies every extracted file against
     the embedded manifest, entirely inside the guest - one call, no
-    app-side hash comparison (docs/plan.md §7.7). Same embedding trust
+    app-side hash comparison (docs/push-to-guest.md). Same embedding trust
     assumption as build_extract_command()."""
     if guest_os_family == "windows":
         script = (
@@ -270,7 +271,7 @@ async def _download_item_to_temp_file(
     A **leaf** item downloads its raw content unchanged (`tar=0`), then
     makes a second, small `fetch_source_metadata` call for its real
     mtime/uid/gid/mode (issue #26 - `file-restore/list`'s JSON never
-    has uid/gid/mode, docs/plan.md §7.5/§7.7) - returned alongside the
+    has uid/gid/mode, docs/push-to-guest.md) - returned alongside the
     path.
 
     A **directory** item's local temp file format now depends on the
@@ -281,7 +282,7 @@ async def _download_item_to_temp_file(
     ACL finding applies here too). Every other guest now uses `tar=1`
     instead of the previous always-zip default - confirmed live
     2026-09-28 to carry real per-member uid/gid/mode *and* mtime
-    (docs/plan.md §7.7), needed uniformly regardless of whether
+    (docs/push-to-guest.md), needed uniformly regardless of whether
     ownership restore was requested, since mtime restoration is
     unconditional. Metadata for a directory item is per-member, read
     later while its contents are added to the bundle - `None` here.
@@ -374,7 +375,7 @@ def _open_local_tar(path: Path):
     PVE's own `tar=1` encoding (_download_item_to_temp_file) - possibly
     zstd-framed, possibly a genuine plain tar (confirmed live
     inconsistent for the same endpoint/parameter, issue #20/#26,
-    docs/plan.md §7.5/§7.7), so detect via the magic number rather than
+    docs/push-to-guest.md), so detect via the magic number rather than
     assume either. Unlike `pve_client.fetch_source_metadata`'s bounded-
     prefix read (only needs the first header), every member has to be
     read here, so this decompresses the whole file via a streaming
@@ -401,7 +402,7 @@ def _add_directory_entries_to_tar(
     """A directory item's local temp file is now PVE's own `tar=1`
     encoding (issue #26 - previously always a zip, re-expanded here;
     switched so real per-member uid/gid/mode/mtime - confirmed live
-    2026-09-28 to survive PVE's file-restore path, docs/plan.md §7.7 -
+    2026-09-28 to survive PVE's file-restore path, docs/push-to-guest.md -
     can be copied onto the outgoing entry instead of tarfile's bare
     defaults). Re-expands each member into the outer tar - one member
     at a time, streamed through, never a whole member's content in
@@ -514,8 +515,8 @@ def _add_item_to_bundle_writer(
     2026-09-01: the previous download-everything-then-build approach
     ran a real LXC container's rootfs out of space
     (`OSError: [Errno 28] No space left on device`) on a multi-item
-    selection - see docs/plan.md §7.7's finding for the fuller
-    zero-buffer alternative (issue #25) this stops short of.
+    selection - see docs/archive/push-to-guest-findings.md for the
+    fuller zero-buffer alternative (issue #25) this stops short of.
 
     `metadata`/`apply_ownership` (issue #26) only apply to a leaf item
     and the tar-output directory case - see _add_leaf_to_tar/_zip and

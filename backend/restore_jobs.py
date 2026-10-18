@@ -1,14 +1,22 @@
-"""PH.5: in-memory registry of background restore jobs (docs/plan.md
-§7.5). A restore (stream source -> N chunk writes -> optional concat ->
-optional metadata -> optional verify) can run well past a reasonable
+"""PH.5: in-memory registry of background restore jobs
+(docs/push-to-guest.md). A restore (stream source -> N chunk writes ->
+optional concat -> optional metadata -> optional verify) can run well past a reasonable
 HTTP request lifetime, so `POST /api/restore` submits a job and returns
 immediately; the actual work runs as a tracked asyncio task here.
 
 Same tradeoff already accepted for auth._sessions (CLAUDE.md - no extra
 services): single-process, in-memory, lost on a backend restart. Jobs
 are visible to any logged-in user rather than scoped per-requester -
-this is a single-admin homelab tool with one shared task list, the same
-way Synology ABB's own restore-task list works.
+this is a single-admin tool with one shared task list, the same
+way Synology ABB's own restore-task list works. Visibility/cancel-
+permission are configurable on top of this default - see
+auth.is_job_admin() and config.settings.restrict_jobs_to_own.
+
+Every status transition also writes through to `job_history.py`'s
+SQLite-backed record, which survives a restart and is what lets a job
+interrupted by a crash/redeploy show up as `RestoreStatus.INTERRUPTED`
+instead of vanishing. `main.py`'s job-list/detail endpoints merge this
+manager's live jobs with job_history's persisted ones.
 
 **Session handling.** A job holds its own SessionData *snapshot*
 (`dataclasses.replace(session)` at submission time), never the same
@@ -29,6 +37,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
+from . import job_history
 from .auth import SessionData
 from .restore_bundle import BundleItem
 
@@ -40,6 +49,9 @@ class RestoreStatus(StrEnum):
     DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    # Terminal, like done/failed/cancelled - a job still active when the
+    # backend restarts is reconciled to this status, not FAILED.
+    INTERRUPTED = "interrupted"
 
 
 ACTIVE_STATUSES = (RestoreStatus.QUEUED, RestoreStatus.RUNNING, RestoreStatus.VERIFYING)
@@ -56,7 +68,7 @@ class RestoreJob:
     task_name: str
     snapshot_time: str  # "restore ver." - the backup snapshot this restores from
     source_volume: str  # backup volid, for re-fetching the content to restore
-    source_filepath: str  # opaque file-restore filepath token (docs/plan.md §3) - unused for a bundle job
+    source_filepath: str  # opaque file-restore filepath token (docs/api-reference.md) - unused for a bundle job
     source: str  # display path within the backup, or "N item(s)" for a bundle job
     destination: str  # single-file job: dest_dir + filename. Bundle job: the target directory itself.
     # The guest's real PVE node (issue #51) - every guest-scoped call this
@@ -65,7 +77,7 @@ class RestoreJob:
     # the guest's own. Defaults to "localhost" so an unresolved/single-node
     # setup keeps working exactly as before.
     node: str = "localhost"
-    # Multi-file/directory restore (docs/plan.md §7.7, issue #24). None
+    # Multi-file/directory restore (docs/push-to-guest.md, issue #24). None
     # (the default, and every job created before this existed) means an
     # ordinary single-file job - source_filepath/source/destination keep
     # their original single-file meaning and restore_runner.py's
@@ -73,18 +85,18 @@ class RestoreJob:
     # means a bundle job instead: source_filepath is unused,
     # destination is the target directory the bundle extracts into, and
     # restore_runner.py runs an entirely separate bundle-restore path -
-    # see docs/plan.md §7.7 for why (a list of BundleItem, not a single
+    # see docs/push-to-guest.md for why (a list of BundleItem, not a single
     # filepath, drives what actually gets fetched from PVE).
     items: list[BundleItem] | None = None
     # Independent opt-ins, not a "quick vs full" choice - the content
     # write path (single call vs chunk+concat) is decided automatically
     # from size; whether guest-exec ends up needed follows from that PLUS
     # either of these being requested, whenever the guest/privileges
-    # support it (docs/plan.md §7.5).
+    # support it (docs/push-to-guest.md).
     restore_metadata: bool = False
     verify: bool = False
     # Issue #20: original uid/gid/mode, fetched from a second file-
-    # restore/download(tar=1) call at restore time (docs/plan.md §7.5's
+    # restore/download(tar=1) call at restore time (docs/push-to-guest.md's
     # 2026-09-28 finding - PVE's tar output carries this, the JSON
     # file-restore/list API never has). Linux/BSD only - a no-op when
     # guest_os_family == "windows" (NTFS has no uid/gid/mode concept;
@@ -92,7 +104,7 @@ class RestoreJob:
     restore_ownership: bool = False
     # The source file's original mtime (from file-restore/list, which is
     # the only piece of metadata that API actually exposes - no uid/gid/
-    # mode field exists on any PVE version, docs/plan.md §7.5). Only
+    # mode field exists on any PVE version, docs/push-to-guest.md). Only
     # meaningful when restore_metadata is set; None if the frontend
     # didn't have an mtime to send (e.g. a directory entry).
     source_mtime: int | None = None
@@ -132,7 +144,9 @@ class RestoreJob:
 
     def log(self, message: str) -> None:
         elapsed = round(time.time() - self.started_at, 1)
-        self.log_lines.append(f"+{elapsed}s {message}")
+        line = f"+{elapsed}s {message}"
+        self.log_lines.append(line)
+        job_history.append_log_entry(self.id, line)
 
     @property
     def elapsed_seconds(self) -> float:
@@ -155,6 +169,7 @@ class RestoreJob:
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "requested_by": self.requested_by,
             "device": self.guest_label,
             "task_name": self.task_name,
             "restore_version": self.snapshot_time,
@@ -226,6 +241,7 @@ class RestoreJobManager:
             source_size=source_size,
         )
         self._jobs[job.id] = job
+        job_history.persist_sync(job)
         return job
 
     def submit(self, job: RestoreJob, coro_factory) -> None:
@@ -250,12 +266,25 @@ class RestoreJobManager:
             task.cancel()
         return True
 
+    def mark_running(self, job_id: str) -> None:
+        job = self._jobs.get(job_id)
+        if job is not None:
+            job.status = RestoreStatus.RUNNING
+            job_history.persist_sync(job)
+
+    def mark_verifying(self, job_id: str) -> None:
+        job = self._jobs.get(job_id)
+        if job is not None:
+            job.status = RestoreStatus.VERIFYING
+            job_history.persist_sync(job)
+
     def mark_cancelled(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
         if job is not None:
             job.status = RestoreStatus.CANCELLED
             job.finished_at = time.time()
             job.log("Cancelled.")
+            job_history.persist_sync(job)
 
     def mark_done(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
@@ -263,6 +292,7 @@ class RestoreJobManager:
             job.status = RestoreStatus.DONE
             job.finished_at = time.time()
             job.log("Restore completed successfully.")
+            job_history.persist_sync(job)
 
     def mark_failed(self, job_id: str, error: str) -> None:
         job = self._jobs.get(job_id)
@@ -271,6 +301,26 @@ class RestoreJobManager:
             job.error = error
             job.finished_at = time.time()
             job.log(f"Failed: {error}")
+            job_history.persist_sync(job)
+
+    def evict_expired(self, retention_days: int) -> int:
+        """Drops terminal jobs (and their finished task handles) that
+        finished more than `retention_days` ago - the in-memory
+        counterpart of job_history.evict_expired(), using the same cutoff
+        so a job leaves both stores together (issue #17). Active jobs are
+        never touched. Returns the number evicted."""
+        cutoff = time.time() - retention_days * 86400
+        expired = [
+            job_id
+            for job_id, job in self._jobs.items()
+            if not job.is_active and job.finished_at is not None and job.finished_at < cutoff
+        ]
+        for job_id in expired:
+            del self._jobs[job_id]
+            task = self._tasks.get(job_id)
+            if task is None or task.done():
+                self._tasks.pop(job_id, None)
+        return len(expired)
 
     def clear(self) -> None:
         """Test/dev helper - mirrors auth._sessions.clear()'s role in tests."""

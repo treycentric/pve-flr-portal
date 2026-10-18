@@ -4,7 +4,7 @@ alongside the existing Browse/Manual-entry destination pickers.
 
 VM guests only - LXC containers can never reach this at all, since
 push-to-guest restore (guest_agent.get_restore_capabilities) is gated on
-qemu-guest-agent, which containers don't have (design_a/design_b are
+qemu-guest-agent, which containers don't have (file_write/guest_exec are
 always unavailable for guest_type == "ct" - see
 test_get_restore_capabilities_lxc_skips_agent_calls). The restore modal
 this feeds is simply never reachable for a container, so there is
@@ -13,7 +13,7 @@ nothing to resolve for one.
 The file-restore browser only ever exposes a path *within* a partition
 (or, for LVM, within a logical volume) - drive letters and Linux
 mountpoints are guest-side state nothing in the backup itself records
-(docs/plan.md §3's confirmed disk/part/lvm structure, and issue #66's
+(docs/api-reference.md's confirmed disk/part/lvm structure, and issue #66's
 LVM-elevation/part-flattening on top of it - see
 resolve_original_directory's docstring for the exact shapes this
 parses). The only place that drive-letter/mountpoint mapping exists is
@@ -28,8 +28,8 @@ destination here is a wrong write into a live guest, not a cosmetic
 mistake.
 
 **Disk identity for a plain (non-LVM) partition, Windows.** Confirmed
-live 2026-09-27 (docs/plan.md §7 "original location" real-world
-findings): PVE's disk label carries its own bus+index verbatim
+live 2026-09-27 (docs/archive/push-to-guest-findings.md): PVE's disk
+label carries its own bus+index verbatim
 (`drive-<bus><N>.img.fidx`), and for `sata`/`scsi` that maps to a real,
 address-based identity in the running guest - not just attachment
 order - via `_windows_disk_number_by_bus` below:

@@ -1,5 +1,5 @@
 """PH.5: serializes every guest-agent command per vmid, and retries the
-ones worth retrying (docs/plan.md §7.5). `qemu-guest-agent` accepts only
+ones worth retrying (docs/push-to-guest.md). `qemu-guest-agent` accepts only
 one command at a time over its virtio-serial channel - two overlapping
 commands (a retry racing the original, two browser tabs, a capability
 check landing mid-browse) can desync that channel until the guest's

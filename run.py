@@ -1,9 +1,9 @@
-"""Entrypoint that serves the portal over HTTPS by default (docs/plan.md
-§7.3). Cert bootstrap has to happen before uvicorn binds its SSL
-context, which is too late to do from a FastAPI startup event - hence a
-small script instead of `uvicorn backend.main:app` directly.
+"""Entrypoint that serves the portal over HTTPS by default
+(docs/architecture.md). Cert bootstrap has to happen before uvicorn
+binds its SSL context, which is too late to do from a FastAPI startup
+event - hence a small script instead of `uvicorn backend.main:app` directly.
 
-Direct Network Transfer (docs/plan.md §7.6, issue #22, step 5): when
+Direct Network Transfer (docs/push-to-guest.md, issue #22, step 5): when
 RESTORE_DATA_NICS is configured, this also binds one additional listener
 per distinct configured data-NIC IP, for the network-pull download route
 (`GET /api/restore-downloads/{token}`). Those listeners have to run in
@@ -12,8 +12,9 @@ and `restore_jobs.manager` are both in-memory and process-local
 (CLAUDE.md - no extra services), so a guest's fetch has to land in the
 same process that minted its token. uvicorn's own `--reload` supervisor
 only wraps the single-server `uvicorn.run()` entrypoint, so the default
-(no data NICs configured) keeps using `uvicorn.run(..., reload=True)`;
-only the opt-in multi-listener path below gives that up.
+(no data NICs configured) keeps using `uvicorn.run()` with reload on
+unless `PFR_RELOAD=false` (the container image sets that); only the
+opt-in multi-listener path below always gives it up.
 
 A data listener is an optional enhancement: if its IP isn't a local
 address (a wrong `local_ip`, or the interface isn't attached yet) it is
@@ -21,7 +22,7 @@ skipped with a clear log line and the main portal runs normally - DNT
 just isn't offered for that subnet (guests there fall back to the
 chunked write path).
 
-Data-plane TLS (issue #47, docs/plan.md §7.6.1): those data listeners
+Data-plane TLS (issue #47, docs/push-to-guest.md): those data listeners
 are plain HTTP when RESTORE_DATA_NIC_TLS_PREFERRED is `plaintext`
 (unchanged from before #47) and HTTPS otherwise, using a dedicated
 self-signed data-plane cert (IP SANs for the configured NICs) unless the
@@ -185,5 +186,5 @@ if __name__ == "__main__":
             port=settings.port,
             ssl_certfile=str(cert_path),
             ssl_keyfile=str(key_path),
-            reload=True,
+            reload=settings.reload,
         )

@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from backend import job_history
 from backend.restore_bundle import BundleItem
 from backend.restore_jobs import RestoreJobManager, RestoreStatus
 
@@ -40,7 +41,7 @@ def test_create_assigns_id_and_queued_status(manager, session_data):
 def test_create_defaults_items_to_none_for_an_ordinary_single_file_job(manager, session_data):
     # None (not an empty list) is the signal restore_runner.py's
     # dispatcher checks - every job created before this field existed
-    # behaves identically (docs/plan.md §7.7).
+    # behaves identically (docs/push-to-guest.md).
     job = _make(manager, session_data)
     assert job.items is None
 
@@ -138,11 +139,69 @@ def test_mark_cancelled_sets_status(manager, session_data):
     assert not job.is_active
 
 
+def test_mark_running_sets_status(manager, session_data):
+    job = _make(manager, session_data)
+    manager.mark_running(job.id)
+    assert job.status == RestoreStatus.RUNNING
+    assert job.is_active
+
+
+def test_mark_verifying_sets_status(manager, session_data):
+    job = _make(manager, session_data)
+    manager.mark_verifying(job.id)
+    assert job.status == RestoreStatus.VERIFYING
+    assert job.is_active
+
+
+def test_mark_running_and_verifying_are_no_ops_for_unknown_id(manager):
+    manager.mark_running("nope")
+    manager.mark_verifying("nope")  # just must not raise
+
+
+def test_interrupted_is_a_terminal_status_not_counted_active():
+    from backend.restore_jobs import ACTIVE_STATUSES
+
+    assert RestoreStatus.INTERRUPTED not in ACTIVE_STATUSES
+
+
+async def test_create_and_every_mark_method_persist_to_job_history(manager, session_data):
+    """Every status transition writes through to job_history, not just
+    the terminal ones."""
+    job = _make(manager, session_data)
+    assert (await job_history.get(job.id))["status"] == "queued"
+
+    manager.mark_running(job.id)
+    assert (await job_history.get(job.id))["status"] == "running"
+
+    manager.mark_verifying(job.id)
+    assert (await job_history.get(job.id))["status"] == "verifying"
+
+    manager.mark_done(job.id)
+    detail = await job_history.get(job.id)
+    assert detail["status"] == "done"
+    assert any("completed successfully" in line for line in detail["log"])
+
+
+async def test_job_log_persists_immediately_not_just_at_status_transitions(manager, session_data):
+    """Follow-up to #124: a plain job.log() call mid-run (no status
+    change) must still be visible in the persisted record right away -
+    this is what keeps an interrupted job's log current up to the last
+    line actually logged, not just up to its last status change."""
+    job = _make(manager, session_data)
+    manager.mark_running(job.id)
+
+    job.log("working on it")
+    detail = await job_history.get(job.id)
+    assert any("working on it" in line for line in detail["log"])
+    assert detail["status"] == "running"  # log() didn't change status
+
+
 def test_to_dict_shape_matches_ui_columns(manager, session_data):
     job = _make(manager, session_data)
     d = job.to_dict()
     assert set(d) == {
         "id",
+        "requested_by",
         "device",
         "task_name",
         "restore_version",
@@ -252,3 +311,45 @@ async def test_submitted_job_actually_runs(manager, session_data):
     await asyncio.wait_for(ran.wait(), timeout=1.0)
     await asyncio.sleep(0)  # let mark_done's task finish
     assert job.status == RestoreStatus.DONE
+
+
+def test_evict_expired_drops_only_old_terminal_jobs(manager, session_data):
+    old_done = _make(manager, session_data)
+    manager.mark_done(old_done.id)
+    old_done.finished_at -= 8 * 86400
+    old_failed = _make(manager, session_data)
+    manager.mark_failed(old_failed.id, "boom")
+    old_failed.finished_at -= 8 * 86400
+    recent_done = _make(manager, session_data)
+    manager.mark_done(recent_done.id)
+    active = _make(manager, session_data)
+    active.started_at -= 30 * 86400
+
+    assert manager.evict_expired(7) == 2
+    assert manager.get(old_done.id) is None
+    assert manager.get(old_failed.id) is None
+    assert manager.get(recent_done.id) is recent_done
+    assert manager.get(active.id) is active
+
+
+async def test_evict_expired_drops_finished_task_handles_but_keeps_running_ones(manager, session_data):
+    async def _noop(job):
+        return None
+
+    async def _forever(job):
+        await asyncio.Event().wait()
+
+    done_job = _make(manager, session_data)
+    manager.submit(done_job, _noop)
+    await manager._tasks[done_job.id]
+    manager.mark_done(done_job.id)
+    done_job.finished_at -= 8 * 86400
+
+    manager.evict_expired(7)
+    assert done_job.id not in manager._tasks
+
+    running = _make(manager, session_data)
+    manager.submit(running, _forever)
+    manager.evict_expired(7)
+    assert running.id in manager._tasks
+    manager._tasks[running.id].cancel()

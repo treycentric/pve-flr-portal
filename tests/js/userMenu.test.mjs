@@ -10,13 +10,21 @@ test('stores the identity and starts closed', () => {
   assert.equal(m.aboutOpen, false);
 });
 
-test('logout closes the menu and navigates to /logout', () => {
-  const { userMenu, window } = loadApp();
+test('logout closes the menu and POSTs a form to /logout', () => {
+  const submitted = [];
+  const form = { submit: () => submitted.push({ method: form.method, action: form.action }) };
+  const document = {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: (tag) => (tag === 'form' ? form : {}),
+    body: { appendChild: () => {} },
+  };
+  const { userMenu } = loadApp({ document });
   const m = userMenu('alice@pam');
   m.open = true;
   m.logout();
   assert.equal(m.open, false);
-  assert.equal(window.location, '/logout');
+  assert.deepEqual(submitted, [{ method: 'post', action: '/logout' }]);
 });
 
 // --- Color theme (issue #29) ---

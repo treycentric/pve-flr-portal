@@ -10,7 +10,7 @@
 #   bash deploy/lxc-create.sh
 #
 # Override any of these via environment variables before running, e.g.
-# STORAGE=local-zfs BRIDGE=vmbr1 bash deploy/lxc-create.sh
+# STORAGE=local-zfs BRIDGE=vmbr1 VLAN_TAG=100 bash deploy/lxc-create.sh
 set -euo pipefail
 
 CTID="${CTID:-$(pvesh get /cluster/nextid)}"
@@ -30,14 +30,41 @@ MEMORY_MB="${MEMORY_MB:-512}"
 CORES="${CORES:-1}"
 BRIDGE="${BRIDGE:-vmbr0}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"   # or e.g. "10.0.0.50/24,gw=10.0.0.1"
+VLAN_TAG="${VLAN_TAG:-}"        # optional, e.g. "100" - leave unset for no tag
 REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
 # Passed straight through to install.sh - see its own
 # comment for what these do.
 INSTALL_CERTBOT="${INSTALL_CERTBOT:-1}"
 CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-rfc2136}"
+ENABLE_HOST_BACKUPS="${ENABLE_HOST_BACKUPS:-}"  # "true"/"false" to skip the prompt below
 
 echo "==> pve-flr-portal LXC setup"
 echo "    CTID=$CTID  HOSTNAME=$CT_HOSTNAME  STORAGE=$STORAGE  DISK=${DISK_GB}G  MEM=${MEMORY_MB}MB"
+
+# Opt-in only, and only asked interactively - a non-interactive run (no
+# ENABLE_HOST_BACKUPS override, no tty) defaults to "false" rather than
+# hanging on `read` or silently patching a Proxmox-owned file. See
+# deploy/patch-pve-host-backups.sh and docs/api-reference.md for the
+# full detail behind this prompt's wording.
+if [ -z "$ENABLE_HOST_BACKUPS" ]; then
+  if [ -t 0 ]; then
+    echo
+    echo "This modifies the Proxmox Storage PBS backend to remove a"
+    echo "limitation preventing the browsing and file-level restore of"
+    echo "host backups, which is necessary for this application to"
+    echo "support them. A benefit is that host backups will also become"
+    echo "browsable in the PVE UI. It reapplies itself automatically"
+    echo "after pve-storage package updates. See"
+    echo "deploy/patch-pve-host-backups.sh for details."
+    read -r -p "Enable host-backup support now? [y/N] " _reply || _reply=""
+    case "$_reply" in
+      [yY]*) ENABLE_HOST_BACKUPS=true ;;
+      *) ENABLE_HOST_BACKUPS=false ;;
+    esac
+  else
+    ENABLE_HOST_BACKUPS=false
+  fi
+fi
 
 # TEMPLATE can still be overridden explicitly (TEMPLATE=debian-12-standard_...
 # bash deploy/lxc-create.sh) for a pinned/offline/reproducible run - but the
@@ -67,6 +94,11 @@ if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
   pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 fi
 
+NET0="name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG}"
+if [ -n "$VLAN_TAG" ]; then
+  NET0="${NET0},tag=${VLAN_TAG}"
+fi
+
 echo "==> Creating container $CTID"
 pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --hostname "$CT_HOSTNAME" \
@@ -76,7 +108,7 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --memory "$MEMORY_MB" \
   --swap 512 \
   --rootfs "${STORAGE}:${DISK_GB}" \
-  --net0 "name=eth0,bridge=${BRIDGE},ip=${IP_CONFIG}" \
+  --net0 "$NET0" \
   --onboot 1 \
   --start 1
 
@@ -88,7 +120,23 @@ done
 
 echo "==> Installing pve-flr-portal inside container $CTID"
 pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null"
-pct exec "$CTID" -- bash -c "git clone --depth 1 '${REPO_URL}' /opt/pve-flr-portal"
+# Full clone (not --depth 1) so the tag lookup below has the full tag
+# history to search - depth-1 clones don't fetch tags at all. Then pin
+# to the latest tagged GitHub Release (docs/dev/versioning.md) rather
+# than leaving the checkout on whatever unreleased commit happens to be
+# on main - issue #89. `deploy/update.sh` (also cloned in) is the
+# supported way to move to a different/later release afterwards.
+pct exec "$CTID" -- bash -c "git clone '${REPO_URL}' /opt/pve-flr-portal"
+pct exec "$CTID" -- bash -c "
+  cd /opt/pve-flr-portal
+  TAG=\$(git tag -l 'v*.*.*' --sort=-v:refname | head -1)
+  if [ -n \"\$TAG\" ]; then
+    echo \"    Checking out latest release: \$TAG\"
+    git checkout --quiet \"\$TAG\"
+  else
+    echo '    No release tags found yet - staying on main'
+  fi
+"
 # install.sh already exists at this path from the clone above - no need
 # to push a local copy over. That push used to assume "$0" (this
 # script's own path) points at a real file on disk, which is only true
@@ -100,9 +148,26 @@ pct exec "$CTID" -- bash -c "git clone --depth 1 '${REPO_URL}' /opt/pve-flr-port
 pct exec "$CTID" -- env "INSTALL_CERTBOT=${INSTALL_CERTBOT}" "CERTBOT_DNS_PLUGIN=${CERTBOT_DNS_PLUGIN}" \
   bash /opt/pve-flr-portal/deploy/install.sh
 
+if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
+  echo "==> Enabling host-backup support on this PVE node"
+  # Runs on the PVE HOST, not inside the container - this script patches
+  # a file that only exists on the host. Same local-clone-vs-curl-piped
+  # fallback install.sh above already has to handle.
+  if [ -f "$(dirname "$0")/patch-pve-host-backups.sh" ]; then
+    bash "$(dirname "$0")/patch-pve-host-backups.sh"
+  else
+    bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/patch-pve-host-backups.sh)"
+  fi
+fi
+
 CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
 echo
 echo "==> Done. pve-flr-portal is running in CT $CTID."
 echo "    https://${CT_IP}:8008/"
 echo "    Edit /opt/pve-flr-portal/.env inside the container for PVE_HOST/PVE_STORAGE,"
 echo "    then: pct exec $CTID -- systemctl restart pve-flr-portal"
+echo "    To update later: pct exec $CTID -- bash /opt/pve-flr-portal/deploy/update.sh"
+if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
+  echo "    Host-backup support patched on THIS node only - on a cluster,"
+  echo "    also run deploy/patch-pve-host-backups.sh on every other node."
+fi

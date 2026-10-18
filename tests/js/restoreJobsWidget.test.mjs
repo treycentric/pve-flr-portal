@@ -14,6 +14,7 @@ function job(overrides = {}) {
     elapsed_seconds: 5,
     error: null,
     cancellable: true,
+    can_cancel: true,
     ...overrides,
   };
 }
@@ -35,7 +36,7 @@ test('activeCount counts only queued/running/verifying jobs', () => {
 test('selectedCancellable reflects the selected job, false when none selected', () => {
   const { restoreJobsWidget } = loadApp();
   const w = restoreJobsWidget();
-  w.jobs = [job({ id: '1', cancellable: true }), job({ id: '2', cancellable: false })];
+  w.jobs = [job({ id: '1', can_cancel: true }), job({ id: '2', can_cancel: false })];
 
   w.selectedId = null;
   assert.equal(w.selectedCancellable, false);
@@ -47,13 +48,24 @@ test('selectedCancellable reflects the selected job, false when none selected', 
   assert.equal(w.selectedCancellable, false);
 });
 
+test('selectedCancellable is false for an active job the session cant cancel (issue #123)', () => {
+  // can_cancel folds in ownership/admin on top of "still active" - a
+  // non-owner, non-admin session must not see the button enabled even
+  // though the job itself is still running.
+  const { restoreJobsWidget } = loadApp();
+  const w = restoreJobsWidget();
+  w.jobs = [job({ id: '1', status: 'running', cancellable: true, can_cancel: false })];
+  w.selectedId = '1';
+  assert.equal(w.selectedCancellable, false);
+});
+
 test('refresh replaces the job list on success', async () => {
   const { restoreJobsWidget } = loadApp();
   const w = restoreJobsWidget();
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
-    assert.equal(url, '/api/restore-jobs');
-    return { ok: true, json: async () => [job()] };
+    assert.equal(url, '/api/restore-jobs?scope=all');
+    return { ok: true, json: async () => ({ jobs: [job()], scope: 'all', can_see_all: true }) };
   };
   try {
     await w.refresh();
@@ -62,6 +74,42 @@ test('refresh replaces the job list on success', async () => {
   }
   assert.equal(w.jobs.length, 1);
   assert.equal(w.jobs[0].id, 'job-1');
+});
+
+test('refresh picks up the server-echoed scope and can_see_all', async () => {
+  const { restoreJobsWidget } = loadApp();
+  const w = restoreJobsWidget();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ jobs: [], scope: 'mine', can_see_all: false }) });
+  try {
+    await w.refresh();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(w.scope, 'mine');
+  assert.equal(w.canSeeAll, false);
+});
+
+test('setScope updates scope and re-fetches, a no-op when unchanged', async () => {
+  const { restoreJobsWidget } = loadApp();
+  const w = restoreJobsWidget();
+  const calledUrls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calledUrls.push(url);
+    return { ok: true, json: async () => ({ jobs: [], scope: 'mine', can_see_all: true }) };
+  };
+  try {
+    w.setScope('all'); // same as current default - no-op
+    assert.equal(calledUrls.length, 0);
+
+    w.setScope('mine');
+    await new Promise((r) => setTimeout(r, 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calledUrls, ['/api/restore-jobs?scope=mine']);
+  assert.equal(w.scope, 'mine');
 });
 
 test('refresh keeps the last known list on a non-ok response', async () => {
@@ -104,7 +152,12 @@ test('cancelSelected posts to the cancel endpoint then refreshes', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
     calls.push({ url, method: opts && opts.method });
-    if (url === '/api/restore-jobs') return { ok: true, json: async () => [job({ id: 'abc', status: 'cancelled', cancellable: false })] };
+    if (url.startsWith('/api/restore-jobs?scope=')) {
+      return {
+        ok: true,
+        json: async () => ({ jobs: [job({ id: 'abc', status: 'cancelled', cancellable: false })], scope: 'all', can_see_all: true }),
+      };
+    }
     return { ok: true, json: async () => job({ id: 'abc', status: 'cancelled' }) };
   };
   try {
@@ -113,7 +166,7 @@ test('cancelSelected posts to the cancel endpoint then refreshes', async () => {
     globalThis.fetch = originalFetch;
   }
   assert.deepEqual(calls[0], { url: '/api/restore-jobs/abc/cancel', method: 'POST' });
-  assert.equal(calls[1].url, '/api/restore-jobs');
+  assert.equal(calls[1].url, '/api/restore-jobs?scope=all');
   assert.equal(w.jobs[0].status, 'cancelled');
 });
 
@@ -128,7 +181,7 @@ test('cancelSelected is a no-op without a cancellable selection', async () => {
     w.selectedId = null;
     await w.cancelSelected();
 
-    w.jobs = [job({ id: 'x', cancellable: false })];
+    w.jobs = [job({ id: 'x', cancellable: false, can_cancel: false })];
     w.selectedId = 'x';
     await w.cancelSelected();
   } finally {
@@ -306,7 +359,7 @@ test('refresh() piggybacks refreshLog() onto the same poll tick while the log vi
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     calledUrls.push(url);
-    if (url === '/api/restore-jobs') return { ok: true, json: async () => [] };
+    if (url.startsWith('/api/restore-jobs?scope=')) return { ok: true, json: async () => ({ jobs: [], scope: 'all', can_see_all: true }) };
     return { ok: true, json: async () => ({ id: 'job-1', status: 'running', log: ['still going'] }) };
   };
   try {
@@ -314,7 +367,7 @@ test('refresh() piggybacks refreshLog() onto the same poll tick while the log vi
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.deepEqual(calledUrls, ['/api/restore-jobs', '/api/restore-jobs/job-1']);
+  assert.deepEqual(calledUrls, ['/api/restore-jobs?scope=all', '/api/restore-jobs/job-1']);
   assert.deepEqual(w.logDetail.log, ['still going']);
 });
 
@@ -326,12 +379,12 @@ test('refresh() does not fetch the log when the viewer is closed', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     calledUrls.push(url);
-    return { ok: true, json: async () => [] };
+    return { ok: true, json: async () => ({ jobs: [], scope: 'all', can_see_all: true }) };
   };
   try {
     await w.refresh();
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.deepEqual(calledUrls, ['/api/restore-jobs']);
+  assert.deepEqual(calledUrls, ['/api/restore-jobs?scope=all']);
 });

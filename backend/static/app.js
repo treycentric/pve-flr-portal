@@ -67,9 +67,16 @@ function restoreJobsWidget() {
   return {
     open: false,
     jobs: [],
+    // Issue #122: "all" unless the server tells us otherwise on the
+    // first response (RESTRICT_JOBS_TO_OWN on means it starts at
+    // "mine" instead) - canSeeAll gates whether the toggle even
+    // renders, since there's no point offering "all" to a restricted,
+    // non-admin user who can't actually use it.
+    scope: 'all',
+    canSeeAll: true,
     selectedId: null,
-    // Drag offset for the modal (docs/plan.md §7.5's UI section) - an
-    // inline transform on the modal box, reset only on a fresh page
+    // Drag offset for the modal - an inline transform on the modal
+    // box, reset only on a fresh page
     // load so the position persists across repeated opens/closes.
     dragX: 0,
     dragY: 0,
@@ -106,8 +113,10 @@ function restoreJobsWidget() {
       return this.jobs.filter((j) => ACTIVE_STATUSES.includes(j.status)).length;
     },
     get selectedCancellable() {
+      // can_cancel (issue #123) folds in ownership/admin, not just
+      // "still active" - the server is the real enforcement either way.
       const job = this.jobs.find((j) => j.id === this.selectedId);
-      return !!job && job.cancellable;
+      return !!job && job.can_cancel;
     },
     init() {
       this.refresh();
@@ -115,14 +124,22 @@ function restoreJobsWidget() {
     },
     async refresh() {
       try {
-        const resp = await apiFetch('/api/restore-jobs');
+        const resp = await apiFetch('/api/restore-jobs?scope=' + encodeURIComponent(this.scope));
         if (!resp.ok) return;
-        this.jobs = await resp.json();
+        const data = await resp.json();
+        this.jobs = data.jobs;
+        this.scope = data.scope;
+        this.canSeeAll = data.can_see_all;
       } catch (e) {
         // Transient failure - keep showing the last known list rather
         // than flashing it empty on every hiccup.
       }
       if (this.logOpen) await this.refreshLog();
+    },
+    setScope(scope) {
+      if (scope === this.scope) return;
+      this.scope = scope;
+      this.refresh();
     },
     async cancelSelected() {
       if (!this.selectedId || !this.selectedCancellable) return;
@@ -298,7 +315,12 @@ function userMenu(identity) {
     },
     logout() {
       this.open = false;
-      window.location = '/logout';
+      // POST, not a GET navigation - a cross-site link/img must not be able to log the user out.
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = '/logout';
+      document.body.appendChild(form);
+      form.submit();
     },
   };
 }
@@ -311,7 +333,7 @@ function fileGridState() {
     sortKey: 'name',
     sortDir: 'asc',
 
-    // --- PH.5 restore modal (docs/plan.md §7.5) ---
+    // --- PH.5 restore modal (docs/push-to-guest.md) ---
     restoreOpen: false,
     restoreDestDir: '',
     restoreOverwrite: false,
@@ -331,7 +353,7 @@ function fileGridState() {
     restoreError: null,
     restoreSubmitted: false,
     // Browsing the guest filesystem needs VM.GuestAgent.Unrestricted
-    // (guest-exec, no dedicated QGA listing command - docs/plan.md §7.5),
+    // (guest-exec, no dedicated QGA listing command - docs/push-to-guest.md),
     // so it's only offered when that's available; otherwise restoreDestDir
     // stays a plain typed field.
     restoreBrowseAvailable: false,
@@ -517,7 +539,7 @@ function fileGridState() {
         body.set('restore_ownership', this.restoreOwnership ? 'true' : 'false');
         if (this.isSingleFile) {
           // Single-leaf-file restore - unchanged from before multi-file
-          // restore existed (docs/plan.md §7.7, issue #24).
+          // restore existed (docs/push-to-guest.md, issue #24).
           body.set('filepath', sel[0].filepath);
           body.set('name', sel[0].name);
           body.set('restore_metadata', this.restoreMetadata ? 'true' : 'false');
@@ -680,7 +702,7 @@ function portalApp(rawSnapshots, guest) {
     history: [],
     historyIndex: -1,
 
-    // --- PH.5 restore state (docs/plan.md §7.5) ---
+    // --- PH.5 restore state (docs/push-to-guest.md) ---
     // {type, vmid, label} for the currently-viewed guest - static for the
     // whole page load (switching guest is a full navigation, see taskPicker's
     // confirm()), so capabilities are fetched once here rather than on every

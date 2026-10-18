@@ -1,3 +1,4 @@
+import dataclasses
 import time
 
 import httpx
@@ -84,6 +85,89 @@ async def test_login_bad_credentials_raises_401():
     respx.post(f"{API}/access/ticket").mock(return_value=httpx.Response(401, json={"data": None}))
     with pytest.raises(HTTPException) as exc:
         await auth.login("alice@pam", "wrong")
+    assert exc.value.status_code == 401
+    assert auth._sessions == {}
+
+
+@respx.mock
+async def test_login_with_2fa_raises_tfa_required(monkeypatch):
+    """Issue #15: PVE's own AccessControl.pm returns NeedTFA plus an
+    opaque intermediate ticket (never a real session) rather than a
+    401/200 login - confirmed against PVE's own source, not guessed."""
+    respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "!tfa!opaque-challenge-blob",
+                    "CSRFPreventionToken": "csrf-1",
+                    "NeedTFA": 1,
+                }
+            },
+        )
+    )
+    with pytest.raises(auth.TFARequired) as exc:
+        await auth.login("alice@pam", "hunter2")
+    assert exc.value.username == "alice@pam"
+    assert exc.value.challenge == "!tfa!opaque-challenge-blob"
+    assert auth._sessions == {}
+
+
+@respx.mock
+async def test_finish_tfa_login_totp_success_stores_session():
+    route = respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "PVE:alice@pam:REALTICKET",
+                    "CSRFPreventionToken": "csrf-2",
+                }
+            },
+        )
+    )
+    session_id = await auth.finish_tfa_login("alice@pam", "123456", "!tfa!opaque-challenge-blob")
+    assert session_id in auth._sessions
+    assert auth._sessions[session_id].ticket == "PVE:alice@pam:REALTICKET"
+    sent = route.calls.last.request.read().decode()
+    # A live-reported real bug (2026-09-30): PVE's own web UI
+    # (proxmox-widget-toolkit's TfaWindow.js) prefixes the response with
+    # which method it's for - a bare code is rejected outright,
+    # regardless of correctness. The colon is form-urlencoded as %3A.
+    assert "password=totp%3A123456" in sent
+    assert "tfa-challenge=" in sent
+    assert "otp=" not in sent
+
+
+@respx.mock
+async def test_finish_tfa_login_recovery_key_success_stores_session():
+    """A recovery key (xxxx-xxxx-xxxx-xxxx hex groups, never a bare
+    6-8 digit number - per the same widget's own input validation) gets
+    the 'recovery:' prefix instead of 'totp:'."""
+    route = respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "PVE:alice@pam:REALTICKET",
+                    "CSRFPreventionToken": "csrf-2",
+                }
+            },
+        )
+    )
+    await auth.finish_tfa_login("alice@pam", "a1b2-c3d4-e5f6-0789", "!tfa!opaque-challenge-blob")
+    sent = route.calls.last.request.read().decode()
+    assert "password=recovery%3Aa1b2-c3d4-e5f6-0789" in sent
+
+
+@respx.mock
+async def test_finish_tfa_login_bad_code_raises_401():
+    respx.post(f"{API}/access/ticket").mock(return_value=httpx.Response(401, json={"data": None}))
+    with pytest.raises(HTTPException) as exc:
+        await auth.finish_tfa_login("alice@pam", "000000", "!tfa!opaque-challenge-blob")
     assert exc.value.status_code == 401
     assert auth._sessions == {}
 
@@ -203,9 +287,9 @@ async def test_get_session_keepalive_still_evicts_on_idle_timeout(session_data):
 
 @respx.mock
 async def test_ensure_fresh_ticket_refreshes_when_stale(session_data):
-    """The standalone helper background restore jobs use (docs/plan.md
-    §7.5) - same policy as get_session()'s inline check, callable without
-    a request/session-store round trip."""
+    """The standalone helper background restore jobs use
+    (docs/push-to-guest.md) - same policy as get_session()'s inline
+    check, callable without a request/session-store round trip."""
     route = respx.post(f"{API}/access/ticket").mock(
         return_value=httpx.Response(
             200,
@@ -222,6 +306,29 @@ async def test_ensure_fresh_ticket_refreshes_when_stale(session_data):
     await auth.ensure_fresh_ticket(session_data)
     assert route.called
     assert session_data.ticket == "PVE:alice@pam:FRESH2"
+
+
+@respx.mock
+async def test_ensure_fresh_ticket_refreshes_cap(session_data):
+    """Issue #122: `cap` (used by is_job_admin) must be kept current on
+    every ticket refresh, not just captured once at login - a role
+    change on PVE's side should take effect on the next refresh."""
+    respx.post(f"{API}/access/ticket").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "username": "alice@pam",
+                    "ticket": "PVE:alice@pam:FRESH3",
+                    "CSRFPreventionToken": "csrf-fresh3",
+                    "cap": {"dc": {"Sys.Audit": 1}},
+                }
+            },
+        )
+    )
+    session_data.ticket_issued_at = time.time() - (auth._TICKET_REFRESH_AGE_SECONDS + 60)
+    await auth.ensure_fresh_ticket(session_data)
+    assert session_data.cap == {"dc": {"Sys.Audit": 1}}
 
 
 @respx.mock
@@ -267,3 +374,28 @@ async def test_get_session_refreshes_stale_ticket(session_data):
     assert route.called
     assert session_data.ticket == "PVE:alice@pam:FRESH"
     assert session_data.csrf_token == "csrf-fresh"
+
+
+def test_is_job_admin_false_with_no_cap(session_data):
+    assert session_data.cap == {}
+    assert auth.is_job_admin(session_data) is False
+
+
+def test_is_job_admin_false_when_privilege_elsewhere(session_data):
+    # Granted on a VM/storage subtree, not at the bare root "/" - compute_api_permission
+    # buckets that under its resource type (e.g. "vms"), never "dc".
+    session_data.cap = {"vms": {"Sys.Audit": 1}}
+    assert auth.is_job_admin(session_data) is False
+
+
+def test_is_job_admin_true_with_dc_privilege(session_data):
+    session_data.cap = {"dc": {"Sys.Audit": 1}}
+    assert auth.is_job_admin(session_data) is True
+
+
+def test_is_job_admin_respects_configured_privilege_name(session_data, monkeypatch):
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, job_admin_privilege="Sys.Modify"))
+    session_data.cap = {"dc": {"Sys.Audit": 1}}
+    assert auth.is_job_admin(session_data) is False
+    session_data.cap = {"dc": {"Sys.Modify": 1}}
+    assert auth.is_job_admin(session_data) is True

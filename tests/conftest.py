@@ -7,17 +7,29 @@ before test collection) covers every test module.
 """
 
 import os
+import tempfile
 
 os.environ.setdefault("PVE_HOST", "pve.test.local")
 os.environ.setdefault("PVE_STORAGE", "pbs")
 os.environ.setdefault("PVE_VERIFY_SSL", "false")
 os.environ.setdefault("SESSION_IDLE_TIMEOUT_MINUTES", "30")
-# Design C (docs/plan.md §7.6, issue #22) tests assume this is unconfigured
+# PH.6 (issue #109)'s dir_cache persists to a real file under this dir -
+# an isolated tmp dir for the whole test session, same "never leak into
+# a hermetic test run" reasoning as RESTORE_DATA_NICS below, so tests
+# never touch (or get polluted by) a developer's real ./data directory.
+os.environ.setdefault("PFR_DATA_DIR", tempfile.mkdtemp(prefix="pve-flr-portal-tests-"))
+# Direct Network Transfer (docs/push-to-guest.md) tests assume this is unconfigured
 # unless a test opts in itself (test_restore_runner.py's _with_data_nics) -
 # pinned here for the same reason as the rest of this block: a developer's
 # own real .env (e.g. while setting up live verification) must never leak
 # into what's supposed to be a hermetic test run.
 os.environ.setdefault("RESTORE_DATA_NICS", "[]")
+# Issue #122's job-visibility scoping is opt-in - pinned off here for the
+# same "a developer's real .env must never leak into a hermetic test
+# run" reason as the rest of this block. Individual tests that want it
+# on monkeypatch `main.settings` directly (dataclasses.replace(), since
+# Settings is frozen) rather than relying on this default.
+os.environ.setdefault("RESTRICT_JOBS_TO_OWN", "false")
 
 import time
 from pathlib import Path
@@ -82,8 +94,8 @@ def clear_restore_jobs():
 @pytest.fixture(autouse=True)
 def clear_restore_download_tokens():
     """Same leak-between-tests convention as sessions/restore jobs above,
-    for Design C's (docs/plan.md §7.6, issue #22) single-use download
-    tokens."""
+    for Direct Network Transfer's (docs/push-to-guest.md) single-use
+    download tokens."""
     from backend import restore_download
 
     restore_download.clear()
@@ -115,6 +127,31 @@ def clear_list_path_state():
     pve_client.clear_list_path_state()
     yield
     pve_client.clear_list_path_state()
+
+
+@pytest.fixture(autouse=True)
+def clear_dir_cache():
+    """PH.6 (issue #109): dir_cache persists to disk (PFR_DATA_DIR, set
+    to a shared tmp dir for the whole test session above) - without
+    this, a listing cached by one test would silently short-circuit a
+    later test's own mocked PVE response, same leak-between-tests
+    convention as the other fixtures here."""
+    from backend import dir_cache
+
+    dir_cache.clear()
+    yield
+    dir_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_job_history():
+    """job_history persists to disk (same shared tmp dir as dir_cache
+    above) - keep rows from leaking between tests."""
+    from backend import job_history
+
+    job_history.clear()
+    yield
+    job_history.clear()
 
 
 @pytest.fixture(autouse=True)
