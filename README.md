@@ -448,38 +448,116 @@ Run on the PVE host itself:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/lxc-create.sh)"
 ```
 
-Guided setup at a real terminal - a welcome screen, then a short
-Back/Next wizard for the essentials (container ID, hostname, storage,
-network - bridge, VLAN, IPv4 and IPv6 configuration and DNS - PVE host, which PBS storage(s) to browse, Direct Network
-Transfer, and optional host-backup support), then a review screen where you can change
-anything before it starts. Advanced settings (resource sizing, portal
-port and theme, job visibility, performance limits, Direct Network
-Transfer's subnet/hostname/TLS policy, and a Let's Encrypt/ACME
-certificate) live
-behind "Advanced settings" on that screen and keep their defaults unless
-you change them. Creates an
-unprivileged Debian 12 container, checks out the latest tagged release,
-installs the app, writes your answers straight into the container's
-`.env`, and starts it as a systemd service (`pve-flr-portal`).
+Guided setup at a real terminal: a welcome screen, then a short
+Back/Next wizard for the essentials, then a review screen where you can
+change anything before it starts.
 
-Every question can also be answered up front via an environment
-variable (`CTID`/`STORAGE`/`BRIDGE`/`PVE_HOST`/etc. - see the top of the
-script for the full list), which skips that question in the wizard - so a
-scripted/unattended run (e.g. `STORAGE=local-zfs BRIDGE=vmbr1 bash
-deploy/lxc-create.sh`) works exactly as before, and a piped run with no
-terminal attached silently takes defaults for anything not pre-set
-instead of hanging on a prompt nobody can answer.
+- **Wizard:** container ID, hostname, container storage, network (bridge,
+  VLAN, IPv4, IPv6, and DNS when you enter an address by hand), the PVE host,
+  which PBS storage(s) to browse, Direct Network Transfer (on by default,
+  using the container's own subnet and address - see "Restore to Guest"), and
+  optional host-backup support.
+- **Review screen:** every setting above, plus "Advanced settings" - resource
+  sizing, portal port and theme, restore-job visibility, performance limits,
+  Direct Network Transfer's subnet/hostname/TLS policy, and a Let's
+  Encrypt/ACME certificate. Advanced settings keep their defaults unless you
+  change them.
+- **Result:** an unprivileged Debian 12 container (tagged `pve-flr-portal`)
+  running the latest tagged release as a systemd service, with your answers
+  written into its `.env`, and the `pve-flr-portal` management command
+  installed on the PVE host (below).
+
+Every question can also be answered up front via an environment variable
+(`CTID`/`STORAGE`/`BRIDGE`/`PVE_HOST`/etc. - see the top of the script and
+`deploy/lib/settings.sh` for the full list), which skips that question in the
+wizard - so a scripted/unattended run (e.g. `STORAGE=local-zfs BRIDGE=vmbr1
+bash deploy/lxc-create.sh`) works without prompts, and a run with no terminal
+attached silently takes defaults for anything not pre-set instead of hanging
+on a prompt nobody can answer.
+
+IPv6 can be SLAAC (the default), DHCPv6, static, or disabled; IPv4 is DHCP or
+static. IPv4 can't be turned off: the portal listens on IPv4 only and the
+install and update fetch from GitHub, which is IPv4-only.
+
+**What is fetched, and from where.** The command above runs
+`deploy/lxc-create.sh` from `main`; to pin the installer itself, use a release
+tag in the URL (e.g. `.../v1.9.0/deploy/lxc-create.sh`). Everything else comes
+from the latest tagged release (falling back to `main` only if there is none,
+or the release predates the file): the shared settings library the installer
+uses, the app and its scripts in the container's checkout, and the host-backup
+patch and management command, which are copied out of that checkout so they
+always match the installed release.
+
+To install a specific version instead of the latest release - a tag, or a
+branch to try work that isn't released yet - set `PFR_VERSION`, e.g.
+`PFR_VERSION=v1.9.0 bash deploy/lxc-create.sh`. The shared library and the
+management tools then come from that version too.
 
 Already have a container? Run `deploy/install.sh` inside it instead
 (non-interactive - edit `.env` by hand). Rationale for LXC over a
 Debian package on the host or a full VM/OVA is in
 `docs/archive/design-rationale.md`.
 
+**Managing an install from the PVE host**:
+
+The installer puts a `pve-flr-portal` command in `/usr/local/sbin` (also
+linked as `pve-flr-portal-config` and `pve-flr-portal-update`). Run it as root
+on the node that hosts the container:
+
+| Command | What it does |
+|---|---|
+| `pve-flr-portal config [CTID]` | A welcome screen, then the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
+| `pve-flr-portal update [CTID] [version]` | Runs `update.sh` in the container (see "Updating"). |
+| `pve-flr-portal status [CTID]` | Installed version, service state and address. |
+| `pve-flr-portal list` | The containers it manages, with their versions. |
+| `pve-flr-portal adopt [CTID...]` | Starts managing existing installs (below). |
+
+Containers are found by their Proxmox tag, `pve-flr-portal`, which the
+installer sets - so they show up in the Proxmox UI too. With more than one you
+are asked which (or pass the CTID). Containers on other cluster nodes have to
+be managed from those nodes.
+
+`config` changes two kinds of settings, in one step:
+
+- **The portal's `.env`:** PVE host, PBS storage(s), port, certificate
+  verification, idle timeout, theme, job visibility and retention, limits, and
+  Direct Network Transfer. Only the settings you change are written, so
+  comments and anything else in `.env` are left as they are; the service is
+  restarted afterwards.
+- **The container's network:** hostname, bridge, VLAN, IPv4, IPv6 and DNS
+  (applied with `pct set`; fields the tool doesn't manage, such as the MAC
+  address, are kept). This restarts the container - the portal is
+  unavailable for a minute or so and everyone is logged out - and if the
+  container isn't reachable afterwards the previous network settings are
+  restored automatically. If Direct Network Transfer was using the
+  container's own (auto-detected) address, it follows the change; an address
+  you entered by hand is kept, with a warning if it no longer matches.
+
+Container resources and storage aren't changed here - use Proxmox for those.
+Several Direct Network Transfer networks (more than one entry in
+`RESTORE_DATA_NICS`) show as "Custom" and are left untouched; edit `.env` for
+those.
+
+*Installs made before the management command existed.* Update the container
+once so it has the tools - `pct exec <CTID> -- bash
+/opt/pve-flr-portal/deploy/update.sh` - then install the command on the host
+and adopt it:
+
+```
+pct pull <CTID> /opt/pve-flr-portal/deploy/host/pve-flr-portal /usr/local/sbin/pve-flr-portal
+chmod 755 /usr/local/sbin/pve-flr-portal
+ln -s pve-flr-portal /usr/local/sbin/pve-flr-portal-config
+ln -s pve-flr-portal /usr/local/sbin/pve-flr-portal-update
+pve-flr-portal adopt
+```
+
 **Updating**:
 
-Run `bash deploy/update.sh` inside the container/host to
-update to the latest release, `bash deploy/update.sh v1.4.0` (or
-`1.4.0`) to pin to a specific one, or `bash deploy/update.sh main` for
+`pve-flr-portal update` updates the chosen container to the latest release;
+`pve-flr-portal update 207 v1.4.0` (or `1.4.0`) pins CT 207 to a specific one.
+It runs `deploy/update.sh` inside the container, which you can also run
+yourself: `bash deploy/update.sh` for the latest release, `bash deploy/update.sh
+v1.4.0` (or `1.4.0`) to pin, or `bash deploy/update.sh main` for
 unreleased/bleeding-edge work. Reinstalls dependencies if
 `requirements.txt` changed and restarts the service; refuses to run if
 the install directory has local/uncommitted changes rather than

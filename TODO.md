@@ -90,6 +90,14 @@ with the fix, test, and commit.
   escape hatch on every prompt, resolved settings written into the
   container's `.env` automatically, inline Let's Encrypt setup (#52).
   See docs/archive/design-rationale.md.
+  - **Management commands (#91 follow-up)** — plan on the issue. Stage 1
+    **SHIPPED**: container tagging, the shared settings library
+    (`deploy/lib/settings.sh`), the `pve-flr-portal` host command, and
+    `pve-flr-portal config` (portal `.env` + container network, with
+    rollback). Remaining: stage 2 `update` proper (version check, refresh
+    the host-side pieces, optional pre-update snapshot, `--all`); stage 3
+    `status` extras, host-backup and certificate actions, uninstall (#93);
+    stage 4 container resources (`pct set` / grow-only `pct resize`).
 - #92 — submit pve-flr-portal to community-scripts.org (ProxmoxVED).
   Deliberately separate from #91 — needs a purpose-built script pair
   against their own conventions (root-run, `uv`, no dedicated service

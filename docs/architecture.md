@@ -322,6 +322,48 @@ issues against RSA (certbot's default moved to ECDSA) and/or wants a
 non-default key size. Both land in the same `renewalparams` as
 `--server`, so renewal stays consistent automatically.
 
+## Deployment and management
+
+The recommended deployment is an unprivileged LXC container on the PVE host
+(`deploy/lxc-create.sh`, run from the host). Management stays on the host
+side, as plain shell, with no extra service and no state beyond what the
+portal already keeps:
+
+- **Discovery by tag.** The installer tags the container `pve-flr-portal`
+  (a Proxmox tag, visible in the UI, and carried along by migration and
+  restore-from-backup). `pve-flr-portal adopt` tags an older install.
+  Nothing is recorded in a host-side list that could go stale.
+- **A thin host command.** `/usr/local/sbin/pve-flr-portal`
+  (`deploy/host/pve-flr-portal`, also linked as `pve-flr-portal-config` and
+  `pve-flr-portal-update`) lists the tagged containers on this node, asks
+  which one if there are several, and runs the real tools from *that
+  container's own checkout* (copied out with `pct pull`). The tools therefore
+  always match the installed release, and new settings appear without
+  touching the host. The same pattern is used for the host-backup patch.
+- **A shared settings library.** `deploy/lib/settings.sh` holds the settings
+  registry (each setting's label, default, validation and `.env` key), the
+  whiptail dialogs (with a plain-prompt fallback), and the helpers that build
+  and parse a container's `net0` and read and patch its `.env`. The installer
+  (`lxc-create.sh`) and the management tool (`deploy/pfr-manage.sh`) both
+  source it, in `install` and `config` mode respectively. A curl-piped
+  installer fetches it from the latest release (falling back to `main` if
+  the release predates it or has a different `PFR_LIB_API`).
+- **`config`** reads the container's `pct config` (hostname, `net0`, DNS),
+  an IPv6-off marker in the container, and its `.env`; shows the same review
+  screen as the installer, minus what can't change after install; and on
+  apply does network changes first - `pct set`, a restart, a wait for the
+  container to answer, an automatic rollback if it doesn't - then writes only
+  the changed keys to `.env` and restarts the service. `.env` is patched
+  in place by a small Python script inside the container, so JSON values
+  such as `RESTORE_DATA_NICS` need no shell escaping.
+- **Direct Network Transfer follows the container.** With no subnet/address
+  entered by hand, the installer and `config` derive `RESTORE_DATA_NICS` from
+  the container's own IPv4 address; `config` re-derives it when that address
+  changes, and leaves a hand-entered or multi-network value alone.
+
+The scripts are tested without a PVE host against a fake `pct`
+(`tests/fakes/pct`; see `tests/README.md`).
+
 ## Stack
 
 - **Backend:** Python, FastAPI — one process, typed surface for a

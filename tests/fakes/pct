@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# A stand-in for Proxmox's `pct`, for tests of the deploy scripts. State lives
+# under $FAKE_PVE:
+#   ct/<id>/config      the `pct config` output
+#   ct/<id>/status      running | stopped
+#   ct/<id>/fs/...      the container's files (pull/push/exec test|cat)
+#   ct/<id>/addr        what `ip -4 -o addr show dev eth0` reports (CIDR)
+#   ct/<id>/bad_net     text; while the configured net0 contains it, the
+#                       container is unreachable (exec fails, no address)
+#   ct/<id>/dhcp_addr   the address a DHCP lease gives after a reboot
+#   ct/<id>/noping      present: no `ping` inside
+#   calls.log           every invocation, one per line
+set -uo pipefail
+d="${FAKE_PVE:?FAKE_PVE not set}"
+echo "pct $*" >> "$d/calls.log"
+cmd="${1:-}"
+shift || true
+
+ct() { echo "$d/ct/$1"; }
+# broken ID - is the container currently unreachable (its net0 matches bad_net)?
+broken() {
+  [ -f "$(ct "$1")/bad_net" ] && grep -q -- "$(cat "$(ct "$1")/bad_net")" "$(ct "$1")/config"
+}
+need() { [ -d "$(ct "$1")" ] || { echo "Configuration file 'nodes/x/lxc/$1.conf' does not exist" >&2; exit 2; }; }
+
+# set_cfg ID KEY VALUE - replace (or add) a "KEY: value" line in the config.
+set_cfg() {
+  local f; f="$(ct "$1")/config"
+  grep -v "^$2:" "$f" > "$f.new" || true
+  printf '%s: %s\n' "$2" "$3" >> "$f.new"
+  mv "$f.new" "$f"
+}
+del_cfg() {
+  local f; f="$(ct "$1")/config"
+  grep -v "^$2:" "$f" > "$f.new" || true
+  mv "$f.new" "$f"
+}
+
+case "$cmd" in
+  list)
+    echo "VMID       Status     Lock         Name"
+    for c in "$d"/ct/*; do
+      [ -d "$c" ] || continue
+      id="$(basename "$c")"
+      name="$(sed -n 's/^hostname: *//p' "$c/config")"
+      if [ -f "$c/lock" ]; then
+        printf '%-10s %-10s %-12s %s\n' "$id" "$(cat "$c/status")" "$(cat "$c/lock")" "$name"
+      else
+        printf '%-10s %-10s %s\n' "$id" "$(cat "$c/status")" "$name"
+      fi
+    done
+    ;;
+  config)
+    need "$1"
+    cat "$(ct "$1")/config"
+    ;;
+  status)
+    need "$1"
+    echo "status: $(cat "$(ct "$1")/status")"
+    ;;
+  set)
+    id="$1"; shift
+    need "$id"
+    echo "set $id $*" >> "$d/set.log"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --tags) set_cfg "$id" tags "$2"; shift 2 ;;
+        --net0) set_cfg "$id" net0 "$2"; shift 2 ;;
+        --hostname) set_cfg "$id" hostname "$2"; shift 2 ;;
+        --nameserver) set_cfg "$id" nameserver "$2"; shift 2 ;;
+        --searchdomain) set_cfg "$id" searchdomain "$2"; shift 2 ;;
+        --delete) del_cfg "$id" "$2"; shift 2 ;;
+        *) echo "fake pct: unsupported set option $1" >&2; exit 1 ;;
+      esac
+    done
+    ;;
+  start) need "$1"; echo running > "$(ct "$1")/status" ;;
+  stop) need "$1"; echo stopped > "$(ct "$1")/status" ;;
+  reboot)
+    need "$1"
+    echo "reboot $1" >> "$d/set.log"
+    # A reboot applies the configured network: a static address shows up on
+    # eth0 unless the test says the container ends up unreachable.
+    net0="$(sed -n 's/^net0: *//p' "$(ct "$1")/config")"
+    ip="$(printf '%s' "$net0" | tr ',' '\n' | sed -n 's/^ip=//p')"
+    case "$ip" in
+      dhcp) [ -f "$(ct "$1")/dhcp_addr" ] && cp "$(ct "$1")/dhcp_addr" "$(ct "$1")/addr" ;;
+      manual|"") ;;
+      *) echo "$ip" > "$(ct "$1")/addr" ;;
+    esac
+    ;;
+  pull)
+    id="$1"; src="$2"; dst="$3"
+    need "$id"
+    # Like the real thing for a missing source: report success, leave an empty file.
+    if [ -f "$(ct "$id")/fs$src" ]; then
+      cp "$(ct "$id")/fs$src" "$dst"
+    else
+      : > "$dst"
+    fi
+    ;;
+  push)
+    id="$1"; src="$2"; dst="$3"
+    need "$id"
+    mkdir -p "$(dirname "$(ct "$id")/fs$dst")"
+    cp "$src" "$(ct "$id")/fs$dst"
+    ;;
+  exec)
+    id="$1"; shift
+    need "$id"
+    shift # --
+    prog="$1"; shift
+    case "$prog" in
+      true) broken "$id" && exit 1; exit 0 ;;
+      test) [ "$1" = "-f" ] && [ -f "$(ct "$id")/fs$2" ]; exit $? ;;
+      cat) [ -f "$(ct "$id")/fs$1" ] && cat "$(ct "$id")/fs$1"; exit $? ;;
+      rm) shift; rm -f "$(ct "$id")/fs$1" ;;
+      python3)
+        args=()
+        for a in "$@"; do
+          case "$a" in
+            /opt/*|/tmp/*) args+=("$(ct "$id")/fs$a") ;;
+            *) args+=("$a") ;;
+          esac
+        done
+        exec python3 "${args[@]}"
+        ;;
+      systemctl) echo "systemctl $*" >> "$d/exec.log"; [ "$1" = "is-active" ] && { [ "${2:-}" = "--quiet" ] || echo active; }; exit 0 ;;
+      hostname) echo "192.168.1.50" ;;
+      bash) echo "bash $*" >> "$d/exec.log" ;;
+      ping) broken "$id" && exit 1; exit 0 ;;
+      sh)
+        script="$2"
+        case "$script" in
+          *"ip -4"*) broken "$id" || cat "$(ct "$id")/addr" 2>/dev/null ;;
+          *"command -v ping"*) [ ! -f "$(ct "$id")/noping" ]; exit $? ;;
+          *sysctl*) echo "sysctl-script: $script" >> "$d/exec.log" ;;
+          *) echo "fake pct: unsupported sh -c: $script" >&2; exit 1 ;;
+        esac
+        ;;
+      *) echo "fake pct: unsupported exec $prog" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake pct: unsupported command $cmd" >&2; exit 1 ;;
+esac
