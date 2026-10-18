@@ -322,3 +322,14 @@ def test_status_says_whether_an_update_is_available(pve):
 def test_status_says_when_up_to_date(pve):
     _updatable(pve, version="1.10.0")
     assert "(up to date)" in stub(pve, "status").stdout
+
+
+def test_update_does_not_replace_the_host_command_with_an_empty_file_when_the_release_lacks_it(pve):
+    # `pct pull` leaves an empty file for a missing source - it must not be installed.
+    _updatable(pve)
+    sbin = pve.root / "sbin"
+    _write(sbin / "pve-flr-portal", "#!/usr/bin/env bash\necho keep-me\n")
+    result = stub(pve, "update", "-y")
+    assert result.returncode == 0, result.stderr
+    assert "keep-me" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
+    assert not (sbin / "pve-flr-portal-patch-host-backups.sh").exists()
