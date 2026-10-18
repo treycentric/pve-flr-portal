@@ -448,18 +448,22 @@ Run on the PVE host itself:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/lxc-create.sh)"
 ```
 
-Guided setup at a real terminal - asks for the container ID,
-hostname, network, and which PBS storage to browse, with sensible
-defaults for everything else; answer yes to "configure advanced
-options" for resource sizing, Direct Network Transfer, its TLS policy,
-and setting up a Let's Encrypt certificate on the spot. Creates an
+Guided setup at a real terminal - a welcome screen, then a short
+Back/Next wizard for the essentials (container ID, hostname, storage,
+network, PVE host, which PBS storage(s) to browse, and optional
+host-backup support), then a review screen where you can change
+anything before it starts. Advanced settings (resource sizing, portal
+port and theme, job visibility, performance limits, Direct Network
+Transfer and its TLS policy, and a Let's Encrypt/ACME certificate) live
+behind "Advanced settings" on that screen and keep their defaults unless
+you change them. Creates an
 unprivileged Debian 12 container, checks out the latest tagged release,
 installs the app, writes your answers straight into the container's
 `.env`, and starts it as a systemd service (`pve-flr-portal`).
 
 Every question can also be answered up front via an environment
 variable (`CTID`/`STORAGE`/`BRIDGE`/`PVE_HOST`/etc. - see the top of the
-script for the full list), which skips that question entirely - so a
+script for the full list), which skips that question in the wizard - so a
 scripted/unattended run (e.g. `STORAGE=local-zfs BRIDGE=vmbr1 bash
 deploy/lxc-create.sh`) works exactly as before, and a piped run with no
 terminal attached silently takes defaults for anything not pre-set
