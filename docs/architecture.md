@@ -356,6 +356,12 @@ portal already keeps:
   the changed keys to `.env` and restarts the service. `.env` is patched
   in place by a small Python script inside the container, so JSON values
   such as `RESTORE_DATA_NICS` need no shell escaping.
+- **`install`** creates a container without a checkout: it downloads
+  `lxc-create.sh` from GitHub by the same ref order as `host-tools` (the
+  latest release, `PFR_VERSION`, then `main`), checks that it parses and is
+  the installer, and runs it at the terminal. `install-host-tools.sh
+  --install` chains that after installing the command, for a one-command
+  start.
 - **Installing the host command** needs no container: `deploy/install-host-tools.sh`
   (curl-pipeable) fetches the stub from the latest release - or `PFR_VERSION`,
   or `main` if the release predates it - or copies it from a container's

@@ -559,3 +559,59 @@ def test_host_tools_rejects_something_that_is_not_a_container_id(pve):
     result = stub(pve, "host-tools", "not-an-id")
     assert result.returncode != 0
     assert "not a container ID" in result.stderr
+
+
+# --- install: create a new container from the installer on GitHub ----------------------
+
+FAKE_INSTALLER = (
+    '#!/usr/bin/env bash\nPFR_LIB_API_WANTED=1\necho "INSTALLER-RAN args=[$*] version=[${PFR_VERSION:-}]"\n'
+)
+
+
+def test_install_downloads_the_installer_from_the_latest_release_and_runs_it(pve):
+    raw = _raw(pve, "v1.9.0", **{"lxc-create.sh": FAKE_INSTALLER})
+    result = stub(pve, "install", env=_github_env(pve, raw))
+    assert result.returncode == 0, result.stderr
+    assert "INSTALLER-RAN" in result.stdout
+    assert "Using the installer from v1.9.0" in result.stderr
+    assert "Fetching the installer from GitHub - please wait" in result.stderr
+
+
+def test_install_falls_back_to_main_and_honours_pfr_version(pve):
+    raw = _raw(pve, "main", **{"lxc-create.sh": FAKE_INSTALLER})
+    result = stub(pve, "install", env=_github_env(pve, raw))
+    assert result.returncode == 0, result.stderr
+    assert "Using the installer from main" in result.stderr
+
+    raw = _raw(pve, "my-branch", **{"lxc-create.sh": FAKE_INSTALLER})
+    result = stub(pve, "install", env={**_github_env(pve, raw), "PFR_VERSION": "my-branch"})
+    assert "Using the installer from my-branch" in result.stderr
+    assert "version=[my-branch]" in result.stdout  # the installer sees it too, so it installs the same version
+
+
+def test_install_passes_its_arguments_to_the_installer(pve):
+    raw = _raw(pve, "v1.9.0", **{"lxc-create.sh": FAKE_INSTALLER})
+    result = stub(pve, "install", "--some-option", env=_github_env(pve, raw))
+    assert "args=[--some-option]" in result.stdout
+
+
+def test_install_never_runs_something_that_is_not_the_installer(pve):
+    for content in ("", "<html>404: Not Found</html>\n", "#!/usr/bin/env bash\necho not-the-installer\n"):
+        raw = _raw(pve, "v1.9.0", **{"lxc-create.sh": content})
+        result = stub(pve, "install", env=_github_env(pve, raw))
+        assert result.returncode != 0
+        assert "not-the-installer" not in result.stdout
+        assert "Could not download the installer" in result.stderr
+
+
+def test_install_says_so_when_github_cannot_be_reached(pve):
+    result = stub(pve, "install", env=_github_env(pve, pve.root / "raw"))
+    assert result.returncode != 0
+    assert "Could not download the installer from GitHub" in result.stderr
+
+
+def test_install_leaves_no_temp_files_behind(pve):
+    raw = _raw(pve, "v1.9.0", **{"lxc-create.sh": FAKE_INSTALLER})
+    stub(pve, "install", env=_github_env(pve, raw))
+    stub(pve, "install", env=_github_env(pve, pve.root / "nothing"))
+    assert list(pve.tmpdir.iterdir()) == []

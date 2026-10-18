@@ -5,7 +5,15 @@
 #
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)"
 #
-#   bash install-host-tools.sh [CTID]
+#   bash install-host-tools.sh [CTID] [--install]
+#
+# --install then runs `pve-flr-portal install` (the guided installer) as soon
+# as the command is in place - one command from nothing to a new container:
+#
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)" install-host-tools --install
+#
+# (Written with `bash -c`, not `curl ... | bash`, so the installer's dialogs
+# keep the terminal.)
 #
 # With a CTID the command is copied from that container's own checkout (the
 # release it runs). Without one it is downloaded from GitHub: PFR_VERSION (a
@@ -20,7 +28,14 @@ set -euo pipefail
 SBIN="${PFR_SBIN:-/usr/local/sbin}"
 REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
 APP_DIR="/opt/pve-flr-portal"
-CTID="${1:-}"
+CTID=""
+RUN_INSTALL=0
+for arg in "$@"; do
+  case "$arg" in
+    --install) RUN_INSTALL=1 ;;
+    *) CTID="$arg" ;;
+  esac
+done
 
 die() {
   echo "install-host-tools: $*" >&2
@@ -91,8 +106,14 @@ ln -sf pve-flr-portal "$SBIN/pve-flr-portal-config"
 ln -sf pve-flr-portal "$SBIN/pve-flr-portal-update"
 
 echo "Installed $SBIN/pve-flr-portal (and the -config / -update links)."
+if [ "$RUN_INSTALL" = "1" ]; then
+  echo
+  rm -f "$TMP"  # exec below skips the exit trap
+  exec "$SBIN/pve-flr-portal" install
+fi
 echo
 echo "Next:"
+echo "  pve-flr-portal install  # create a new portal container"
 echo "  pve-flr-portal list     # the containers it manages"
 echo "  pve-flr-portal adopt    # start managing an existing install"
 echo "  pve-flr-portal update   # update it (older installs are handled too)"
