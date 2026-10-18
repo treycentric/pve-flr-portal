@@ -3,6 +3,8 @@ management tool: the container's net0 value (built and parsed), the portal's
 .env (read, and patched in place), Direct Network Transfer's mapping, and the
 settings registry. Run in bash against a fake `pct` (tests/fakes/pct)."""
 
+import subprocess
+
 import pytest
 from pve_fakes import DEPLOY, FakePve
 
@@ -242,3 +244,66 @@ def test_the_configurator_welcome_says_configurator(pve):
     assert "Welcome to the pve-flr-portal configurator" in log
     assert "installer" not in log
     assert "--backtitle pve-flr-portal configuration" in log
+
+
+# --- copying files out of a container -----------------------------------------
+
+
+def _pull(pve: FakePve, src: str, dest) -> subprocess.CompletedProcess:
+    return pve.bash(f'set -uo pipefail\nsource "{LIB}"\npfr_pull 207 {src} "{dest.as_posix()}"; echo "rc=$?"\n')
+
+
+def test_pull_copies_an_existing_file(pve, tmp_path):
+    pve.add_ct(207)
+    dest = tmp_path / "out.txt"
+    result = _pull(pve, "/opt/pve-flr-portal/VERSION", dest)
+    assert "rc=0" in result.stdout
+    assert dest.read_text(encoding="utf-8").strip() == "1.9.0"
+
+
+def test_pull_of_a_missing_file_fails_and_leaves_the_destination_alone(pve, tmp_path):
+    # `pct pull` reports success and writes an empty file for a missing source;
+    # that must never reach the destination.
+    pve.add_ct(207)
+    dest = tmp_path / "out.txt"
+    dest.write_text("keep me\n", encoding="utf-8", newline="\n")
+    result = _pull(pve, "/opt/pve-flr-portal/deploy/host/pve-flr-portal", dest)
+    assert "rc=1" in result.stdout
+    assert dest.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_pull_of_an_empty_file_fails(pve, tmp_path):
+    pve.add_ct(207)
+    (pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "empty").write_bytes(b"")
+    dest = tmp_path / "out.txt"
+    result = _pull(pve, "/opt/pve-flr-portal/empty", dest)
+    assert "rc=1" in result.stdout
+    assert not dest.exists()
+
+
+def test_the_host_command_is_installed_from_the_containers_checkout(pve, tmp_path):
+    pve.add_ct(207)
+    deploy = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy" / "host"
+    deploy.mkdir(parents=True)
+    (deploy / "pve-flr-portal").write_text("#!/usr/bin/env bash\necho hi\n", encoding="utf-8", newline="\n")
+    sbin = tmp_path / "sbin"
+    sbin.mkdir()
+    result = pve.bash(
+        f'set -uo pipefail\nsource "{LIB}"\nPFR_SBIN="{sbin.as_posix()}" pfr_install_host_command 207; echo "rc=$?"\n'
+    )
+    assert "rc=0" in result.stdout, result.stderr
+    assert "echo hi" in (sbin / "pve-flr-portal").read_text(encoding="utf-8")
+    assert (sbin / "pve-flr-portal-config").exists()
+    assert (sbin / "pve-flr-portal-update").exists()
+
+
+def test_a_release_without_the_host_command_installs_nothing(pve, tmp_path):
+    # This is what produced a 0-byte /usr/local/sbin/pve-flr-portal.
+    pve.add_ct(207)
+    sbin = tmp_path / "sbin"
+    sbin.mkdir()
+    result = pve.bash(
+        f'set -uo pipefail\nsource "{LIB}"\nPFR_SBIN="{sbin.as_posix()}" pfr_install_host_command 207; echo "rc=$?"\n'
+    )
+    assert "rc=1" in result.stdout
+    assert list(sbin.iterdir()) == []

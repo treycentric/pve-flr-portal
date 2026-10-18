@@ -78,7 +78,7 @@ load_current() {
   fi
 
   tmp=$(mktemp)
-  pct pull "$ctid" "$PFR_ENV_FILE" "$tmp" || die "Could not read $PFR_ENV_FILE from container $ctid."
+  pfr_pull "$ctid" "$PFR_ENV_FILE" "$tmp" || die "Could not read $PFR_ENV_FILE from container $ctid."
   pfr_load_env "$tmp"
   rm -f "$tmp"
 

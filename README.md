@@ -488,6 +488,11 @@ uses, the app and its scripts in the container's checkout, and the host-backup
 patch and management command, which are copied out of that checkout so they
 always match the installed release.
 
+To install a specific version instead of the latest release - a tag, or a
+branch to try work that isn't released yet - set `PFR_VERSION`, e.g.
+`PFR_VERSION=v1.9.0 bash deploy/lxc-create.sh`. The shared library and the
+management tools then come from that version too.
+
 Already have a container? Run `deploy/install.sh` inside it instead
 (non-interactive - edit `.env` by hand). Rationale for LXC over a
 Debian package on the host or a full VM/OVA is in

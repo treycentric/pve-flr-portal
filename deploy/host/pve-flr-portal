@@ -206,12 +206,28 @@ ensure_running() {
 
 # --- Commands ------------------------------------------------------------
 
+# pull_file CTID SRC DEST - copy a file out of the container. Fails, leaving
+# DEST alone, if it isn't there or comes back empty: `pct pull` can report
+# success and write an empty file for a missing source.
+pull_file() {
+  local tmp
+  pct exec "$1" -- test -f "$2" 2>/dev/null || return 1
+  tmp=$(mktemp)
+  if pct pull "$1" "$2" "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    cp "$tmp" "$3"
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 fetch_tools() {
   TOOLS_DIR=$(mktemp -d)
   trap 'rm -rf "$TOOLS_DIR"' EXIT
   mkdir -p "$TOOLS_DIR/lib"
-  if ! pct pull "$1" "$APP_DIR/deploy/pfr-manage.sh" "$TOOLS_DIR/pfr-manage.sh" 2>/dev/null \
-    || ! pct pull "$1" "$APP_DIR/deploy/lib/settings.sh" "$TOOLS_DIR/lib/settings.sh" 2>/dev/null; then
+  if ! pull_file "$1" "$APP_DIR/deploy/pfr-manage.sh" "$TOOLS_DIR/pfr-manage.sh" \
+    || ! pull_file "$1" "$APP_DIR/deploy/lib/settings.sh" "$TOOLS_DIR/lib/settings.sh"; then
     die "Container $1 runs a release that predates the management tools. Update it first: pve-flr-portal update $1"
   fi
 }

@@ -26,6 +26,10 @@
 # used as-is; when this script is curl-piped it is fetched from the latest
 # release, so it matches the app that gets installed.
 #
+# PFR_VERSION=<tag or branch> installs that instead of the latest release
+# (e.g. PFR_VERSION=v1.9.0, or a branch to try work that isn't released yet);
+# the shared library and the management tools then come from it too.
+#
 # Override any of these via environment variables before running, e.g.
 # STORAGE=local-zfs BRIDGE=vmbr1 VLAN_TAG=100 bash deploy/lxc-create.sh
 set -euo pipefail
@@ -79,12 +83,15 @@ load_lib() {
   esac
   slug="${REPO_URL#https://github.com/}"
   slug="${slug%.git}"
-  tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${slug}/releases/latest" 2>/dev/null || true)
-  tag="${tag##*/}"
-  case "$tag" in
-    v[0-9]*) ;;
-    *) tag="" ;;
-  esac
+  tag="${PFR_VERSION:-}"
+  if [ -z "$tag" ]; then
+    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${slug}/releases/latest" 2>/dev/null || true)
+    tag="${tag##*/}"
+    case "$tag" in
+      v[0-9]*) ;;
+      *) tag="" ;;
+    esac
+  fi
   tmp=$(mktemp)
   for ref in "$tag" main; do
     if [ -z "$ref" ]; then
@@ -187,16 +194,22 @@ pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq git ca
 # on main. `deploy/update.sh` (also cloned in) is the
 # supported way to move to a different/later release afterwards.
 pct exec "$CTID" -- bash -c "git clone '${REPO_URL}' /opt/pve-flr-portal"
-pct exec "$CTID" -- bash -c "
+pct exec "$CTID" -- env "WANT=${PFR_VERSION:-}" bash -c '
   cd /opt/pve-flr-portal
-  TAG=\$(git tag -l 'v*.*.*' --sort=-v:refname | head -1)
-  if [ -n \"\$TAG\" ]; then
-    echo \"    Checking out latest release: \$TAG\"
-    git checkout --quiet \"\$TAG\"
+  if [ -n "$WANT" ]; then
+    echo "    Checking out the requested version: $WANT"
+    git fetch --quiet origin "$WANT" && git checkout --quiet FETCH_HEAD \
+      || { echo "No such tag or branch: $WANT" >&2; exit 1; }
   else
-    echo '    No release tags found yet - staying on main'
+    TAG=$(git tag -l "v*.*.*" --sort=-v:refname | head -1)
+    if [ -n "$TAG" ]; then
+      echo "    Checking out latest release: $TAG"
+      git checkout --quiet "$TAG"
+    else
+      echo "    No release tags found yet - staying on main"
+    fi
   fi
-"
+'
 # install.sh already exists at this path from the clone above - no need
 # to push a local copy over. That push used to assume "$0" (this
 # script's own path) points at a real file on disk, which is only true
@@ -227,14 +240,12 @@ fi
 # The host-side management command, taken from the container's own checkout
 # (the release that was just installed). A release that predates it simply
 # doesn't have the file.
-HOST_CMD="/usr/local/sbin/pve-flr-portal"
 HOST_CMD_INSTALLED=no
-if pct pull "$CTID" "$PFR_APP_DIR/deploy/host/pve-flr-portal" "$HOST_CMD" 2>/dev/null; then
-  chmod 755 "$HOST_CMD"
-  ln -sf pve-flr-portal /usr/local/sbin/pve-flr-portal-config
-  ln -sf pve-flr-portal /usr/local/sbin/pve-flr-portal-update
+if pfr_install_host_command "$CTID"; then
   HOST_CMD_INSTALLED=yes
   msg_ok "Installed the pve-flr-portal management command"
+else
+  msg_info "The installed release doesn't include the pve-flr-portal management command yet."
 fi
 
 if [ "$SETUP_LE" = "yes" ] && [ -n "$LE_DOMAINS" ]; then
@@ -277,7 +288,7 @@ if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
   # container's own checkout, so it is exactly the release that was just
   # installed rather than whatever is on main today.
   PATCH_SCRIPT=$(mktemp)
-  if pct pull "$CTID" /opt/pve-flr-portal/deploy/patch-pve-host-backups.sh "$PATCH_SCRIPT" 2>/dev/null; then
+  if pfr_pull "$CTID" /opt/pve-flr-portal/deploy/patch-pve-host-backups.sh "$PATCH_SCRIPT"; then
     bash "$PATCH_SCRIPT"
   elif [ -f "$(dirname "$0")/patch-pve-host-backups.sh" ]; then
     bash "$(dirname "$0")/patch-pve-host-backups.sh"

@@ -1218,6 +1218,40 @@ pfr_apply_ipv6_sysctl() {
   fi
 }
 
+# pfr_pull CTID SRC DEST - copy a file out of the container. Fails, leaving
+# DEST alone, if the file isn't there or comes back empty: `pct pull` can
+# report success and write an empty file for a missing source.
+pfr_pull() {
+  local tmp
+  pct exec "$1" -- test -f "$2" 2>/dev/null || return 1
+  tmp=$(mktemp)
+  if pct pull "$1" "$2" "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    cp "$tmp" "$3"
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# pfr_install_host_command CTID - install the host command
+# (/usr/local/sbin/pve-flr-portal, plus its -config/-update links) from the
+# container's own checkout, so it is the release that was just installed.
+# Returns 1, creating nothing, if that release doesn't have it yet.
+pfr_install_host_command() {
+  local sbin="${PFR_SBIN:-/usr/local/sbin}" tmp
+  tmp=$(mktemp)
+  if ! pfr_pull "$1" "$PFR_APP_DIR/deploy/host/pve-flr-portal" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  install -m 755 "$tmp" "$sbin/pve-flr-portal.new"
+  mv -f "$sbin/pve-flr-portal.new" "$sbin/pve-flr-portal"
+  ln -sf pve-flr-portal "$sbin/pve-flr-portal-config"
+  ln -sf pve-flr-portal "$sbin/pve-flr-portal-update"
+  rm -f "$tmp"
+}
+
 # pfr_ct_address CTID -> "<network> <address>" of the container's IPv4
 # address on eth0 (e.g. "192.168.1.0/24 192.168.1.50"), empty if none.
 pfr_ct_address() {

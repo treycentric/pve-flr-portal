@@ -137,3 +137,14 @@ def test_deploy_scripts_are_executable_in_git():
         check=True,
     ).stdout
     assert out.count("100755") == 3, out
+
+
+def test_an_empty_tools_file_in_the_container_is_never_run(pve):
+    pve.add_ct(207, tags="pve-flr-portal")
+    deploy = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy"
+    (deploy / "lib").mkdir(parents=True)
+    (deploy / "pfr-manage.sh").write_bytes(b"")
+    (deploy / "lib" / "settings.sh").write_bytes(b"")
+    result = stub(pve, "config")
+    assert result.returncode != 0
+    assert "predates the management tools" in result.stderr

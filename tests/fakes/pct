@@ -92,8 +92,12 @@ case "$cmd" in
   pull)
     id="$1"; src="$2"; dst="$3"
     need "$id"
-    [ -f "$(ct "$id")/fs$src" ] || exit 1
-    cp "$(ct "$id")/fs$src" "$dst"
+    # Like the real thing for a missing source: report success, leave an empty file.
+    if [ -f "$(ct "$id")/fs$src" ]; then
+      cp "$(ct "$id")/fs$src" "$dst"
+    else
+      : > "$dst"
+    fi
     ;;
   push)
     id="$1"; src="$2"; dst="$3"
