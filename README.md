@@ -442,11 +442,22 @@ needed on the portal's own side).
 
 **Installation**:
 
-Run on the PVE host itself:
+Run on the PVE host itself, as root:
 
 ```
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/lxc-create.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)" install-host-tools --install
 ```
+
+That is two steps in one: it installs the `pve-flr-portal` command on the host
+(in `/usr/local/sbin`, see "Managing an install from the PVE host" below), then
+runs `pve-flr-portal install`, which downloads the guided installer and creates
+the container. To do the steps separately - or to create another container
+later, which is handy for dev/test instances - run the first command without
+`--install`, then `pve-flr-portal install` whenever you want a new one. (Use
+`bash -c "$(curl ...)"` as shown rather than `curl ... | bash`: piping would
+take the terminal away from the installer's dialogs.) The installer itself can
+still be run directly: `bash -c "$(curl -fsSL
+https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/lxc-create.sh)"`.
 
 Guided setup at a real terminal: a welcome screen, then a short
 Back/Next wizard for the essentials, then a review screen where you can
@@ -506,6 +517,7 @@ on the node that hosts the container:
 
 | Command | What it does |
 |---|---|
+| `pve-flr-portal install` | Creates a new portal container: downloads the guided installer from GitHub (the latest release; `PFR_VERSION` picks a tag or branch) and runs it. Run it again for another instance. |
 | `pve-flr-portal config [CTID]` | A welcome screen, then the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
 | `pve-flr-portal update [CTID] [version]` | Shows the installed and new version, asks to confirm, then runs `update.sh` in the container (see "Updating"). |
 | `pve-flr-portal status [CTID]` | Installed version, whether a newer release is available, service state and address. |

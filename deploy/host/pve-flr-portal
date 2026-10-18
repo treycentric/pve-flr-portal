@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # pve-flr-portal - manage the pve-flr-portal containers on this PVE node.
 #
+#   pve-flr-portal install                  create a new portal container
 #   pve-flr-portal config [CTID]            change settings (portal and network)
 #   pve-flr-portal update [CTID] [VERSION]  update (--all, -y, --snapshot: see --help)
 #   pve-flr-portal status [CTID]            version, service state, address
@@ -58,6 +59,9 @@ usage() {
 Usage: pve-flr-portal <command> [CTID] [arguments]
 
 Commands:
+  install                Create a new portal container: downloads the guided
+                         installer from GitHub (the latest release, or
+                         PFR_VERSION) and runs it. Repeat for more instances.
   config [CTID]          Change the portal's settings and the container's
                          network configuration.
   update [CTID] [VERSION] [options]
@@ -688,6 +692,38 @@ cmd_host_tools() {
   echo "The host tools match container $CTID's release."
 }
 
+# download_deploy_file REL VAR [MARKER] - fetch deploy/REL from the first ref
+# that has it (see github_refs), as a script that parses and, if MARKER is
+# given, contains it. Sets VAR to the temp file and GOT_REF to the ref.
+GOT_REF=""
+download_deploy_file() {
+  local rel="$1" var="$2" marker="${3:-}" slug ref tmp
+  slug="$(github_slug)"
+  for ref in $(github_refs); do
+    tmp_new tmp
+    if curl -fsSL "https://raw.githubusercontent.com/${slug}/${ref}/deploy/$rel" -o "$tmp" 2>/dev/null \
+      && [ -s "$tmp" ] && bash -n "$tmp" 2>/dev/null \
+      && { [ -z "$marker" ] || grep -q "$marker" "$tmp"; }; then
+      GOT_REF="$ref"
+      printf -v "$var" '%s' "$tmp"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# install [ARGS] - create a new portal container: download the installer
+# (lxc-create.sh) from GitHub the same way host-tools does - the latest
+# release, PFR_VERSION, or main - and run it here, at this terminal.
+cmd_install() {
+  local script
+  note "Fetching the installer from GitHub - please wait..."
+  download_deploy_file lxc-create.sh script '^PFR_LIB_API_WANTED=' \
+    || die "Could not download the installer from GitHub. Check the network."
+  echo "Using the installer from $GOT_REF." >&2
+  bash "$script" "$@"
+}
+
 cmd_status() {
   local ver state ip latest
   choose_ct "${1:-}"
@@ -738,6 +774,7 @@ main() {
     update) cmd_update "$@" ;;
     status) cmd_status "$@" ;;
     host-tools) cmd_host_tools "$@" ;;
+    install) cmd_install "$@" ;;
     list) cmd_list ;;
     adopt) cmd_adopt "$@" ;;
     *) usage >&2; exit 2 ;;

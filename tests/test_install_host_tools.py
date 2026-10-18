@@ -140,3 +140,39 @@ def test_the_script_is_executable_in_git():
         check=True,
     ).stdout
     assert out.startswith("100755"), out
+
+
+def _raw_with_stub_and_installer(pve: FakePve, installer: bool = True):
+    raw = pve.root / "raw"
+    (raw / "v1.9.0").mkdir(parents=True)
+    (raw / "v1.9.0" / "pve-flr-portal").write_bytes(STUB.read_bytes())
+    if installer:
+        (raw / "v1.9.0" / "lxc-create.sh").write_text(
+            '#!/usr/bin/env bash\nPFR_LIB_API_WANTED=1\necho "INSTALLER-RAN"\n', encoding="utf-8", newline="\n"
+        )
+    return raw
+
+
+def _github(raw) -> dict[str, str]:
+    return {
+        "FAKE_RAW_DIR": raw.as_posix(),
+        "FAKE_LATEST_URL": "https://github.com/octo/portal/releases/tag/v1.9.0",
+        "REPO_URL": "https://github.com/octo/portal.git",
+    }
+
+
+def test_install_flag_installs_the_command_and_then_runs_the_installer(pve):
+    raw = _raw_with_stub_and_installer(pve)
+    result, sbin = install(pve, "--install", **_github(raw))
+    assert result.returncode == 0, result.stderr
+    assert (sbin / "pve-flr-portal").exists()
+    assert "INSTALLER-RAN" in result.stdout
+    assert list(pve.tmpdir.iterdir()) == []  # the exec skips the exit trap, so it cleaned up first
+
+
+def test_without_the_install_flag_it_only_installs_the_command(pve):
+    raw = _raw_with_stub_and_installer(pve)
+    result, _ = install(pve, **_github(raw))
+    assert result.returncode == 0, result.stderr
+    assert "INSTALLER-RAN" not in result.stdout
+    assert "pve-flr-portal install" in result.stdout  # points at the next step
