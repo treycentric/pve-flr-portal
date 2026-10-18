@@ -162,6 +162,68 @@ ask_menu() {
   fi
 }
 
+# ask_multi VAR "Prompt text" "default" "opt1" "opt2" ...
+# Pick one or more; VAR ends up as a comma-separated list. At least one is
+# required. An option equal to "default" starts checked (else the first).
+ask_multi() {
+  local var="$1" prompt="$2" default="$3" current
+  current="${!var:-}"
+  shift 3
+  local opts=("$@")
+  if [ -n "$current" ]; then
+    return 0
+  fi
+  if [ "$IS_TTY" != "1" ] || [ "${#opts[@]}" -eq 0 ]; then
+    printf -v "$var" '%s' "$default"
+    return 0
+  fi
+  local o val
+  while :; do
+    if [ "$HAS_WHIPTAIL" = "1" ]; then
+      local items=() any_on=0
+      for o in "${opts[@]}"; do
+        if [ "$o" = "$default" ]; then
+          items+=("$o" "" "ON")
+          any_on=1
+        else
+          items+=("$o" "" "OFF")
+        fi
+      done
+      if [ "$any_on" = "0" ]; then
+        items[2]="ON"
+      fi
+      val=$(whiptail --backtitle "pve-flr-portal setup" --separate-output \
+        --checklist "$prompt (space to select, enter to confirm)" 18 70 8 "${items[@]}" 3>&1 1>&2 2>&3) \
+        || { msg_err "Cancelled."; exit 1; }
+      val=$(printf '%s' "$val" | tr '\n' ',' | sed 's/,$//')
+    else
+      echo "$prompt"
+      local i=1
+      for o in "${opts[@]}"; do
+        echo "  $i) $o"
+        i=$((i + 1))
+      done
+      local choice picked=() n
+      read -rp "Choice(s), comma-separated numbers [default: $default]: " choice
+      if [ -z "$choice" ]; then
+        val="$default"
+      else
+        for n in $(printf '%s' "$choice" | tr ',' ' '); do
+          if [ "$n" -ge 1 ] 2>/dev/null && [ "$n" -le "${#opts[@]}" ] 2>/dev/null; then
+            picked+=("${opts[$((n - 1))]}")
+          fi
+        done
+        val=$(IFS=,; printf '%s' "${picked[*]}")
+      fi
+    fi
+    if [ -n "$val" ]; then
+      printf -v "$var" '%s' "$val"
+      return 0
+    fi
+    msg_err "Select at least one."
+  done
+}
+
 # ---------------------------------------------------------------------
 # Basic settings - asked up front regardless of default/advanced mode,
 # since CTID/hostname/network/storage are unavoidable per-user choices,
@@ -187,8 +249,20 @@ if command -v pvesm >/dev/null 2>&1; then
   done < <(pvesm status 2>/dev/null | awk 'NR>1{print $1}')
 fi
 ask_menu STORAGE "Container storage (where the LXC disk lives)" "local-lvm" "${STORAGE_CHOICES[@]}"
-ask_menu PVE_STORAGE_CHOICE "PBS storage to browse backups from (PVE_STORAGE in .env)" "pbs" "${STORAGE_CHOICES[@]}"
-PVE_STORAGE="${PVE_STORAGE:-$PVE_STORAGE_CHOICE}"
+
+# Only PBS-type storages can hold file-restore-able backups, and the app
+# accepts several (comma-separated) - so this is a multi-select over just those.
+PBS_CHOICES=()
+if command -v pvesm >/dev/null 2>&1; then
+  while IFS= read -r line; do
+    PBS_CHOICES+=("$line")
+  done < <(pvesm status 2>/dev/null | awk 'NR>1 && $2=="pbs"{print $1}')
+fi
+if [ "${#PBS_CHOICES[@]}" -gt 0 ]; then
+  ask_multi PVE_STORAGE "PBS storage(s) to browse backups from (PVE_STORAGE in .env)" "pbs" "${PBS_CHOICES[@]}"
+else
+  ask_value PVE_STORAGE "PBS storage id(s) to browse backups from (comma-separated; PVE_STORAGE in .env)" "pbs"
+fi
 
 BRIDGE_CHOICES=()
 while IFS= read -r line; do
