@@ -89,11 +89,12 @@ dlg_w() {
   echo "$c"
 }
 
-# box_h "text" extra -> a dialog height that fits the wrapped text plus
-# `extra` rows of controls, capped to the terminal.
+# box_h "text" extra [width] -> a dialog height that fits the wrapped text
+# plus `extra` rows of controls, capped to the terminal. Wraps a little
+# narrower than the dialog so an estimate errs on the tall side.
 box_h() {
-  local lines h rows
-  lines=$(printf '%b' "$1" | fold -s -w 68 | wc -l)
+  local lines h rows w="${3:-72}"
+  lines=$(printf '%b' "$1" | fold -s -w $((w - 8)) | wc -l)
   h=$((lines + $2))
   rows=$(($(term_rows) - 2))
   if [ "$h" -gt "$rows" ]; then
@@ -390,7 +391,7 @@ ui_pick() {
       items+=("${o%%=*}" "$desc")
     done
     val=$(wt --title "$title" --notags --cancel-button "$NAV_CANCEL" --default-item "$cur" \
-      --menu "$text" "$(cap_h $(($(box_h "$text" 0) + mh + 7)))" "$(dlg_w)" "$mh" "${items[@]}") || return 1
+      --scrolltext --menu "$text" "$(cap_h $(($(box_h "$text" 0 "$(dlg_w)") + mh + 9)))" "$(dlg_w)" "$mh" "${items[@]}") || return 1
   else
     printf '%b\n' "$text"
     for o in "$@"; do
@@ -442,7 +443,7 @@ ui_multi() {
         done
       fi
       val=$(wt --title "$title" --cancel-button "$NAV_CANCEL" --separate-output \
-        --checklist "$full" "$(cap_h $(($(box_h "$full" 0) + mh + 7)))" "$(dlg_w)" "$mh" "${items[@]}") || return 1
+        --scrolltext --checklist "$full" "$(cap_h $(($(box_h "$full" 0 "$(dlg_w)") + mh + 9)))" "$(dlg_w)" "$mh" "${items[@]}") || return 1
       val=$(printf '%s' "$val" | tr '\n' ',' | sed 's/,$//')
     else
       printf '%b\n' "$text"
