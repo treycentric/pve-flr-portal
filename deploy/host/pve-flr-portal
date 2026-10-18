@@ -305,8 +305,8 @@ repo_url() {
 # unaffected. A release that doesn't have the file is skipped.
 install_from_container() {
   local ctid="$1" rel="$2" dest="$3" tmp
-  tmp=$(mktemp)
-  if ! pct pull "$ctid" "$APP_DIR/deploy/$rel" "$tmp" 2>/dev/null; then
+  tmp_new tmp
+  if ! pull_file "$ctid" "$APP_DIR/deploy/$rel" "$tmp"; then
     rm -f "$tmp"
     return 0
   fi
