@@ -12,7 +12,7 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_USER="pveflr"
 SERVICE_NAME="pve-flr-portal"
-# Issue #52: certbot + a DNS-01 plugin, so an admin who wants a real
+# certbot + a DNS-01 plugin, so an admin who wants a real
 # (CA-issued) cert can run deploy/certbot-setup.sh once instead of
 # hand-writing a renewal hook. Ready to go by default but skippable
 # (INSTALL_CERTBOT=0) since the self-signed cert tls.py generates works

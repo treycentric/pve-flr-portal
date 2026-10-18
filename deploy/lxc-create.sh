@@ -31,7 +31,7 @@ CORES="${CORES:-1}"
 BRIDGE="${BRIDGE:-vmbr0}"
 IP_CONFIG="${IP_CONFIG:-dhcp}"   # or e.g. "10.0.0.50/24,gw=10.0.0.1"
 REPO_URL="${REPO_URL:-https://github.com/treycentric/pve-flr-portal.git}"
-# Passed straight through to install.sh (issue #52) - see its own
+# Passed straight through to install.sh - see its own
 # comment for what these do.
 INSTALL_CERTBOT="${INSTALL_CERTBOT:-1}"
 CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-rfc2136}"

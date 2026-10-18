@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# First-run helper (issue #52): issues a real (CA-issued) cert for
+# First-run helper: issues a real (CA-issued) cert for
 # pve-flr-portal via certbot's DNS-01 challenge, and wires up automatic
 # renewal. Run ONCE, as root, inside the container/host running the
 # portal:
