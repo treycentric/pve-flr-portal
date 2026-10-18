@@ -133,6 +133,25 @@ with their own PVE username/password, and PVE's own permission system
 decides what they can see. Onboarding a user is two ACL grants against
 their existing account; no tokens or secrets to generate or hand off.
 
+**The roles below can be created for you.** The installer has a "PVE roles to
+create" step (a checklist; set `CREATE_ROLES=FileRestoreReader,FileRestoreOperator`
+to do it in an unattended install - without it, nothing is created), and
+`pve-flr-portal roles` does it any time on a PVE node:
+
+```
+pve-flr-portal roles status                       # which exist, and whether they match what is documented
+pve-flr-portal roles create FileRestoreReader     # or several names, or --all
+pve-flr-portal roles create FileRestoreOperator --unrestricted
+pve-flr-portal roles delete FileRestoreReader     # refuses while grants use it; --remove-acls removes them first
+```
+
+An existing role is left alone; one with different privileges is shown and only
+changed after you confirm (or with `-y`). `FileRestoreOperator` needs PVE 9 or
+newer and is skipped on PVE 8. `FileRestoreReaderHost` includes
+`Datastore.Allocate` - read its section below before using it. **Creating a role
+grants nothing**: giving each user access is still the `pveum acl modify` step
+in each section.
+
 ### Browse Backup Snapshots and Download Contents
 
 Browsing and downloading only needs `FileRestoreReader` (created here).
@@ -466,8 +485,9 @@ change anything before it starts.
 - **Wizard:** container ID, hostname, container storage, network (bridge,
   VLAN, IPv4, IPv6, and DNS when you enter an address by hand), the PVE host,
   which PBS storage(s) to browse, Direct Network Transfer (on by default,
-  using the container's own subnet and address - see "Restore to Guest"), and
-  optional host-backup support.
+  using the container's own subnet and address - see "Restore to Guest"),
+  optional host-backup support, and which PVE roles to create (see
+  "Provisioning Access").
 - **Review screen:** every setting above, plus "Advanced settings" - resource
   sizing, portal port and theme, restore-job visibility, performance limits,
   Direct Network Transfer's subnet/hostname/TLS policy, and a Let's
@@ -518,6 +538,7 @@ on the node that hosts the container:
 | Command | What it does |
 |---|---|
 | `pve-flr-portal install` | Creates a new portal container: downloads the guided installer from GitHub (the latest release; `PFR_VERSION` picks a tag or branch) and runs it. Run it again for another instance. |
+| `pve-flr-portal roles <status\|create\|delete> [NAMES\|--all]` | Creates, inspects or deletes the PVE roles the portal's users need (`FileRestoreReader`, `FileRestoreOperator`, `FileRestoreReaderHost`). Downloaded from GitHub like `install`; runs on the node. See "Provisioning Access". |
 | `pve-flr-portal config [CTID]` | A welcome screen, then the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
 | `pve-flr-portal update [CTID] [version]` | Shows the installed and new version, asks to confirm, then runs `update.sh` in the container (see "Updating"). |
 | `pve-flr-portal status [CTID]` | Installed version, whether a newer release is available, service state and address. |

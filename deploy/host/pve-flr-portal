@@ -2,6 +2,7 @@
 # pve-flr-portal - manage the pve-flr-portal containers on this PVE node.
 #
 #   pve-flr-portal install                  create a new portal container
+#   pve-flr-portal roles <command> [...]    create/inspect/delete the PVE roles
 #   pve-flr-portal config [CTID]            change settings (portal and network)
 #   pve-flr-portal update [CTID] [VERSION]  update (--all, -y, --snapshot: see --help)
 #   pve-flr-portal status [CTID]            version, service state, address
@@ -62,6 +63,11 @@ Commands:
   install                Create a new portal container: downloads the guided
                          installer from GitHub (the latest release, or
                          PFR_VERSION) and runs it. Repeat for more instances.
+  roles <status|create|delete> [NAMES|--all] [options]
+                         Create, inspect or delete the PVE roles the portal's
+                         users need (FileRestoreReader, FileRestoreOperator,
+                         FileRestoreReaderHost). Run `pve-flr-portal roles
+                         --help` for the options.
   config [CTID]          Change the portal's settings and the container's
                          network configuration.
   update [CTID] [VERSION] [options]
@@ -724,6 +730,18 @@ cmd_install() {
   bash "$script" "$@"
 }
 
+# roles [ARGS] - create, inspect or delete the PVE roles the portal's users
+# need. The tool comes from GitHub the way `install` does; it runs on this
+# node (roles are cluster-wide).
+cmd_roles() {
+  local script
+  note "Fetching the roles tool from GitHub - please wait..."
+  download_deploy_file pfr-roles.sh script '^PFR_ROLES_SCRIPT=1' \
+    || die "Could not download the roles tool from GitHub. Check the network."
+  echo "Using the roles tool from $GOT_REF." >&2
+  bash "$script" "$@"
+}
+
 cmd_status() {
   local ver state ip latest
   choose_ct "${1:-}"
@@ -775,6 +793,7 @@ main() {
     status) cmd_status "$@" ;;
     host-tools) cmd_host_tools "$@" ;;
     install) cmd_install "$@" ;;
+    roles) cmd_roles "$@" ;;
     list) cmd_list ;;
     adopt) cmd_adopt "$@" ;;
     *) usage >&2; exit 2 ;;

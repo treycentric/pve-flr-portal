@@ -615,3 +615,59 @@ def test_install_leaves_no_temp_files_behind(pve):
     stub(pve, "install", env=_github_env(pve, raw))
     stub(pve, "install", env=_github_env(pve, pve.root / "nothing"))
     assert list(pve.tmpdir.iterdir()) == []
+
+
+# --- roles: the roles tool, from GitHub --------------------------------------------------
+
+
+def _roles_tool(pve: FakePve, ref: str = "v1.9.0", content: str | None = None) -> Path:
+    from pve_fakes import DEPLOY as D
+
+    text = content if content is not None else (D / "pfr-roles.sh").read_text(encoding="utf-8")
+    return _raw(pve, ref, **{"pfr-roles.sh": text})
+
+
+def test_roles_runs_the_tool_downloaded_from_the_latest_release(pve):
+    raw = _roles_tool(pve)
+    result = stub(pve, "roles", "status", env=_github_env(pve, raw))
+    assert result.returncode == 0, result.stderr
+    assert "FileRestoreReader" in result.stdout
+    assert "Using the roles tool from v1.9.0" in result.stderr
+    assert "Fetching the roles tool from GitHub - please wait" in result.stderr
+
+
+def test_roles_passes_its_arguments_through_and_changes_pve(pve):
+    raw = _roles_tool(pve)
+    result = stub(pve, "roles", "create", "FileRestoreReader", env=_github_env(pve, raw))
+    assert result.returncode == 0, result.stderr
+    assert "Created FileRestoreReader" in result.stdout
+    assert "FileRestoreReader" in pve.roles()
+
+
+def test_roles_falls_back_to_main_and_honours_pfr_version(pve):
+    raw = _roles_tool(pve, ref="main")
+    assert "from main" in stub(pve, "roles", "status", env=_github_env(pve, raw)).stderr
+    raw = _roles_tool(pve, ref="my-branch")
+    result = stub(pve, "roles", "status", env={**_github_env(pve, raw), "PFR_VERSION": "my-branch"})
+    assert "from my-branch" in result.stderr
+
+
+def test_roles_never_runs_something_that_is_not_the_roles_tool(pve):
+    for content in ("", "<html>404</html>\n", "#!/usr/bin/env bash\necho not-the-tool\n"):
+        raw = _roles_tool(pve, content=content)
+        result = stub(pve, "roles", "status", env=_github_env(pve, raw))
+        assert result.returncode != 0
+        assert "not-the-tool" not in result.stdout
+        assert "Could not download the roles tool" in result.stderr
+
+
+def test_roles_says_so_when_github_cannot_be_reached(pve):
+    result = stub(pve, "roles", "status", env=_github_env(pve, pve.root / "raw"))
+    assert result.returncode != 0
+    assert "Could not download the roles tool from GitHub" in result.stderr
+
+
+def test_roles_leaves_no_temp_files_behind(pve):
+    raw = _roles_tool(pve)
+    stub(pve, "roles", "status", env=_github_env(pve, raw))
+    assert list(pve.tmpdir.iterdir()) == []

@@ -43,6 +43,10 @@ class FakePve:
         wt = self.bin / "whiptail"
         shutil.copy(ROOT / "tests" / "fakes" / "whiptail", wt)
         wt.chmod(wt.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        for tool in ("pveum", "pveversion"):
+            fake_tool = self.bin / tool
+            shutil.copy(ROOT / "tests" / "fakes" / tool, fake_tool)
+            fake_tool.chmod(fake_tool.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         curl = self.bin / "curl"
         shutil.copy(ROOT / "tests" / "fakes" / "curl", curl)
         curl.chmod(curl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -159,6 +163,22 @@ class FakePve:
 
     def config(self, ctid: int) -> str:
         return (self.ct(ctid) / "config").read_text(encoding="utf-8")
+
+    def add_role(self, name: str, privs: str) -> None:
+        (self.state / "roles").mkdir(exist_ok=True)
+        (self.state / "roles" / name).write_text(privs, encoding="utf-8", newline="\n")
+
+    def add_acl(self, path: str, ugid: str, role: str, kind: str = "user") -> None:
+        with (self.state / "acls.tsv").open("a", encoding="utf-8", newline="\n") as f:
+            f.write(f"{path}\t{kind}\t{ugid}\t{role}\n")
+
+    def roles(self) -> dict[str, str]:
+        d = self.state / "roles"
+        return {p.name: p.read_text(encoding="utf-8") for p in d.iterdir()} if d.exists() else {}
+
+    def acls(self) -> list[str]:
+        p = self.state / "acls.tsv"
+        return [line for line in p.read_text(encoding="utf-8").splitlines() if line] if p.exists() else []
 
     def log(self, name: str) -> str:
         p = self.state / name

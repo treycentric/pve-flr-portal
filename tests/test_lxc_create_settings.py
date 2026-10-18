@@ -25,6 +25,7 @@ _VARS = (
     "PVE_STORAGE",
     "RESTORE_DATA_NICS_JSON",
     "PORTAL_PORT",
+    "CREATE_ROLES",
 )
 
 
@@ -102,3 +103,16 @@ def test_noninteractive_rejects_conflicting_settings():
     result = _run({"IPV6_MODE": "static"})
     assert result.returncode != 0
     assert "IPv6" in result.stderr
+
+
+def test_unattended_installs_create_no_roles_unless_asked():
+    # roles are PVE-wide authorization config: nothing is created without CREATE_ROLES
+    assert resolve_noninteractive()["CREATE_ROLES"] == ""
+    got = resolve_noninteractive({"CREATE_ROLES": "FileRestoreReader,FileRestoreOperator"})
+    assert got["CREATE_ROLES"] == "FileRestoreReader,FileRestoreOperator"
+
+
+def test_an_unknown_role_in_the_environment_stops_an_unattended_install():
+    result = _run({"CREATE_ROLES": "FileRestoreReader,Bogus"})
+    assert result.returncode != 0
+    assert "Unknown role 'Bogus'" in result.stderr

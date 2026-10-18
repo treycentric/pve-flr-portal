@@ -118,8 +118,9 @@ Companion docs, kept separate on purpose:
   settings registry and dialogs shared by the installer and the management
   tool), `pfr-manage.sh` (the management tool, run from the container's
   checkout) and `host/pve-flr-portal` (the thin host command installed in
-  `/usr/local/sbin`) and `install-host-tools.sh` (installs that command on a
-  host that doesn't have it); `Dockerfile` / `docker-compose.yml` at the repo root
+  `/usr/local/sbin`) `install-host-tools.sh` (installs that command on a
+  host that doesn't have it) and `pfr-roles.sh` (creates/inspects/deletes the
+  PVE roles); `Dockerfile` / `docker-compose.yml` at the repo root
 - `tests/` — pytest + `node --test` + stylelint; see `tests/README.md`
 - `.github/workflows/` — CI (every push/PR) and release (tag push) gates
 - `run.py` — entrypoint (HTTPS bootstrap, then serves the app)

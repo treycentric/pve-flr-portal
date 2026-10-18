@@ -382,3 +382,121 @@ def test_a_failed_copy_out_of_a_container_leaves_no_temp_files(pve, tmp_path):
     pve.add_ct(207)
     _pull(pve, "/opt/pve-flr-portal/missing", tmp_path / "out")
     assert list(pve.tmpdir.iterdir()) == []
+
+
+# --- the installer's "PVE roles to create" step ---------------------------------------
+
+
+def _roles_step(pve: FakePve, answers: list[str], setup: str = "", major: int = 9):
+    """Run edit_CREATE_ROLES with whiptail answering from `answers` (rc|output lines)."""
+    script = pve.root / "roles_wt.txt"
+    script.write_text("\n".join(answers) + "\n", encoding="utf-8", newline="\n")
+    result = pve.bash(
+        f'set -uo pipefail\nsource "{LIB}"\nIS_TTY=1; HAS_WHIPTAIL=1\npfr_init_install\n{setup}\n'
+        'edit_CREATE_ROLES; echo "rc=$? roles=[$CREATE_ROLES]"\n',
+        extra_env={"FAKE_WT_SCRIPT": script.as_posix(), "FAKE_PVE_MAJOR": str(major)},
+    )
+    return result, pve.log("wt.log")
+
+
+def test_roles_offered_depend_on_the_pve_version(pve):
+    out9 = pve.bash(f'source "{LIB}"\npfr_roles_offered | paste -sd, -\n', extra_env={"FAKE_PVE_MAJOR": "9"}).stdout
+    out8 = pve.bash(f'source "{LIB}"\npfr_roles_offered | paste -sd, -\n', extra_env={"FAKE_PVE_MAJOR": "8"}).stdout
+    assert out9.strip() == "FileRestoreReader,FileRestoreOperator,FileRestoreReaderHost"
+    assert out8.strip() == "FileRestoreReader,FileRestoreReaderHost"  # no operator role on PVE 8
+
+
+def test_the_roles_step_preselects_reader_and_operator(pve):
+    result, log = _roles_step(pve, ["0|FileRestoreReader"])
+    assert "rc=0 roles=[FileRestoreReader]" in result.stdout, result.stderr
+    # the checklist opened with the sensible defaults ON, and the host role OFF
+    assert "FileRestoreReader  ON" in log
+    assert "FileRestoreOperator  ON" in log
+    assert "FileRestoreReaderHost  OFF" in log
+    assert "grants nothing by itself" in log
+
+
+def test_the_roles_step_preselects_the_host_role_only_with_host_backup_support(pve):
+    _, log = _roles_step(pve, ["0|FileRestoreReader"], setup="ENABLE_HOST_BACKUPS=true")
+    assert "FileRestoreReaderHost  ON" in log
+
+
+def test_the_roles_step_has_no_operator_role_on_pve_8(pve):
+    result, log = _roles_step(pve, ["0|FileRestoreReader"], major=8)
+    assert "FileRestoreOperator  ON" not in log
+    assert "FileRestoreOperator  OFF" not in log  # no checklist entry for it (the help text still names it)
+    assert "roles=[FileRestoreReader]" in result.stdout
+
+
+def test_selecting_no_roles_is_allowed(pve):
+    result, _ = _roles_step(pve, ["0|"])
+    assert "rc=0 roles=[]" in result.stdout, result.stderr
+
+
+def test_back_from_the_roles_step_changes_nothing(pve):
+    result, _ = _roles_step(pve, ["1|"])
+    assert "rc=1" in result.stdout
+
+
+def test_an_earlier_choice_is_not_replaced_by_the_defaults_when_coming_back(pve):
+    # the person chose none; going back and returning must not tick the defaults again
+    result, log = _roles_step(pve, ["0|", "0|"], setup="edit_CREATE_ROLES >/dev/null; echo first=[$CREATE_ROLES]")
+    assert "first=[]" in result.stdout
+    second = log[log.rindex("--title PVE roles to create") :]
+    assert "FileRestoreReader  OFF" in second
+    assert "FileRestoreOperator  OFF" in second
+    assert "  ON" not in second
+
+
+def test_the_roles_row_reads_none_or_the_list(pve):
+    out = pve.bash(
+        f'source "{LIB}"\npfr_init_install\nshow_val CREATE_ROLES\n'
+        "CREATE_ROLES=FileRestoreReader,FileRestoreOperator\nshow_val CREATE_ROLES\n"
+    ).stdout.splitlines()
+    assert out[0].strip() == "None"
+    assert out[1].strip() == "FileRestoreReader, FileRestoreOperator"
+
+
+def test_an_unknown_role_in_the_environment_is_rejected(pve):
+    result = pve.bash(
+        f'source "{LIB}"\nCREATE_ROLES=FileRestoreReader,Bogus\npfr_init_install\nvalidate_all; echo "rc=$?"\n',
+    )
+    assert "Unknown role 'Bogus'" in result.stdout
+    assert "rc=1" in result.stdout
+
+
+def test_the_installer_creates_the_chosen_roles_from_the_containers_checkout(pve):
+    # the block at the end of lxc-create.sh, run against a container whose release has the roles tool
+    import re
+    import shutil
+
+    from pve_fakes import DEPLOY as D
+
+    text = (D / "lxc-create.sh").read_text(encoding="utf-8")
+    block = re.search(r'^if \[ -n "\$CREATE_ROLES" \]; then\n.*?^fi\n', text, re.S | re.M).group(0)
+    pve.add_ct(207)
+    deploy = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy"
+    deploy.mkdir(parents=True, exist_ok=True)
+    shutil.copy(D / "pfr-roles.sh", deploy / "pfr-roles.sh")
+    result = pve.bash(
+        f'set -uo pipefail\nsource "{LIB}"\nCTID=207\nCREATE_ROLES=FileRestoreReader,FileRestoreReaderHost\n{block}\n'
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Created FileRestoreReader" in result.stdout
+    assert "Created FileRestoreReaderHost" in result.stdout
+    assert set(pve.roles()) == {"FileRestoreReader", "FileRestoreReaderHost"}
+
+
+def test_the_installer_says_what_to_do_when_the_release_lacks_the_roles_tool(pve):
+    import re
+
+    from pve_fakes import DEPLOY as D
+
+    text = (D / "lxc-create.sh").read_text(encoding="utf-8")
+    block = re.search(r'^if \[ -n "\$CREATE_ROLES" \]; then\n.*?^fi\n', text, re.S | re.M).group(0)
+    pve.add_ct(207)  # no deploy/pfr-roles.sh in this container's release
+    result = pve.bash(f'set -uo pipefail\nsource "{LIB}"\nCTID=207\nCREATE_ROLES=FileRestoreReader\n{block}\n')
+    assert result.returncode == 0, result.stderr
+    assert "doesn't include the roles tool yet" in result.stdout
+    assert "pve-flr-portal roles create FileRestoreReader" in result.stdout
+    assert pve.roles() == {}
