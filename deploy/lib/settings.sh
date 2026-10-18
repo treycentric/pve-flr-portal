@@ -21,6 +21,13 @@ HUB_GO_LABEL=">>> Install now"
 HUB_TEXT="Select a setting to change it, or choose \"Install now\" when you're ready."
 HUB_QUIT_TEXT="Quit without installing anything?"
 
+# pfr_cancel - the person quit. A non-zero status for the installer (nothing
+# was installed); the management tool sets PFR_CANCEL_RC=0 (nothing changed).
+pfr_cancel() {
+  msg_err "Cancelled."
+  exit "${PFR_CANCEL_RC:-1}"
+}
+
 # Status helpers - the scripts that source this normally define their own.
 if ! declare -F msg_info >/dev/null; then
   if [ -t 1 ]; then
@@ -115,6 +122,19 @@ ui_msg() {
     wt --title "$TITLE" --msgbox "$1" "$(box_h "$1" 7)" 72 || true
   else
     printf '%b\n' "$1"
+  fi
+}
+
+# ui_ask_yes TEXT - a yes/no question whose default answer is Yes.
+ui_ask_yes() {
+  local reply
+  if [ "$HAS_WHIPTAIL" = "1" ]; then
+    wt --title "$TITLE" --scrolltext --yesno "$1" "$(cap_h $(($(box_h "$1" 7 "$(dlg_w)"))))" "$(dlg_w)"
+  else
+    printf '%b
+' "$1"
+    read -rp "[Y/n]: " reply || reply="n"
+    case "$reply" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
   fi
 }
 
@@ -752,15 +772,29 @@ group_keys() {
   done
 }
 
+# pfr_differs KEY - installer: differs from the default. Management tool:
+# differs from what the container had when the tool started (a pending change).
+pfr_differs() {
+  if [ "$PFR_MODE" = "config" ]; then
+    [ "${!1}" != "${ORIG[$1]-}" ]
+  else
+    [ "${!1}" != "${S_DEF[$1]}" ]
+  fi
+}
+
 group_summary() {
   local k n=0
   for k in $(group_keys "$1"); do
-    if [ "${!k}" != "${S_DEF[$k]}" ]; then
+    if pfr_differs "$k"; then
       n=$((n + 1))
     fi
   done
   if [ "$n" -eq 0 ]; then
-    echo "defaults"
+    if [ "$PFR_MODE" = "config" ]; then
+      echo "no changes"
+    else
+      echo "defaults"
+    fi
   else
     echo "$n changed"
   fi
@@ -837,13 +871,17 @@ adv_total_summary() {
   local g n=0 k
   for g in "${ADV_GROUPS[@]}"; do
     for k in $(group_keys "$g"); do
-      if [ "${!k}" != "${S_DEF[$k]}" ]; then
+      if pfr_differs "$k"; then
         n=$((n + 1))
       fi
     done
   done
   if [ "$n" -eq 0 ]; then
-    echo "all defaults"
+    if [ "$PFR_MODE" = "config" ]; then
+      echo "no changes"
+    else
+      echo "all defaults"
+    fi
   else
     echo "$n changed"
   fi
@@ -879,8 +917,7 @@ review_hub() {
         --menu "$HUB_TEXT" \
         "$(cap_h $((rows + 2 + 7)))" "$(dlg_w)" "$rows" "${items[@]}") || {
         if ui_confirm "$HUB_QUIT_TEXT"; then
-          msg_err "Cancelled."
-          exit 1
+          pfr_cancel
         fi
         continue
       }
@@ -904,7 +941,7 @@ review_hub() {
       case "$n" in
         "") choice="GO" ;;
         a|A) choice="ADV" ;;
-        q|Q) msg_err "Cancelled."; exit 1 ;;
+        q|Q) pfr_cancel ;;
         *) choice="${PLAIN_MAP[$n]:-}"; if [ -z "$choice" ]; then continue; fi ;;
       esac
     fi
@@ -946,8 +983,7 @@ step_skipped() {
 show_welcome() {
   if [ "$HAS_WHIPTAIL" = "1" ]; then
     wt --title "Welcome" --yes-button "Continue" --no-button "Exit" --yesno "$WELCOME_TEXT" "$(box_h "$WELCOME_TEXT" 8)" 72 || {
-      msg_err "Cancelled."
-      exit 1
+      pfr_cancel
     }
   else
     printf '%b\n\n' "$WELCOME_TEXT"
@@ -1006,7 +1042,9 @@ pfr_run_install_ui() {
 # pfr_derive_install - values the rest of the installer consumes.
 pfr_derive_install() {
   if [ -z "${IP_CONFIG:-}" ]; then
-    if [ "$USE_STATIC_IP" = "yes" ]; then
+    if [ "$USE_STATIC_IP" = "manual" ]; then
+      IP_CONFIG="manual"
+    elif [ "$USE_STATIC_IP" = "yes" ]; then
       IP_CONFIG="${STATIC_CIDR},gw=${STATIC_GW}"
     else
       IP_CONFIG="dhcp"
@@ -1021,6 +1059,8 @@ PFR_APP_DIR="/opt/pve-flr-portal"
 PFR_ENV_FILE="$PFR_APP_DIR/.env"
 PFR_CT_TAG="pve-flr-portal"
 PFR_IPV6_SYSCTL="/etc/sysctl.d/99-disable-ipv6.conf"
+PFR_ORIG_NICS=""
+PFR_OVERRIDES_TMP="/tmp/pfr-overrides.env"
 
 # The values at the start of a config session, so changes can be listed.
 declare -A ORIG
@@ -1239,19 +1279,19 @@ pfr_write_env() {
   fi
   tmp=$(mktemp)
   printf '%s\n' "${ENV_OVERRIDES[@]}" > "$tmp"
-  pct push "$1" "$tmp" /tmp/pfr-overrides.env
+  pct push "$1" "$tmp" "$PFR_OVERRIDES_TMP"
   rm -f "$tmp"
   pct exec "$1" -- python3 -c '
-import re
+import re, sys
 overrides = {}
-with open("/tmp/pfr-overrides.env") as f:
+with open(sys.argv[1]) as f:
     for line in f:
         line = line.rstrip("\n")
         if not line or "=" not in line:
             continue
         k, v = line.split("=", 1)
         overrides[k] = v
-path = "/opt/pve-flr-portal/.env"
+path = sys.argv[2]
 with open(path) as f:
     lines = f.readlines()
 out = []
@@ -1268,8 +1308,8 @@ for k, v in overrides.items():
         out.append(f"{k}={v}\n")
 with open(path, "w") as f:
     f.writelines(out)
-'
-  pct exec "$1" -- rm -f /tmp/pfr-overrides.env
+' "$PFR_OVERRIDES_TMP" "$PFR_ENV_FILE"
+  pct exec "$1" -- rm -f "$PFR_OVERRIDES_TMP"
 }
 
 # pfr_load_env FILE - set the .env-backed settings from a container's .env
@@ -1285,6 +1325,7 @@ pfr_load_env() {
     fi
   done
   while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
     case "$line" in
       ""|"#"*) continue ;;
     esac
@@ -1299,6 +1340,7 @@ pfr_load_env() {
       printf -v "${rev[$key]}" '%s' "$val"
     fi
   done < "$1"
+  PFR_ORIG_NICS="$nics"
   pfr_map_dnt "$nics"
 }
 

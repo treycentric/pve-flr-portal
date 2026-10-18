@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# A stand-in for curl, for testing how deploy/lxc-create.sh fetches its library.
+#   FAKE_LATEST_URL  what `releases/latest` redirects to (the -w %{url_effective} call)
+#   FAKE_TAG_LIB     file served for a URL containing /v1.9.0/
+#   FAKE_MAIN_LIB    file served for a URL containing /main/
+case "$*" in
+  *"-w"*) echo "${FAKE_LATEST_URL:-https://github.com/x/y/releases}"; exit 0 ;;
+esac
+url=""; out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "$url" in
+  */v1.9.0/*) src="${FAKE_TAG_LIB:-}" ;;
+  */main/*) src="${FAKE_MAIN_LIB:-}" ;;
+  *) src="" ;;
+esac
+if [ -z "$src" ] || [ ! -f "$src" ]; then
+  exit 22
+fi
+cp "$src" "$out"

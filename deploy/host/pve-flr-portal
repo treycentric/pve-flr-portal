@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+# pve-flr-portal - manage the pve-flr-portal containers on this PVE node.
+#
+#   pve-flr-portal config [CTID]            change settings (portal and network)
+#   pve-flr-portal update [CTID] [ARGS]     update to the latest release
+#   pve-flr-portal status [CTID]            version, service state, address
+#   pve-flr-portal list                     the containers it manages
+#   pve-flr-portal adopt [CTID...]          start managing existing installs
+#
+# Installed as /usr/local/sbin/pve-flr-portal by deploy/lxc-create.sh, also
+# linked as pve-flr-portal-config and pve-flr-portal-update. Run as root on the
+# node that hosts the container.
+#
+# Containers are found by their Proxmox tag (pve-flr-portal), which the
+# installer sets; `adopt` tags an install made before that. This is a thin
+# stub on purpose: the real tools are copied out of the container's own
+# checkout each time, so they always match the release that is installed.
+set -euo pipefail
+
+TAG="pve-flr-portal"
+APP_DIR="/opt/pve-flr-portal"
+TOOLS_DIR=""
+
+die() {
+  echo "pve-flr-portal: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: pve-flr-portal <command> [CTID] [arguments]
+
+Commands:
+  config [CTID]          Change the portal's settings and the container's
+                         network configuration.
+  update [CTID] [ARGS]   Update to the latest release (ARGS go to update.sh,
+                         e.g. a version to pin to).
+  status [CTID]          Show the installed version, service state and address.
+  list                   List the containers managed from this node.
+  adopt [CTID...]        Start managing existing installs: tag them so they
+                         are found (with no CTID, scan the running containers).
+
+With more than one container, you are asked which one (or pass its CTID).
+Containers hosted on other cluster nodes have to be managed from those nodes.
+EOF
+}
+
+have_tty() {
+  [ -t 0 ] && [ -t 1 ]
+}
+
+# --- Finding containers ---------------------------------------------------
+
+# ct_tags CTID -> its Proxmox tags, ";"-separated.
+ct_tags() {
+  pct config "$1" 2>/dev/null | sed -n 's/^tags: *//p'
+}
+
+has_tag() {
+  case ";$(ct_tags "$1");" in
+    *";$TAG;"*) return 0 ;;
+  esac
+  return 1
+}
+
+# ct_version CTID -> the installed version, "?" if it can't be read.
+ct_version() {
+  pct exec "$1" -- cat "$APP_DIR/VERSION" 2>/dev/null | head -1 || true
+}
+
+# list_rows - "id|name|status|version" for each tagged container on this node.
+list_rows() {
+  local id status name ver
+  while read -r id status name; do
+    if has_tag "$id"; then
+      ver="?"
+      if [ "$status" = "running" ]; then
+        ver="$(ct_version "$id")"
+        ver="${ver:-?}"
+      fi
+      echo "${id}|${name}|${status}|${ver}"
+    fi
+  done < <(pct list 2>/dev/null | awk 'NR>1{print $1, $2, $NF}')
+}
+
+# adopt_ct CTID - add the tag, keeping whatever tags it already has.
+adopt_ct() {
+  local existing
+  existing="$(ct_tags "$1")"
+  pct set "$1" --tags "${existing:+${existing};}${TAG}" >/dev/null
+  echo "Now managing container $1."
+}
+
+# scan_candidates - running containers that have the portal but no tag.
+scan_candidates() {
+  local id status name
+  while read -r id status name; do
+    if [ "$status" = "running" ] && ! has_tag "$id" \
+      && pct exec "$id" -- test -f "$APP_DIR/VERSION" 2>/dev/null; then
+      echo "${id}|${name}"
+    fi
+  done < <(pct list 2>/dev/null | awk 'NR>1{print $1, $2, $NF}')
+}
+
+cmd_adopt() {
+  local rows=() row id answer
+  if [ "$#" -gt 0 ]; then
+    for id in "$@"; do
+      [[ "$id" =~ ^[0-9]+$ ]] || die "'$id' is not a container ID."
+      pct exec "$id" -- test -f "$APP_DIR/VERSION" 2>/dev/null \
+        || die "Container $id has no pve-flr-portal installation (or is not running)."
+      adopt_ct "$id"
+    done
+    return 0
+  fi
+  while IFS= read -r row; do
+    rows+=("$row")
+  done < <(scan_candidates)
+  if [ "${#rows[@]}" -eq 0 ]; then
+    echo "No untagged running containers with a pve-flr-portal installation were found."
+    return 0
+  fi
+  for row in "${rows[@]}"; do
+    id="${row%%|*}"
+    if have_tty; then
+      read -rp "Manage container ${id} (${row#*|}) from here? [Y/n] " answer || answer="n"
+      case "$answer" in
+        n|N|no|NO) continue ;;
+      esac
+    fi
+    adopt_ct "$id"
+  done
+}
+
+# --- Choosing a container ------------------------------------------------
+
+CTID=""
+
+# choose_ct [EXPLICIT_CTID] - sets CTID.
+choose_ct() {
+  local explicit="${1:-}" rows=() row n i choice
+  if [ -n "$explicit" ]; then
+    pct config "$explicit" >/dev/null 2>&1 || die "Container $explicit was not found on this node."
+    CTID="$explicit"
+    return 0
+  fi
+  while IFS= read -r row; do
+    rows+=("$row")
+  done < <(list_rows)
+  if [ "${#rows[@]}" -eq 0 ]; then
+    if have_tty && [ -n "$(scan_candidates | head -1)" ]; then
+      echo "No containers are tagged '$TAG' yet, but existing installs were found."
+      cmd_adopt
+      while IFS= read -r row; do
+        rows+=("$row")
+      done < <(list_rows)
+    fi
+    if [ "${#rows[@]}" -eq 0 ]; then
+      die "No pve-flr-portal containers found on this node (tag '$TAG'). Use 'pve-flr-portal adopt' for an existing install."
+    fi
+  fi
+  if [ "${#rows[@]}" -eq 1 ]; then
+    CTID="${rows[0]%%|*}"
+    return 0
+  fi
+  have_tty || die "More than one container - give its CTID. $(printf '%s ' "${rows[@]%%|*}")"
+  n=${#rows[@]}
+  if command -v whiptail >/dev/null 2>&1; then
+    local items=()
+    for row in "${rows[@]}"; do
+      IFS='|' read -r id name status ver <<< "$row"
+      items+=("$id" "${name}  (${status}, v${ver#v})")
+    done
+    choice=$(whiptail --backtitle "pve-flr-portal" --title "Choose a container" \
+      --menu "Which pve-flr-portal container?" $((n + 9)) 72 "$n" "${items[@]}" 3>&1 1>&2 2>&3) \
+      || { echo "Cancelled."; exit 0; }
+    CTID="$choice"
+  else
+    echo "Which pve-flr-portal container?"
+    i=1
+    for row in "${rows[@]}"; do
+      IFS='|' read -r id name status ver <<< "$row"
+      echo "  $i) CT $id  $name  ($status, v${ver#v})"
+      i=$((i + 1))
+    done
+    read -rp "Number: " choice || exit 0
+    [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ] || die "Not a valid choice."
+    CTID="${rows[$((choice - 1))]%%|*}"
+  fi
+}
+
+ensure_running() {
+  local status
+  status=$(pct status "$1" | awk '{print $2}')
+  if [ "$status" = "running" ]; then
+    return 0
+  fi
+  have_tty || die "Container $1 is not running."
+  read -rp "Container $1 is not running. Start it? [Y/n] " status || status="n"
+  case "$status" in
+    n|N|no|NO) exit 0 ;;
+  esac
+  pct start "$1"
+  sleep 5
+}
+
+# --- Commands ------------------------------------------------------------
+
+fetch_tools() {
+  TOOLS_DIR=$(mktemp -d)
+  trap 'rm -rf "$TOOLS_DIR"' EXIT
+  mkdir -p "$TOOLS_DIR/lib"
+  if ! pct pull "$1" "$APP_DIR/deploy/pfr-manage.sh" "$TOOLS_DIR/pfr-manage.sh" 2>/dev/null \
+    || ! pct pull "$1" "$APP_DIR/deploy/lib/settings.sh" "$TOOLS_DIR/lib/settings.sh" 2>/dev/null; then
+    die "Container $1 runs a release that predates the management tools. Update it first: pve-flr-portal update $1"
+  fi
+}
+
+cmd_config() {
+  choose_ct "${1:-}"
+  ensure_running "$CTID"
+  fetch_tools "$CTID"
+  bash "$TOOLS_DIR/pfr-manage.sh" config "$CTID"
+}
+
+cmd_update() {
+  local explicit=""
+  if [ "$#" -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+    explicit="$1"
+    shift
+  fi
+  choose_ct "$explicit"
+  ensure_running "$CTID"
+  pct exec "$CTID" -- bash "$APP_DIR/deploy/update.sh" "$@"
+}
+
+cmd_status() {
+  local ver state ip
+  choose_ct "${1:-}"
+  ensure_running "$CTID"
+  ver="$(ct_version "$CTID")"
+  state="$(pct exec "$CTID" -- systemctl is-active pve-flr-portal 2>/dev/null || true)"
+  ip="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  echo "Container: $CTID ($(pct config "$CTID" | sed -n 's/^hostname: *//p'))"
+  echo "Version:   ${ver:-unknown}"
+  echo "Service:   ${state:-unknown}"
+  if [ -n "$ip" ]; then
+    echo "Address:   $ip"
+  fi
+}
+
+cmd_list() {
+  local row id name status ver
+  printf '%-6s %-24s %-9s %s\n' "CTID" "NAME" "STATUS" "VERSION"
+  while IFS= read -r row; do
+    IFS='|' read -r id name status ver <<< "$row"
+    printf '%-6s %-24s %-9s %s\n' "$id" "$name" "$status" "$ver"
+  done < <(list_rows)
+}
+
+main() {
+  local sub="" invoked
+  invoked="$(basename "$0")"
+  case "$invoked" in
+    pve-flr-portal-config) sub="config" ;;
+    pve-flr-portal-update) sub="update" ;;
+    *) sub="${1:-}"; [ "$#" -gt 0 ] && shift ;;
+  esac
+  case "$sub" in
+    ""|-h|--help|help) usage; exit 0 ;;
+  esac
+  command -v pct >/dev/null 2>&1 || die "pct not found - run this on the PVE host."
+  case "$sub" in
+    config) cmd_config "$@" ;;
+    update) cmd_update "$@" ;;
+    status) cmd_status "$@" ;;
+    list) cmd_list ;;
+    adopt) cmd_adopt "$@" ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"

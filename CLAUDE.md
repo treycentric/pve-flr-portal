@@ -114,8 +114,11 @@ Companion docs, kept separate on purpose:
   `restore_chunking.py`/`restore_network_pull.py`/`restore_download.py`;
   `templates/`, `static/`
 - `scripts/release.py` — changelog/version-bump/GitHub-release automation
-- `deploy/` — LXC install scripts + systemd unit; `Dockerfile` /
-  `docker-compose.yml` at the repo root
+- `deploy/` — LXC install scripts + systemd unit; `lib/settings.sh` (the
+  settings registry and dialogs shared by the installer and the management
+  tool), `pfr-manage.sh` (the management tool, run from the container's
+  checkout) and `host/pve-flr-portal` (the thin host command installed in
+  `/usr/local/sbin`); `Dockerfile` / `docker-compose.yml` at the repo root
 - `tests/` — pytest + `node --test` + stylelint; see `tests/README.md`
 - `.github/workflows/` — CI (every push/PR) and release (tag push) gates
 - `run.py` — entrypoint (HTTPS bootstrap, then serves the app)
