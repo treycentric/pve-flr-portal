@@ -43,7 +43,12 @@ die() {
 }
 
 TMP=$(mktemp)
-trap 'rm -f "$TMP"' EXIT
+
+# Where the roles tool is kept on the host (the command's `roles` runs it).
+ROLES_TOOL="$SBIN/pve-flr-portal-roles"
+TMP_ROLES=$(mktemp)
+trap 'rm -f "$TMP" "$TMP_ROLES"' EXIT
+REF=""
 
 # from_container CTID - copy the command out of the container's checkout.
 # `pct pull` can report success and leave an empty file for a missing source,
@@ -54,6 +59,13 @@ from_container() {
     || die "Container $1 runs a release that doesn't include the host command. Update it first (see the README), or run this without a CTID to download it."
   pct pull "$1" "$APP_DIR/deploy/host/pve-flr-portal" "$TMP" 2>/dev/null && [ -s "$TMP" ] \
     || die "Could not copy the host command out of container $1."
+  # the roles tool is optional - a release can predate it
+  if pct exec "$1" -- test -f "$APP_DIR/deploy/host/pfr-roles.sh" 2>/dev/null \
+    && pct pull "$1" "$APP_DIR/deploy/host/pfr-roles.sh" "$TMP_ROLES" 2>/dev/null && [ -s "$TMP_ROLES" ]; then
+    :
+  else
+    : > "$TMP_ROLES"
+  fi
   echo "Copied from container $1's checkout."
 }
 
@@ -82,6 +94,9 @@ from_github() {
     if curl -fsSL "https://raw.githubusercontent.com/${slug}/${ref}/deploy/host/pve-flr-portal" -o "$TMP" 2>/dev/null \
       && [ -s "$TMP" ]; then
       echo "Downloaded from $ref."
+      REF="$ref"
+      curl -fsSL "https://raw.githubusercontent.com/${slug}/${ref}/deploy/host/pfr-roles.sh" -o "$TMP_ROLES" 2>/dev/null \
+        || : > "$TMP_ROLES"
       return 0
     fi
   done
@@ -105,10 +120,17 @@ mv -f "$SBIN/pve-flr-portal.new" "$SBIN/pve-flr-portal"
 ln -sf pve-flr-portal "$SBIN/pve-flr-portal-config"
 ln -sf pve-flr-portal "$SBIN/pve-flr-portal-update"
 
+# The roles tool, if the source has it and it is the tool (same care as above).
+if [ -s "$TMP_ROLES" ] && bash -n "$TMP_ROLES" 2>/dev/null && grep -q '^PFR_ROLES_SCRIPT=1' "$TMP_ROLES"; then
+  install -m 755 "$TMP_ROLES" "$ROLES_TOOL.new"
+  mv -f "$ROLES_TOOL.new" "$ROLES_TOOL"
+  echo "Installed $ROLES_TOOL (run through 'pve-flr-portal roles')."
+fi
+
 echo "Installed $SBIN/pve-flr-portal (and the -config / -update links)."
 if [ "$RUN_INSTALL" = "1" ]; then
   echo
-  rm -f "$TMP"  # exec below skips the exit trap
+  rm -f "$TMP" "$TMP_ROLES"  # exec below skips the exit trap
   exec "$SBIN/pve-flr-portal" install
 fi
 echo

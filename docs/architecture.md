@@ -360,9 +360,13 @@ portal already keeps:
   one place and creates, inspects (`status`: missing / ok / differs, and how
   many ACL grants use each) or deletes them with `pveum`. Every `pveum` call
   is checked individually, an existing role is only changed on confirmation,
-  and a role with grants is only deleted with `--remove-acls`. The host
-  command downloads it like `install`; the installer runs it from the new
-  container's checkout for the roles chosen in its "PVE roles to create" step
+  and a role with grants is only deleted with `--remove-acls`. It is kept on
+  the host as `/usr/local/sbin/pve-flr-portal-roles`, like the host-backup
+  patch script: `install-host-tools.sh`, `pve-flr-portal host-tools`, a
+  container `update` and the installer all install or refresh it from the same
+  source as the command (a missing or foreign file is never installed). A host
+  that predates it downloads it for the run. The installer runs the host's copy
+  for the roles chosen in its "PVE roles to create" step
   (nothing is created unattended unless `CREATE_ROLES` is set - roles are
   PVE-wide authorization config). Creating a role grants nothing.
 - **`install`** creates a container without a checkout: it downloads

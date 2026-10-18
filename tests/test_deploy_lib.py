@@ -501,3 +501,51 @@ def test_the_installer_says_what_to_do_when_the_release_lacks_the_roles_tool(pve
     assert "doesn't include the roles tool yet" in result.stdout
     assert "pve-flr-portal roles create FileRestoreReader" in result.stdout
     assert pve.roles() == {}
+
+
+def test_installing_the_host_command_from_a_container_installs_the_roles_tool_too(pve, tmp_path):
+    pve.add_ct(207)
+    host = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy" / "host"
+    host.mkdir(parents=True)
+    (host / "pve-flr-portal").write_text("#!/usr/bin/env bash\necho hi\n", encoding="utf-8", newline="\n")
+    (host / "pfr-roles.sh").write_text("#!/usr/bin/env bash\nPFR_ROLES_SCRIPT=1\n", encoding="utf-8", newline="\n")
+    sbin = tmp_path / "sbin"
+    sbin.mkdir()
+    result = pve.bash(
+        f'set -uo pipefail\nsource "{LIB}"\nPFR_SBIN="{sbin.as_posix()}" pfr_install_host_command 207; echo "rc=$?"\n'
+    )
+    assert "rc=0" in result.stdout, result.stderr
+    assert (sbin / "pve-flr-portal-roles").exists()
+
+
+def test_a_release_without_the_roles_tool_still_installs_the_command(pve, tmp_path):
+    pve.add_ct(207)
+    host = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy" / "host"
+    host.mkdir(parents=True)
+    (host / "pve-flr-portal").write_text("#!/usr/bin/env bash\necho hi\n", encoding="utf-8", newline="\n")
+    sbin = tmp_path / "sbin"
+    sbin.mkdir()
+    result = pve.bash(
+        f'set -uo pipefail\nsource "{LIB}"\nPFR_SBIN="{sbin.as_posix()}" pfr_install_host_command 207; echo "rc=$?"\n'
+    )
+    assert "rc=0" in result.stdout, result.stderr
+    assert (sbin / "pve-flr-portal").exists()
+    assert not (sbin / "pve-flr-portal-roles").exists()
+
+
+def test_the_installer_prefers_the_roles_tool_installed_on_the_host(pve, tmp_path):
+    import re
+
+    text = (DEPLOY / "lxc-create.sh").read_text(encoding="utf-8")
+    block = re.search(r'^if \[ -n "\$CREATE_ROLES" \]; then\n.*?^fi\n', text, re.S | re.M).group(0)
+    pve.add_ct(207)  # the container's release has no roles tool: the host's copy is what runs
+    sbin = tmp_path / "sbin"
+    sbin.mkdir()
+    (sbin / "pve-flr-portal-roles").write_bytes((DEPLOY / "host" / "pfr-roles.sh").read_bytes())
+    result = pve.bash(
+        f'set -uo pipefail\nsource "{LIB}"\nCTID=207\nCREATE_ROLES=FileRestoreReader\n'
+        f'PFR_SBIN="{sbin.as_posix()}"\n{block}\n'
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Created FileRestoreReader" in result.stdout
+    assert "FileRestoreReader" in pve.roles()

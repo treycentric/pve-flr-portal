@@ -1346,6 +1346,11 @@ pfr_install_host_command() {
   mv -f "$sbin/pve-flr-portal.new" "$sbin/pve-flr-portal"
   ln -sf pve-flr-portal "$sbin/pve-flr-portal-config"
   ln -sf pve-flr-portal "$sbin/pve-flr-portal-update"
+  # The roles tool lives next to it (a release can predate it).
+  if pfr_pull "$1" "$PFR_APP_DIR/deploy/host/pfr-roles.sh" "$tmp"; then
+    install -m 755 "$tmp" "$sbin/pve-flr-portal-roles.new"
+    mv -f "$sbin/pve-flr-portal-roles.new" "$sbin/pve-flr-portal-roles"
+  fi
   rm -f "$tmp"
 }
 

@@ -538,7 +538,7 @@ on the node that hosts the container:
 | Command | What it does |
 |---|---|
 | `pve-flr-portal install` | Creates a new portal container: downloads the guided installer from GitHub (the latest release; `PFR_VERSION` picks a tag or branch) and runs it. Run it again for another instance. |
-| `pve-flr-portal roles <status\|create\|delete> [NAMES\|--all]` | Creates, inspects or deletes the PVE roles the portal's users need (`FileRestoreReader`, `FileRestoreOperator`, `FileRestoreReaderHost`). Downloaded from GitHub like `install`; runs on the node. See "Provisioning Access". |
+| `pve-flr-portal roles <status\|create\|delete> [NAMES\|--all]` | Creates, inspects or deletes the PVE roles the portal's users need (`FileRestoreReader`, `FileRestoreOperator`, `FileRestoreReaderHost`). The tool is kept on the host (`/usr/local/sbin/pve-flr-portal-roles`), installed with the command and refreshed by `host-tools`, so it works offline; roles are cluster-wide, so any node will do. See "Provisioning Access". |
 | `pve-flr-portal config [CTID]` | A welcome screen, then the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
 | `pve-flr-portal update [CTID] [version]` | Shows the installed and new version, asks to confirm, then runs `update.sh` in the container (see "Updating"). |
 | `pve-flr-portal status [CTID]` | Installed version, whether a newer release is available, service state and address. |
@@ -586,7 +586,8 @@ back to `main` if the release predates it; `PFR_VERSION=<tag or branch>` picks
 another), or copies it out of a container's own checkout if you give it a
 container ID (`bash install-host-tools.sh 207`). It refuses to install anything
 that isn't the command - an empty or truncated download never replaces a
-working copy. Once the command is there, `pve-flr-portal host-tools` keeps it -
+working copy. It installs the roles tool (`pve-flr-portal-roles`) alongside the
+command. Once the command is there, `pve-flr-portal host-tools` keeps both -
 and the host-backup patch script, if you enabled host-backup support - up to
 date from GitHub, on any node, with no container involved (give it a CTID to
 copy from that container's release instead).

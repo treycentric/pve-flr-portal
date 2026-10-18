@@ -633,7 +633,7 @@ def test_roles_runs_the_tool_downloaded_from_the_latest_release(pve):
     assert result.returncode == 0, result.stderr
     assert "FileRestoreReader" in result.stdout
     assert "Using the roles tool from v1.9.0" in result.stderr
-    assert "Fetching the roles tool from GitHub - please wait" in result.stderr
+    assert "roles tool isn't installed on this host yet" in result.stderr  # no local copy: downloaded for this run
 
 
 def test_roles_passes_its_arguments_through_and_changes_pve(pve):
@@ -671,3 +671,70 @@ def test_roles_leaves_no_temp_files_behind(pve):
     raw = _roles_tool(pve)
     stub(pve, "roles", "status", env=_github_env(pve, raw))
     assert list(pve.tmpdir.iterdir()) == []
+
+
+# --- the roles tool lives on the host ----------------------------------------------------
+
+
+def _local_roles_tool(pve: FakePve, body: str | None = None) -> Path:
+    from pve_fakes import DEPLOY as D
+
+    text = body if body is not None else (D / "host" / "pfr-roles.sh").read_text(encoding="utf-8")
+    path = pve.root / "sbin" / "pve-flr-portal-roles"
+    _write(path, text)
+    return path
+
+
+def test_roles_uses_the_copy_on_the_host_without_touching_the_network(pve):
+    _local_roles_tool(pve)
+    # nothing is served and no release exists: if it tried to download, it would fail
+    result = stub(pve, "roles", "status", env=_github_env(pve, pve.root / "nothing"))
+    assert result.returncode == 0, result.stderr
+    assert "FileRestoreReader" in result.stdout
+    assert "Fetching" not in result.stderr and "GitHub" not in result.stderr
+
+
+def test_host_tools_installs_the_roles_tool_from_github(pve):
+    from pve_fakes import DEPLOY as D
+
+    raw = _raw(
+        pve,
+        "v1.9.0",
+        **{"pve-flr-portal": NEW_CMD, "pfr-roles.sh": (D / "host" / "pfr-roles.sh").read_text(encoding="utf-8")},
+    )
+    result = stub(pve, "host-tools", env=_github_env(pve, raw))
+    assert result.returncode == 0, result.stderr
+    tool = pve.root / "sbin" / "pve-flr-portal-roles"
+    assert "PFR_ROLES_SCRIPT=1" in tool.read_text(encoding="utf-8")
+    assert "Already up to date" in stub(pve, "host-tools", env=_github_env(pve, raw)).stdout
+
+
+def test_host_tools_from_github_never_installs_a_roles_tool_that_is_not_the_tool(pve):
+    raw = _raw(pve, "v1.9.0", **{"pve-flr-portal": NEW_CMD, "pfr-roles.sh": "#!/usr/bin/env bash\necho not-it\n"})
+    result = stub(pve, "host-tools", env=_github_env(pve, raw))
+    assert result.returncode == 0, result.stderr
+    assert not (pve.root / "sbin" / "pve-flr-portal-roles").exists()
+    assert "isn't the expected script" in result.stderr
+
+
+def test_host_tools_from_a_container_installs_the_roles_tool_too(pve):
+    from pve_fakes import DEPLOY as D
+
+    _updatable(pve)
+    deploy = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy"
+    _write(deploy / "host" / "pve-flr-portal", "#!/usr/bin/env bash\necho cmd\n")
+    _write(deploy / "host" / "pfr-roles.sh", (D / "host" / "pfr-roles.sh").read_text(encoding="utf-8"))
+    assert stub(pve, "host-tools", "207").returncode == 0
+    assert (pve.root / "sbin" / "pve-flr-portal-roles").exists()
+
+
+def test_a_container_update_refreshes_the_roles_tool_too(pve):
+    from pve_fakes import DEPLOY as D
+
+    _updatable(pve)
+    _local_roles_tool(pve, "#!/usr/bin/env bash\nPFR_ROLES_SCRIPT=1\necho old\n")
+    new = _new_release_files(pve)
+    _write(new / "host" / "pve-flr-portal", "#!/usr/bin/env bash\necho cmd\n")
+    _write(new / "host" / "pfr-roles.sh", (D / "host" / "pfr-roles.sh").read_text(encoding="utf-8"))
+    assert stub(pve, "update", "-y").returncode == 0
+    assert "Usage: pfr-roles.sh" in (pve.root / "sbin" / "pve-flr-portal-roles").read_text(encoding="utf-8")
