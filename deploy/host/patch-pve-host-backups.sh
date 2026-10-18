@@ -4,15 +4,15 @@
 # listings. Run this ON THE PVE HOST (not inside a container/VM) as root,
 # once per node (a cluster needs this on every node), e.g.:
 #
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/patch-pve-host-backups.sh)"
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/host/patch-pve-host-backups.sh)"
 #
 # or, from a local clone:
 #
-#   bash deploy/patch-pve-host-backups.sh
+#   bash deploy/host/patch-pve-host-backups.sh
 #
 # To remove the patch and the dpkg hook that reapplies it:
 #
-#   bash deploy/patch-pve-host-backups.sh --remove
+#   bash deploy/host/patch-pve-host-backups.sh --remove
 #
 # WHY THIS EXISTS (CLAUDE.md's "last resort" patching guidance):
 # PVE::Storage::PBSPlugin::list_volumes - the code behind both
@@ -86,7 +86,7 @@ chains = [
         # human reading the file, can tell "pve-flr-portal did this"
         # apart from any other unrecognized modification nearby.
         "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host'); "
-        "# patched by pve-flr-portal, see deploy/patch-pve-host-backups.sh",
+        "# patched by pve-flr-portal, see deploy/host/patch-pve-host-backups.sh",
     ],
     [
         r"next if $bid !~ m/^\d+$/;",
@@ -184,12 +184,12 @@ echo "==> Installing self + dpkg hook to reapply after every pve-storage update"
 # the curl-piped case (bash -c "$(curl ...)") it's just "bash", so the cp
 # fails and this falls back to fetching the published copy instead.
 if ! cp -- "$0" "$INSTALLED_SCRIPT_PATH" 2>/dev/null; then
-  curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/patch-pve-host-backups.sh \
+  curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/host/patch-pve-host-backups.sh \
     -o "$INSTALLED_SCRIPT_PATH"
 fi
 chmod 755 "$INSTALLED_SCRIPT_PATH"
 cat > "$DPKG_HOOK_PATH" <<EOF
-// Installed by pve-flr-portal (deploy/patch-pve-host-backups.sh).
+// Installed by pve-flr-portal (deploy/host/patch-pve-host-backups.sh).
 // Reapplies the host-backup-listing patch after every apt run - cheap/
 // idempotent (the script no-ops if already patched), so this doesn't
 // bother checking whether pve-storage specifically was touched.
@@ -197,4 +197,4 @@ DPkg::Post-Invoke { "$INSTALLED_SCRIPT_PATH >/dev/null 2>&1 || true"; };
 EOF
 
 echo "==> Done. Host backups should now appear in PVE's storage content listing."
-echo "    To undo: bash deploy/patch-pve-host-backups.sh --remove"
+echo "    To undo: bash deploy/host/patch-pve-host-backups.sh --remove"

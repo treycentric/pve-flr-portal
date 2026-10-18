@@ -74,7 +74,9 @@ class FakePve:
         addr: str | None = "192.168.1.50/24",
         update_script: bool = True,
         git_checkout: bool = False,
+        layout: str = "new",
     ) -> Path:
+        """layout: "new" is the host/ + container/ deploy tree, "old" the flat one of earlier releases."""
         c = self.ct(ctid)
         (c / "fs" / "opt" / "pve-flr-portal").mkdir(parents=True)
         config = f"hostname: {name}\nnet0: {net0}\n"
@@ -90,22 +92,24 @@ class FakePve:
         if git_checkout:
             app = c / "fs" / "opt" / "pve-flr-portal"
             (app / ".git").mkdir(parents=True, exist_ok=True)
-            (app / "deploy").mkdir(parents=True, exist_ok=True)
-            (app / "deploy" / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8", newline="\n")
+            scripts = app / "deploy" / ("container" if layout == "new" else "")
+            scripts.mkdir(parents=True, exist_ok=True)
+            (scripts / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8", newline="\n")
         if update_script:
-            deploy = c / "fs" / "opt" / "pve-flr-portal" / "deploy"
-            deploy.mkdir(parents=True, exist_ok=True)
-            (deploy / "update.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8", newline="\n")
+            scripts = c / "fs" / "opt" / "pve-flr-portal" / "deploy" / ("container" if layout == "new" else "")
+            scripts.mkdir(parents=True, exist_ok=True)
+            (scripts / "update.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8", newline="\n")
         if addr is not None:
             (c / "addr").write_text(addr + "\n", encoding="utf-8", newline="\n")
         return c
 
-    def install_tools(self, ctid: int) -> None:
+    def install_tools(self, ctid: int, layout: str = "new") -> None:
         """Put the management tools in the container's checkout, as a release has them."""
         deploy = self.ct(ctid) / "fs" / "opt" / "pve-flr-portal" / "deploy"
-        (deploy / "lib").mkdir(parents=True, exist_ok=True)
-        shutil.copy(DEPLOY / "pfr-manage.sh", deploy / "pfr-manage.sh")
-        shutil.copy(DEPLOY / "lib" / "settings.sh", deploy / "lib" / "settings.sh")
+        target = deploy / "host" if layout == "new" else deploy
+        (target / "lib").mkdir(parents=True, exist_ok=True)
+        shutil.copy(DEPLOY / "host" / "pfr-manage.sh", target / "pfr-manage.sh")
+        shutil.copy(DEPLOY / "host" / "lib" / "settings.sh", target / "lib" / "settings.sh")
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = {

@@ -114,13 +114,25 @@ Companion docs, kept separate on purpose:
   `restore_chunking.py`/`restore_network_pull.py`/`restore_download.py`;
   `templates/`, `static/`
 - `scripts/release.py` — changelog/version-bump/GitHub-release automation
-- `deploy/` — LXC install scripts + systemd unit; `lib/settings.sh` (the
-  settings registry and dialogs shared by the installer and the management
-  tool), `pfr-manage.sh` (the management tool, run from the container's
-  checkout) and `host/pve-flr-portal` (the thin host command installed in
-  `/usr/local/sbin`), `host/pfr-roles.sh` (creates, inspects and deletes the
-  PVE roles, run on a node), and `install-host-tools.sh` (installs that
-  command on a host that doesn't have it); `Dockerfile` / `docker-compose.yml` at the repo root
+- `deploy/` — LXC install scripts + systemd unit, split by where they run:
+  - `host/` (on the PVE node): `lxc-create.sh` (the installer),
+    `lib/settings.sh` (the settings registry and dialogs shared by the
+    installer and the management tool), `pfr-manage.sh` (the management tool,
+    run from the container's checkout), `pve-flr-portal` (the thin host
+    command installed in `/usr/local/sbin`), `pfr-roles.sh` (creates,
+    inspects and deletes the PVE roles), `patch-pve-host-backups.sh`, and
+    `install-host-tools.sh` (installs the host command on a host that doesn't
+    have it)
+  - `container/` (inside the LXC): `install.sh`, `update.sh`, the `certbot-*`
+    scripts, the systemd unit template, the rfc2136 credentials example
+  - the old flat paths (`install.sh`, `update.sh`, `lxc-create.sh`,
+    `certbot-*.sh`, the unit template) are compatibility stubs/copies for
+    existing installs, docs and certbot renewal hooks - remove them in the
+    next major release; `tests/test_deploy_layout_compat.py` covers both
+    layouts. Anything reading a container's checkout or a GitHub ref looks in
+    the new location first, then the old one.
+  - `Dockerfile` / `docker-compose.yml` are at the repo root; the image doesn't
+    contain `deploy/`.
 - `tests/` — pytest + `node --test` + stylelint; see `tests/README.md`
 - `.github/workflows/` — CI (every push/PR) and release (tag push) gates
 - `run.py` — entrypoint (HTTPS bootstrap, then serves the app)

@@ -1,4 +1,4 @@
-"""How deploy/lxc-create.sh gets its shared library (deploy/lib/settings.sh)
+"""How deploy/host/lxc-create.sh gets its shared library (deploy/host/lib/settings.sh)
 when it is curl-piped rather than run from a checkout: the latest release
 first, then main if that release predates the library or has a different
 API. Uses a fake curl (tests/fakes/curl)."""
@@ -9,7 +9,7 @@ import shutil
 import pytest
 from pve_fakes import DEPLOY, FakePve
 
-SCRIPT = (DEPLOY / "lxc-create.sh").read_text(encoding="utf-8")
+SCRIPT = (DEPLOY / "host" / "lxc-create.sh").read_text(encoding="utf-8")
 LOAD_LIB = re.search(r"^load_lib\(\) \{\n.*?^\}\n", SCRIPT, re.S | re.M).group(0)
 
 
@@ -111,7 +111,7 @@ def test_the_real_library_survives_being_sourced_from_inside_a_function(pve, tmp
     # and lose them ("CTID: unbound variable" on first use).
     checkout = tmp_path / "deploy"
     (checkout / "lib").mkdir(parents=True)
-    shutil.copy(DEPLOY / "lib" / "settings.sh", checkout / "lib" / "settings.sh")
+    shutil.copy(DEPLOY / "host" / "lib" / "settings.sh", checkout / "lib" / "settings.sh")
     script = checkout / "run.sh"
     script.write_text(
         "set -euo pipefail\n"

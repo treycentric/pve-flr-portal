@@ -1,0 +1,27 @@
+[Unit]
+Description=File Level Restore Portal for Proxmox Backup Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/.venv/bin/python run.py
+Restart=on-failure
+RestartSec=5
+# App-state dir, created + owned by this service's user.
+# %S is systemd's state-directory root (/var/lib), so this resolves to
+# /var/lib/pve-flr-portal - persists across restarts and redeploys.
+StateDirectory=pve-flr-portal
+Environment=PFR_DATA_DIR=%S/pve-flr-portal
+# App dir is root-owned and read-only to this service; certs/ is
+# the one subtree it can write. StateDirectory above is writable too.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=__APP_DIR__/certs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

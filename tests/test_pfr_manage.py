@@ -1,4 +1,4 @@
-"""deploy/pfr-manage.sh - what `pve-flr-portal config` does once the person has
+"""deploy/host/pfr-manage.sh - what `pve-flr-portal config` does once the person has
 chosen their changes: reading the container's current state, listing what
 will change, applying network changes (with rollback), and patching .env.
 
@@ -8,7 +8,7 @@ its functions against a fake `pct` (tests/fakes/pct)."""
 import pytest
 from pve_fakes import DEPLOY, FakePve
 
-MANAGE = (DEPLOY / "pfr-manage.sh").as_posix()
+MANAGE = (DEPLOY / "host" / "pfr-manage.sh").as_posix()
 
 
 @pytest.fixture
@@ -217,7 +217,7 @@ def test_several_data_networks_are_left_alone(pve):
 
 def test_config_refuses_without_a_terminal_and_with_a_bad_container_id(pve):
     pve.add_ct(207)
-    script = DEPLOY / "pfr-manage.sh"
+    script = DEPLOY / "host" / "pfr-manage.sh"
     result = pve.run_script(script, ["config", "notanumber"])
     assert result.returncode == 2
     result = pve.run_script(script, ["bogus", "207"])

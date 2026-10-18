@@ -4,6 +4,7 @@ Every `_run` / `subprocess.run` call is stubbed - these assert on *which*
 git commands the flow issues, without a real repo or network. The pure
 logic is covered in test_release.py.
 """
+
 import argparse
 
 import pytest
@@ -32,9 +33,7 @@ class _FakeGit:
 @pytest.fixture
 def stub_pure(monkeypatch):
     monkeypatch.setattr(release, "latest_tag", lambda: "v1.0.0")
-    monkeypatch.setattr(
-        release, "commits_since", lambda ref: [release.Commit("abc1234def", "feat: a thing (#1)")]
-    )
+    monkeypatch.setattr(release, "commits_since", lambda ref: [release.Commit("abc1234def", "feat: a thing (#1)")])
     monkeypatch.setattr(release, "read_version", lambda *a, **k: "1.0.0")
     monkeypatch.setattr(release, "write_version", lambda *a, **k: None)
     monkeypatch.setattr(release, "prepend_changelog", lambda *a, **k: None)
@@ -113,9 +112,7 @@ def test_tag_refuses_when_head_is_not_the_release_commit(monkeypatch):
 
 def test_tag_refuses_when_tag_already_exists(monkeypatch):
     monkeypatch.setattr(release, "read_version", lambda *a, **k: "1.1.0")
-    git = _FakeGit(
-        **{"--porcelain": "", "--pretty=%s": "chore(release): v1.1.0\n", "--list": "v1.1.0\n"}
-    )
+    git = _FakeGit(**{"--porcelain": "", "--pretty=%s": "chore(release): v1.1.0\n", "--list": "v1.1.0\n"})
     monkeypatch.setattr(release, "_run", git)
 
     with pytest.raises(SystemExit):

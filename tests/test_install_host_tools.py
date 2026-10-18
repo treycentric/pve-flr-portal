@@ -1,11 +1,11 @@
-"""deploy/install-host-tools.sh - installs the `pve-flr-portal` host command on
+"""deploy/host/install-host-tools.sh - installs the `pve-flr-portal` host command on
 a host that doesn't have it (or has an old copy), from a container's checkout
 or from GitHub. Uses the fake `pct` and `curl` (tests/fakes/)."""
 
 import pytest
 from pve_fakes import DEPLOY, FakePve
 
-SCRIPT = DEPLOY / "install-host-tools.sh"
+SCRIPT = DEPLOY / "host" / "install-host-tools.sh"
 STUB = DEPLOY / "host" / "pve-flr-portal"
 
 
@@ -133,7 +133,7 @@ def test_the_script_is_executable_in_git():
     import subprocess
 
     out = subprocess.run(
-        ["git", "ls-files", "--stage", "deploy/install-host-tools.sh"],
+        ["git", "ls-files", "--stage", "deploy/host/install-host-tools.sh"],
         cwd=DEPLOY.parent,
         capture_output=True,
         text=True,

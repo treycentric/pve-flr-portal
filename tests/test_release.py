@@ -3,6 +3,7 @@ recommendation, changelog formatting) and its filesystem I/O helpers.
 Deliberately does not touch git/subprocess or the real repo's
 VERSION/CHANGELOG.md - see docs/dev/versioning.md for the convention
 these enforce."""
+
 from datetime import date
 
 import pytest
@@ -54,8 +55,7 @@ def test_commit_bang_marks_breaking_and_keeps_description():
 def test_commit_breaking_change_footer():
     commit = c(
         "refactor(auth): switch to PVE ticket sessions",
-        body="Replaces the shared API token entirely.\n\n"
-        "BREAKING CHANGE: PVE_TOKEN_* env vars are no longer read.",
+        body="Replaces the shared API token entirely.\n\nBREAKING CHANGE: PVE_TOKEN_* env vars are no longer read.",
     )
     assert commit.is_breaking is True
     assert commit.breaking_description == "PVE_TOKEN_* env vars are no longer read."

@@ -175,15 +175,13 @@ def test_index_evicts_dir_cache_entries_for_volumes_no_longer_listed(client, ses
     behind forever - reconciled against this same request's own live
     archive list on every normal page load."""
     asyncio.run(dir_cache.set(session_data.username, "pbs:backup/vm/999/2020-01-01T00:00:00Z", "/", [{"text": "x"}]))
-    asyncio.run(
-        dir_cache.set(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/", [{"text": "kept"}])
-    )
+    asyncio.run(dir_cache.set(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/", [{"text": "kept"}]))
     resp = client.get("/")
     assert resp.status_code == 200
     assert asyncio.run(dir_cache.get(session_data.username, "pbs:backup/vm/999/2020-01-01T00:00:00Z", "/")) is None
-    assert asyncio.run(
-        dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")
-    ) == [{"text": "kept"}]
+    assert asyncio.run(dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")) == [
+        {"text": "kept"}
+    ]
 
 
 def test_index_skips_dir_cache_eviction_when_a_storage_errored(session_data, monkeypatch):
@@ -209,9 +207,9 @@ def test_index_skips_dir_cache_eviction_when_a_storage_errored(session_data, mon
     finally:
         main.app.dependency_overrides.clear()
     assert resp.status_code == 200
-    assert asyncio.run(
-        dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")
-    ) == [{"text": "x"}]
+    assert asyncio.run(dir_cache.get(session_data.username, "pbs:backup/vm/133/2026-08-30T02:03:57Z", "/")) == [
+        {"text": "x"}
+    ]
 
 
 def test_index_requires_auth():

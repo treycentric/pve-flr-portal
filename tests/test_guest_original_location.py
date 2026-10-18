@@ -92,13 +92,22 @@ async def test_windows_sata_disk_matched_by_scsibus_not_ordinal(session_data, mo
         if "Get-PhysicalDisk" in argv[-1]:
             import json
 
-            return 0, json.dumps(
-                [
-                    {"DiskNumber": 0, "BusType": "ATA", "SCSIBus": 0, "Location": "Bus Number 0, Target Id 0, LUN 0"},
-                    {"DiskNumber": 1, "BusType": "SATA", "SCSIBus": 1, "Location": None},
-                    {"DiskNumber": 2, "BusType": "SATA", "SCSIBus": 2, "Location": None},
-                ]
-            ), ""
+            return (
+                0,
+                json.dumps(
+                    [
+                        {
+                            "DiskNumber": 0,
+                            "BusType": "ATA",
+                            "SCSIBus": 0,
+                            "Location": "Bus Number 0, Target Id 0, LUN 0",
+                        },
+                        {"DiskNumber": 1, "BusType": "SATA", "SCSIBus": 1, "Location": None},
+                        {"DiskNumber": 2, "BusType": "SATA", "SCSIBus": 2, "Location": None},
+                    ]
+                ),
+                "",
+            )
         return 0, "E\n", ""
 
     monkeypatch.setattr(gol, "run_guest_exec", fake_run_guest_exec)
@@ -120,12 +129,26 @@ async def test_windows_scsi_disk_matched_by_lun(session_data, monkeypatch):
         if "Get-PhysicalDisk" in argv[-1]:
             import json
 
-            return 0, json.dumps(
-                [
-                    {"DiskNumber": 3, "BusType": "SAS", "SCSIBus": 0, "Location": "Bus Number 0, Target Id 0, LUN 0"},
-                    {"DiskNumber": 4, "BusType": "SAS", "SCSIBus": 0, "Location": "Bus Number 0, Target Id 0, LUN 5"},
-                ]
-            ), ""
+            return (
+                0,
+                json.dumps(
+                    [
+                        {
+                            "DiskNumber": 3,
+                            "BusType": "SAS",
+                            "SCSIBus": 0,
+                            "Location": "Bus Number 0, Target Id 0, LUN 0",
+                        },
+                        {
+                            "DiskNumber": 4,
+                            "BusType": "SAS",
+                            "SCSIBus": 0,
+                            "Location": "Bus Number 0, Target Id 0, LUN 5",
+                        },
+                    ]
+                ),
+                "",
+            )
         return 0, "F\n", ""
 
     monkeypatch.setattr(gol, "run_guest_exec", fake_run_guest_exec)
@@ -151,12 +174,16 @@ async def test_windows_ambiguous_ide_falls_back_to_ordinal(session_data, monkeyp
         if "Get-PhysicalDisk" in argv[-1]:
             import json
 
-            return 0, json.dumps(
-                [
-                    {"DiskNumber": 0, "BusType": "ATA", "SCSIBus": 0, "Location": None},
-                    {"DiskNumber": 1, "BusType": "ATA", "SCSIBus": 1, "Location": None},
-                ]
-            ), ""
+            return (
+                0,
+                json.dumps(
+                    [
+                        {"DiskNumber": 0, "BusType": "ATA", "SCSIBus": 0, "Location": None},
+                        {"DiskNumber": 1, "BusType": "ATA", "SCSIBus": 1, "Location": None},
+                    ]
+                ),
+                "",
+            )
         assert "DiskNumber 0" in argv[-1]
         return 0, "C\n", ""
 
