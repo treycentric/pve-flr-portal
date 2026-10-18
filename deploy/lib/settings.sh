@@ -20,7 +20,7 @@ PFR_MODE="${PFR_MODE:-install}"
 # The review screen's proceed action is the dialog's own button (whiptail
 # has OK and Cancel only, so Cancel carries it); Esc quits.
 HUB_GO_BUTTON="Install now"
-HUB_TEXT="Select a setting and choose Edit to change it. Choose \"Install now\" when you're ready, or press Esc to quit."
+HUB_TEXT="Highlight a setting and press Enter to change it. Choose \"Install now\" when you're ready, or press Esc to quit."
 HUB_QUIT_TEXT="Quit without installing anything?"
 
 # pfr_cancel - the person quit. A non-zero status for the installer (nothing
@@ -956,7 +956,7 @@ review_hub() {
         rows=16
       fi
       rc=0
-      choice=$(wt --title "Review" --notags --ok-button "Edit" --cancel-button "$HUB_GO_BUTTON" \
+      choice=$(wt --title "Review" --notags --ok-button "Edit (Enter)" --cancel-button "$HUB_GO_BUTTON" \
         ${last:+--default-item "$last"} --menu "$HUB_TEXT" \
         "$(cap_h $((rows + 2 + 7)))" "$(dlg_w)" "$rows" "${items[@]}") || rc=$?
       if [ "$rc" -eq 1 ]; then
@@ -1470,7 +1470,7 @@ pfr_use_config_layout() {
   BASIC_LAYOUT=("H:Container" CT_HOSTNAME "H:Network" BRIDGE VLAN_TAG IP IP6 DNS "H:Portal" PVE_HOST PVE_STORAGE ENABLE_DNT)
   ADV_GROUPS=(portal access limits dnt)
   HUB_GO_BUTTON="Apply changes"
-  HUB_TEXT="Select a setting and choose Edit to change it. Changed settings are marked with *. Choose \"Apply changes\" when you're ready, or press Esc to quit."
+  HUB_TEXT="Highlight a setting and press Enter to change it. Changed settings are marked with *. Choose \"Apply changes\" when you're ready, or press Esc to quit."
   HUB_QUIT_TEXT="Quit without applying any changes?"
   WELCOME_TEXT="Welcome to the pve-flr-portal configurator.
 

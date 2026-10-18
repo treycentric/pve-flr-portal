@@ -328,8 +328,9 @@ def test_install_now_is_the_dialogs_own_button_not_a_row_in_the_list(pve):
     assert "returned=0" in result.stdout, result.stderr
     first = log.splitlines()[0]
     assert "--cancel-button Install now" in first
-    assert "--ok-button Edit" in first
+    assert "--ok-button Edit (Enter)" in first
     assert ">>> Install now" not in first  # no longer an (off-screen) row
+    assert "press Enter to change it" in first
     assert "press Esc to quit" in first
     assert "Advanced settings" in first
 
