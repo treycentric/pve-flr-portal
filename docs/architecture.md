@@ -356,6 +356,19 @@ portal already keeps:
   the changed keys to `.env` and restarts the service. `.env` is patched
   in place by a small Python script inside the container, so JSON values
   such as `RESTORE_DATA_NICS` need no shell escaping.
+- **`roles`** (`deploy/host/pfr-roles.sh`) defines the three roles' privileges in
+  one place and creates, inspects (`status`: missing / ok / differs, and how
+  many ACL grants use each) or deletes them with `pveum`. Every `pveum` call
+  is checked individually, an existing role is only changed on confirmation,
+  and a role with grants is only deleted with `--remove-acls`. It is kept on
+  the host as `/usr/local/sbin/pve-flr-portal-roles`, like the host-backup
+  patch script: `install-host-tools.sh`, `pve-flr-portal host-tools`, a
+  container `update` and the installer all install or refresh it from the same
+  source as the command (a missing or foreign file is never installed). A host
+  that predates it downloads it for the run. The installer runs the host's copy
+  for the roles chosen in its "PVE roles to create" step
+  (nothing is created unattended unless `CREATE_ROLES` is set - roles are
+  PVE-wide authorization config). Creating a role grants nothing.
 - **`install`** creates a container without a checkout: it downloads
   `lxc-create.sh` from GitHub by the same ref order as `host-tools` (the
   latest release, `PFR_VERSION`, then `main`), checks that it parses and is

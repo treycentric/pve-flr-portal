@@ -176,3 +176,43 @@ def test_without_the_install_flag_it_only_installs_the_command(pve):
     assert result.returncode == 0, result.stderr
     assert "INSTALLER-RAN" not in result.stdout
     assert "pve-flr-portal install" in result.stdout  # points at the next step
+
+
+# --- the bootstrap installs the roles tool alongside the command ----------------------------
+
+
+def _roles_script_text() -> str:
+    return (DEPLOY / "host" / "pfr-roles.sh").read_text(encoding="utf-8")
+
+
+def test_the_bootstrap_installs_the_roles_tool_from_github(pve):
+    raw = _raw_with_stub_and_installer(pve, installer=False)
+    (raw / "v1.9.0" / "pfr-roles.sh").write_text(_roles_script_text(), encoding="utf-8", newline="\n")
+    result, sbin = install(pve, **_github(raw))
+    assert result.returncode == 0, result.stderr
+    assert "PFR_ROLES_SCRIPT=1" in (sbin / "pve-flr-portal-roles").read_text(encoding="utf-8")
+    assert "pve-flr-portal roles" in result.stdout
+
+
+def test_the_bootstrap_installs_the_roles_tool_from_a_containers_checkout(pve):
+    _release_has_the_command(pve)
+    host = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy" / "host"
+    (host / "pfr-roles.sh").write_text(_roles_script_text(), encoding="utf-8", newline="\n")
+    result, sbin = install(pve, "207")
+    assert result.returncode == 0, result.stderr
+    assert (sbin / "pve-flr-portal-roles").exists()
+
+
+def test_a_missing_or_foreign_roles_tool_does_not_stop_the_command_being_installed(pve):
+    raw = _raw_with_stub_and_installer(pve, installer=False)  # no roles tool in this release
+    result, sbin = install(pve, **_github(raw))
+    assert result.returncode == 0, result.stderr
+    assert (sbin / "pve-flr-portal").exists()
+    assert not (sbin / "pve-flr-portal-roles").exists()
+
+    (raw / "v1.9.0" / "pfr-roles.sh").write_text(
+        "#!/usr/bin/env bash\necho not-the-tool\n", encoding="utf-8", newline="\n"
+    )
+    result, sbin = install(pve, **_github(raw))
+    assert result.returncode == 0, result.stderr
+    assert not (sbin / "pve-flr-portal-roles").exists()

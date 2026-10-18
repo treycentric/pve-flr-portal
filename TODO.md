@@ -98,8 +98,10 @@ with the fix, test, and commit.
     optional pre-update snapshot, `--all`, refreshes the host-side pieces) and
     an update-available line in `status`, updating installs that predate
     `update.sh`, and `pve-flr-portal host-tools` / `install-host-tools.sh` to
-    install or refresh the host command. Remaining: stage 3 host-backup and
-    certificate actions, uninstall (#93); stage 4 container resources
+    install or refresh the host command. Stage 3 so far: `pve-flr-portal roles` and the
+    installer's roles step **SHIPPED**. Remaining: stage 3 host-backup and
+    certificate actions, uninstall (#93, which will reuse `roles delete
+    --remove-acls`); stage 4 container resources
     (`pct set` / grow-only `pct resize`).
 - #92 — submit pve-flr-portal to community-scripts.org (ProxmoxVED).
   Deliberately separate from #91 — needs a purpose-built script pair

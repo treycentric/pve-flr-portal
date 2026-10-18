@@ -219,6 +219,8 @@ def PVE_HOST "PVE host" str "$DEFAULT_PVE_HOST" PVE_HOST basic '^[^[:space:]]+$'
 def PVE_STORAGE "PBS storage(s) to browse" str pbs PVE_STORAGE basic "" "" "Select the Proxmox Backup Server storage(s) the portal will browse backups from. Choose more than one if your backups are spread across several PBS storages or namespaces."
 def ENABLE_HOST_BACKUPS "Host-backup support" enum false "" basic "false=No|true=Yes - patch this PVE node now" "" "Lets the portal browse and restore from HOST-type backups.\n\nThis modifies the Proxmox Storage PBS backend on this PVE host to remove a limitation that prevents browsing and file-level restore of host backups. A side benefit: host backups also become browsable in the PVE UI.\n\nThe change reapplies itself automatically after pve-storage package updates. See deploy/patch-pve-host-backups.sh for details. On a cluster, run that script on every other node too."
 
+def CREATE_ROLES "PVE roles to create" str "" "" basic "" "" "The PVE roles your users get access through. Creating a role grants nothing by itself - you still grant it to each user (see the README's Provisioning Access) - and existing roles are left alone.\n\nFileRestoreReader: browse and download backups.\nFileRestoreOperator: restore files into running guests (PVE 9 or newer).\nFileRestoreReaderHost: browse host backups. It includes Datastore.Allocate, which is full admin on that storage, so use it only on a storage dedicated to host backups.\n\nThe installer creates the ones you select."
+
 # --- Advanced ---
 def DISK_GB "Disk size (GB)" int 4 "" resources "1:65536" "" ""
 def MEMORY_MB "Memory (MB)" int 512 "" resources "128:1048576" "" ""
@@ -257,9 +259,9 @@ def CERTBOT_KEY_TYPE "Key type" enum ecdsa "" cert "ecdsa=ECDSA - certbot's defa
 def CERTBOT_RSA_KEY_SIZE "RSA key size" int 2048 "" cert "2048:16384" "CERTBOT_KEY_TYPE=rsa" ""
 def PFR_ACME_DATA_PLANE "Also use it for the data plane" enum 0 PFR_ACME_DATA_PLANE cert "0=No|1=Yes - the domains must include the data-plane hostname" "ENABLE_DNT=yes" ""
 
-BASIC_KEYS=(CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG IP IP6 DNS PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
+BASIC_KEYS=(CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG IP IP6 DNS PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS CREATE_ROLES)
 # The review screen groups them under headings ("H:" rows are headings).
-BASIC_LAYOUT=("H:Container" CTID CT_HOSTNAME STORAGE "H:Network" BRIDGE VLAN_TAG IP IP6 DNS "H:Portal" PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
+BASIC_LAYOUT=("H:Container" CTID CT_HOSTNAME STORAGE "H:Network" BRIDGE VLAN_TAG IP IP6 DNS "H:Portal" PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS CREATE_ROLES)
 ADV_GROUPS=(resources portal access limits dnt cert)
 declare -gA G_TITLE=(
   [resources]="Container resources"
@@ -365,6 +367,14 @@ show_val() {
       true) echo "Yes" ;;
       *) echo "Yes (CA: $v)" ;;
     esac
+    return
+  fi
+  if [ "$k" = "CREATE_ROLES" ]; then
+    if [ -z "$v" ]; then
+      echo "None"
+    else
+      echo "${v//,/, }"
+    fi
     return
   fi
   case "$v" in
@@ -540,7 +550,9 @@ ui_multi() {
           items+=("$o" "" OFF)
         fi
       done
-      if [ "$any_on" = "0" ]; then
+      # Nothing current matches: tick everything - unless "none" is a valid
+      # answer here, in which case nothing ticked is just what was chosen.
+      if [ "$any_on" = "0" ] && [ "${MULTI_ALLOW_NONE:-0}" != "1" ]; then
         for ((j = 2; j < ${#items[@]}; j += 3)); do
           items[j]=ON
         done
@@ -559,9 +571,16 @@ ui_multi() {
         echo "  $i) $o"
         i=$((i + 1))
       done
-      read -rp "Choice(s), comma-separated numbers ('<' = back): " n || return 1
+      if [ "${MULTI_ALLOW_NONE:-0}" = "1" ]; then
+        read -rp "Choice(s), comma-separated numbers; Enter keeps [${!1:-none}], 'none' selects nothing ('<' = back): " n || return 1
+      else
+        read -rp "Choice(s), comma-separated numbers ('<' = back): " n || return 1
+      fi
       if [ "$n" = "<" ]; then
         return 1
+      fi
+      if [ "${MULTI_ALLOW_NONE:-0}" = "1" ] && [ -z "$n" ]; then
+        return 0
       fi
       picked=()
       for i in $(printf '%s' "$n" | tr ',' ' '); do
@@ -572,7 +591,7 @@ ui_multi() {
       val=$(IFS=,; printf '%s' "${picked[*]}")
       i=1
     fi
-    if [ -n "$val" ]; then
+    if [ -n "$val" ] || [ "${MULTI_ALLOW_NONE:-0}" = "1" ]; then
       printf -v "$var" '%s' "$val"
       return 0
     fi
@@ -711,6 +730,48 @@ edit_PVE_VERIFY_SSL() {
   fi
 }
 
+# pfr_pve_major -> this host's PVE major version (0 if it can't be told).
+pfr_pve_major() {
+  local v
+  v=$(pveversion 2>/dev/null | sed -n 's|^pve-manager/\([0-9][0-9]*\).*|\1|p' | head -1 || true)
+  echo "${v:-0}"
+}
+
+PFR_ROLE_NAMES=(FileRestoreReader FileRestoreOperator FileRestoreReaderHost)
+ROLES_PRESELECTED=""
+
+# The roles on offer; the operator role needs PVE 9's guest-agent privileges.
+pfr_roles_offered() {
+  local name
+  for name in "${PFR_ROLE_NAMES[@]}"; do
+    if [ "$name" = "FileRestoreOperator" ] && [ "$(pfr_pve_major)" -lt 9 ]; then
+      continue
+    fi
+    echo "$name"
+  done
+}
+
+# Nothing to select is a fine answer here, so the checklist may end up empty.
+edit_CREATE_ROLES() {
+  local choices=() line
+  while IFS= read -r line; do
+    choices+=("$line")
+  done < <(pfr_roles_offered)
+  # First time through: the sensible set - the reader, the operator where the
+  # PVE has it, and the host role only if host-backup support was chosen.
+  if [ -z "$ROLES_PRESELECTED" ] && [ -z "$CREATE_ROLES" ]; then
+    CREATE_ROLES="FileRestoreReader"
+    if printf '%s\n' "${choices[@]}" | grep -qx FileRestoreOperator; then
+      CREATE_ROLES="$CREATE_ROLES,FileRestoreOperator"
+    fi
+    if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
+      CREATE_ROLES="$CREATE_ROLES,FileRestoreReaderHost"
+    fi
+  fi
+  ROLES_PRESELECTED=1
+  MULTI_ALLOW_NONE=1 ui_multi CREATE_ROLES "${S_LABEL[CREATE_ROLES]}" "$(help_text CREATE_ROLES)" "${choices[@]}"
+}
+
 edit_IP() {
   edit_setting USE_STATIC_IP || return 1
   if [ "$USE_STATIC_IP" = "yes" ]; then
@@ -770,7 +831,13 @@ post_edit() {
 
 # Settings that depend on each other can't be checked field by field.
 validate_all() {
-  local problems=""
+  local problems="" role
+  for role in ${CREATE_ROLES//,/ }; do
+    case " ${PFR_ROLE_NAMES[*]} " in
+      *" $role "*) ;;
+      *) problems="${problems}- Unknown role '$role' (roles: ${PFR_ROLE_NAMES[*]}).\n" ;;
+    esac
+  done
   if [ "$ENABLE_DNT" = "yes" ] && [ -z "${RESTORE_DATA_NICS_JSON:-}" ]; then
     if { [ -n "$DNT_CIDR" ] && [ -z "$DNT_LOCAL_IP" ]; } || { [ -z "$DNT_CIDR" ] && [ -n "$DNT_LOCAL_IP" ]; }; then
       problems="${problems}- Direct Network Transfer: give both the guest subnet and this host's address on it, or leave both blank to detect them automatically.\n"
@@ -1020,7 +1087,7 @@ review_hub() {
 # ---------------------------------------------------------------------
 WELCOME_TEXT="Welcome to the pve-flr-portal installer.\n\nFile Level Restore Portal for Proxmox Backup Server: a scrubbable snapshot timeline for browsing and restoring files from your PBS backups.\n\nThis will create an unprivileged Debian 12 container on this PVE host, install the portal in it, and write your answers into its .env.\n\nA few essential questions come first (use Back to step back). A review screen then lets you change anything - including Advanced options - before anything is created.\n\nAnything you pre-set through environment variables is skipped."
 
-WIZARD=(WELCOME CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG USE_STATIC_IP STATIC_CIDR STATIC_GW IPV6_MODE STATIC6_CIDR STATIC6_GW DNS_SERVERS SEARCH_DOMAIN PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS)
+WIZARD=(WELCOME CTID CT_HOSTNAME STORAGE BRIDGE VLAN_TAG USE_STATIC_IP STATIC_CIDR STATIC_GW IPV6_MODE STATIC6_CIDR STATIC6_GW DNS_SERVERS SEARCH_DOMAIN PVE_HOST PVE_STORAGE ENABLE_DNT ENABLE_HOST_BACKUPS CREATE_ROLES)
 
 step_skipped() {
   if [ "$1" = "WELCOME" ]; then
@@ -1279,6 +1346,11 @@ pfr_install_host_command() {
   mv -f "$sbin/pve-flr-portal.new" "$sbin/pve-flr-portal"
   ln -sf pve-flr-portal "$sbin/pve-flr-portal-config"
   ln -sf pve-flr-portal "$sbin/pve-flr-portal-update"
+  # The roles tool lives next to it (a release can predate it).
+  if pfr_pull "$1" "$PFR_APP_DIR/deploy/host/pfr-roles.sh" "$tmp"; then
+    install -m 755 "$tmp" "$sbin/pve-flr-portal-roles.new"
+    mv -f "$sbin/pve-flr-portal-roles.new" "$sbin/pve-flr-portal-roles"
+  fi
   rm -f "$tmp"
 }
 

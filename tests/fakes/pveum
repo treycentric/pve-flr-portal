@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# A stand-in for pveum's role and ACL commands, for tests. State under $FAKE_PVE:
+#   roles/<name>   the role's privileges, comma-separated
+#   acls.tsv       "path<TAB>type<TAB>ugid<TAB>role" per grant
+# Every call is appended to $FAKE_PVE/pveum.log.
+set -uo pipefail
+d="${FAKE_PVE:?FAKE_PVE not set}"
+mkdir -p "$d/roles"
+touch "$d/acls.tsv"
+echo "pveum $*" >> "$d/pveum.log"
+group="${1:-}"; action="${2:-}"
+shift 2 || true
+
+json_roles() {
+  local first=1 f
+  printf '['
+  for f in "$d"/roles/*; do
+    [ -f "$f" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"roleid":"%s","privs":"%s","special":0}' "$(basename "$f")" "$(cat "$f")"
+  done
+  printf ']\n'
+}
+
+json_acls() {
+  local first=1 path type ugid role
+  printf '['
+  while IFS=$'\t' read -r path type ugid role; do
+    [ -n "$path" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"path":"%s","type":"%s","ugid":"%s","roleid":"%s","propagate":1}' "$path" "$type" "$ugid" "$role"
+  done < "$d/acls.tsv"
+  printf ']\n'
+}
+
+privs_arg() {
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-privs" ]; then
+      echo "$2"
+      return
+    fi
+    shift
+  done
+}
+
+case "$group $action" in
+  "role list") json_roles ;;
+  "role add")
+    name="$1"; shift
+    [ ! -f "$d/roles/$name" ] || { echo "role '$name' already exists" >&2; exit 2; }
+    printf '%s' "$(privs_arg "$@")" > "$d/roles/$name"
+    ;;
+  "role modify")
+    name="$1"; shift
+    [ -f "$d/roles/$name" ] || { echo "role '$name' does not exist" >&2; exit 2; }
+    printf '%s' "$(privs_arg "$@")" > "$d/roles/$name"
+    ;;
+  "role delete")
+    name="$1"
+    [ -f "$d/roles/$name" ] || { echo "role '$name' does not exist" >&2; exit 2; }
+    if cut -f4 "$d/acls.tsv" | grep -qx "$name"; then
+      echo "role '$name' is still in use" >&2
+      exit 2
+    fi
+    rm -f "$d/roles/$name"
+    ;;
+  "acl list") json_acls ;;
+  "acl delete")
+    path="$1"; shift
+    role=""; ugid=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --roles) role="$2"; shift 2 ;;
+        --users|--groups|--tokens) ugid="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    grep -v -P "^${path}\t[^\t]*\t${ugid}\t${role}\$" "$d/acls.tsv" > "$d/acls.new" || true
+    mv "$d/acls.new" "$d/acls.tsv"
+    ;;
+  *) echo "fake pveum: unsupported: $group $action" >&2; exit 1 ;;
+esac

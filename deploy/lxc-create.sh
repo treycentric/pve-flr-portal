@@ -299,6 +299,27 @@ if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
   rm -f "$PATCH_SCRIPT"
 fi
 
+# The PVE roles chosen in the installer, created by the roles tool from the
+# container's own checkout (the installed release). Roles grant nothing; an
+# existing role is left alone. A failure here doesn't undo the install.
+if [ -n "$CREATE_ROLES" ]; then
+  msg_info "Creating the PVE roles: ${CREATE_ROLES//,/, }"
+  # The copy just installed on the host from this release; failing that, the
+  # one in the container's checkout.
+  ROLES_SCRIPT="${PFR_SBIN:-/usr/local/sbin}/pve-flr-portal-roles"
+  if [ ! -f "$ROLES_SCRIPT" ]; then
+    pfr_mktemp ROLES_SCRIPT
+    pfr_pull "$CTID" "$PFR_APP_DIR/deploy/host/pfr-roles.sh" "$ROLES_SCRIPT" || : > "$ROLES_SCRIPT"
+  fi
+  if [ -s "$ROLES_SCRIPT" ]; then
+    # shellcheck disable=SC2086 # CREATE_ROLES is deliberately split into role names
+    bash "$ROLES_SCRIPT" create ${CREATE_ROLES//,/ } \
+      || msg_err "Not every role could be created - see above. Check with: pve-flr-portal roles status"
+  else
+    msg_info "The installed release doesn't include the roles tool yet - create them later with: pve-flr-portal roles create ${CREATE_ROLES//,/ }"
+  fi
+fi
+
 CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
 echo
 msg_ok "Done. pve-flr-portal is running in CT $CTID."

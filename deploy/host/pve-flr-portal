@@ -2,6 +2,7 @@
 # pve-flr-portal - manage the pve-flr-portal containers on this PVE node.
 #
 #   pve-flr-portal install                  create a new portal container
+#   pve-flr-portal roles <command> [...]    create/inspect/delete the PVE roles
 #   pve-flr-portal config [CTID]            change settings (portal and network)
 #   pve-flr-portal update [CTID] [VERSION]  update (--all, -y, --snapshot: see --help)
 #   pve-flr-portal status [CTID]            version, service state, address
@@ -62,6 +63,11 @@ Commands:
   install                Create a new portal container: downloads the guided
                          installer from GitHub (the latest release, or
                          PFR_VERSION) and runs it. Repeat for more instances.
+  roles <status|create|delete> [NAMES|--all] [options]
+                         Create, inspect or delete the PVE roles the portal's
+                         users need (FileRestoreReader, FileRestoreOperator,
+                         FileRestoreReaderHost). Run `pve-flr-portal roles
+                         --help` for the options.
   config [CTID]          Change the portal's settings and the container's
                          network configuration.
   update [CTID] [VERSION] [options]
@@ -75,8 +81,8 @@ Commands:
                            --force        update even if already up to date
   status [CTID]          Show the installed version, service state and address.
   host-tools [CTID]      Install or update the host-side pieces (this command, its
-                         -config/-update links, and the host-backup patch script
-                         if installed). Downloads them from GitHub - the latest
+                         -config/-update links, the roles tool, and the
+                         host-backup patch script if installed). Downloads them from GitHub - the latest
                          release, or PFR_VERSION - so it works on a node with no
                          portal container; with a CTID, copies them from that
                          container's release instead.
@@ -359,14 +365,20 @@ link_host_command() {
   fi
 }
 
+# The roles tool lives on the host next to this command, so `roles` works
+# offline and is refreshed with the rest of the host tools.
+ROLES_TOOL="$SBIN/pve-flr-portal-roles"
+ROLES_MARKER='^PFR_ROLES_SCRIPT=1'
+
 # refresh_host_pieces CTID - bring what lives on the host in line with the
 # release the container just moved to: this command (and its -config/-update
-# links) and, if it was ever installed, the host-backup patch script that the
-# apt hook runs.
+# links), the roles tool, and, if it was ever installed, the host-backup patch
+# script that the apt hook runs.
 refresh_host_pieces() {
   local ctid="$1"
   install_from_container "$ctid" host/pve-flr-portal "$SBIN/pve-flr-portal"
   link_host_command
+  install_from_container "$ctid" host/pfr-roles.sh "$ROLES_TOOL" "$ROLES_MARKER"
   if [ -f "$SBIN/pve-flr-portal-patch-host-backups.sh" ]; then
     install_from_container "$ctid" patch-pve-host-backups.sh "$SBIN/pve-flr-portal-patch-host-backups.sh"
   fi
@@ -416,6 +428,10 @@ refresh_from_github() {
       echo "Downloaded from $ref."
       install_file "$tmp" "$SBIN/pve-flr-portal" "GitHub ($ref)" "$STUB_MARKER"
       link_host_command
+      tmp_new tmp
+      if curl -fsSL "$raw/host/pfr-roles.sh" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        install_file "$tmp" "$ROLES_TOOL" "GitHub ($ref)" "$ROLES_MARKER"
+      fi
       if [ -f "$SBIN/pve-flr-portal-patch-host-backups.sh" ]; then
         tmp_new tmp
         if curl -fsSL "$raw/patch-pve-host-backups.sh" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
@@ -724,6 +740,24 @@ cmd_install() {
   bash "$script" "$@"
 }
 
+# roles [ARGS] - create, inspect or delete the PVE roles the portal's users
+# need, with the roles tool kept on this host (installed with the command and
+# refreshed by host-tools). Roles are cluster-wide, so any node will do. A host
+# that doesn't have the tool yet - the command was installed before it
+# existed - downloads it for this run.
+cmd_roles() {
+  local script
+  if [ -f "$ROLES_TOOL" ]; then
+    bash "$ROLES_TOOL" "$@"
+    return
+  fi
+  note "The roles tool isn't installed on this host yet (pve-flr-portal host-tools installs it) - fetching it from GitHub..."
+  download_deploy_file host/pfr-roles.sh script "$ROLES_MARKER" \
+    || die "Could not download the roles tool from GitHub. Check the network."
+  echo "Using the roles tool from $GOT_REF." >&2
+  bash "$script" "$@"
+}
+
 cmd_status() {
   local ver state ip latest
   choose_ct "${1:-}"
@@ -775,6 +809,7 @@ main() {
     status) cmd_status "$@" ;;
     host-tools) cmd_host_tools "$@" ;;
     install) cmd_install "$@" ;;
+    roles) cmd_roles "$@" ;;
     list) cmd_list ;;
     adopt) cmd_adopt "$@" ;;
     *) usage >&2; exit 2 ;;
