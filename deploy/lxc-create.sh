@@ -137,10 +137,12 @@ ask_menu() {
     local items=()
     local o
     for o in "${opts[@]}"; do
-      items+=("$o" "$o")
+      # whiptail --menu wants a tag and a description per row; the tag is
+      # all we need, so the description is left empty rather than repeated.
+      items+=("$o" "")
     done
     local val
-    val=$(whiptail --backtitle "pve-flr-portal setup" --menu "$prompt" 18 70 8 "${items[@]}" 3>&1 1>&2 2>&3) \
+    val=$(whiptail --backtitle "pve-flr-portal setup" --default-item "$default" --menu "$prompt" 18 70 8 "${items[@]}" 3>&1 1>&2 2>&3) \
       || { msg_err "Cancelled."; exit 1; }
     printf -v "$var" '%s' "$val"
   else
