@@ -33,8 +33,7 @@ them into the guest via QGA; it never bypasses PVE/the helper VM.
 
 The app is otherwise stateless: the snapshot list and any not-yet-cached
 directory listing are read live from the PVE API on each request. The
-two exceptions are both single SQLite files under `PFR_DATA_DIR` (issue
-#30), written from the request path, never a background job:
+two exceptions are both single SQLite files under `PFR_DATA_DIR`, written from the request path, never a background job:
 
 - `dir_cache.sqlite3` — a lazily-populated cache of `file-restore/list`
   responses. See "Data model" below.

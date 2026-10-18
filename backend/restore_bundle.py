@@ -10,7 +10,7 @@ live-testing log.
 - **`ManifestBuilder`** - accumulates one SHA256 per bundle entry as
   it's streamed through while the bundle is built (never buffering a
   whole entry just to hash it after the fact - the same streaming-hash
-  discipline `restore_runner.py`'s memory fix, §7.6, established for
+  discipline `restore_runner.py`'s memory fix established for
   single-file restore, extended here to many entries), and renders in
   the exact format Linux's own `sha256sum -c` already understands
   natively - so guest-side verification is one command, not an
@@ -47,7 +47,7 @@ live-testing log.
   between each item's add. Every entry - a whole leaf item, or one
   member inside a fetched directory's zip - streams through in
   fixed-size pieces during both passes, never buffered whole, matching
-  the discipline §7.6's memory fix established.
+  the discipline that memory fix established.
 """
 import asyncio
 import hashlib
@@ -237,7 +237,7 @@ async def _stream_download_to_file(
 ) -> None:
     """The actual streamed download, one DEFAULT_CHUNK_SIZE_BYTES piece
     at a time - never the whole item in memory (the same discipline
-    restore_runner.py's memory fix, §7.6, established for a single
+    restore_runner.py's memory fix established for a single
     file, extended here to each item in a multi-select bundle). Shared
     by both branches of _download_item_to_temp_file below, which only
     differ in `tar` and what (if anything) they fetch afterward."""

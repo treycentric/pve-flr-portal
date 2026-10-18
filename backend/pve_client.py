@@ -450,7 +450,7 @@ async def open_download(
     params = {"volume": volume, "filepath": filepath}
     if tar:
         params["tar"] = 1
-    # No timeout: cold lookups + large archives can legitimately take a while (§3).
+    # No timeout: cold lookups + large archives can legitimately take a while (docs/architecture.md, Known risks).
     client = httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=None)
     request = client.build_request(
         "GET", f"{_file_restore_base(volume)}/download", params=params, headers=pve_headers(session)

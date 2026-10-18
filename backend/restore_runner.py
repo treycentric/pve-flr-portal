@@ -755,7 +755,7 @@ async def _verify_checksum(job: RestoreJob, expected_sha256: str, guest_os_famil
 
 async def run_restore(job: RestoreJob, jobs: RestoreJobManager) -> None:
     """Dispatches to the single-file restore path (unchanged since
-    §7.5/§7.6) or the multi-file/directory bundle restore path (§7.7),
+    it shipped) or the multi-file/directory bundle restore path,
     based on whether `job.items` is set. `job.items` is
     `None` for every job created before that field existed and for
     every ordinary single-file restore submitted today, so this is a

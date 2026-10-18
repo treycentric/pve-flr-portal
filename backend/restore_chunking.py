@@ -12,7 +12,7 @@ Against a real guest (PVE 9.2.11, QGA
 - The `content` field is a **raw literal string, not base64** - neither
   direction is decoded/encoded by the server regardless of the
   `encode` param (tried 0 and 1, no observable effect on this
-  version). This contradicts the archived §7.4 doc's "content is
+  version). This contradicts an earlier design doc's "content is
   base64" assumption, which most likely described `pvesh`'s own
   convenience encoding for shell safety, not the raw HTTP API.
 - The exact per-call ceiling is **61440 characters** - confirmed via
