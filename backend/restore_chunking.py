@@ -1,5 +1,5 @@
 """PH.5: chunk-size math and scratch-path helpers for restore_runner.py's
-streaming multi-chunk write path (docs/plan.md §7.5). `agent/file-write`
+streaming multi-chunk write path (docs/push-to-guest.md). `agent/file-write`
 is a genuine one-shot call - no handle/offset parameter exists, so a
 file bigger than one call's payload ceiling can't be assembled by
 repeated calls to the same guest path. A single chunk means the
@@ -7,12 +7,12 @@ content-only write path (no guest-exec) is usable; more than one means
 the per-chunk-scratch-file + guest-exec concatenation path is required
 instead.
 
-**Live-verified 2026-09-01** against a real guest (PVE 9.2.11, QGA
-110.0.2, Windows 10, see docs/plan.md §7.5):
+Against a real guest (PVE 9.2.11, QGA
+110.0.2, Windows 10, see docs/api-reference.md):
 - The `content` field is a **raw literal string, not base64** - neither
   direction is decoded/encoded by the server regardless of the
   `encode` param (tried 0 and 1, no observable effect on this
-  version). This contradicts the archived §7.4 doc's "content is
+  version). This contradicts an earlier design doc's "content is
   base64" assumption, which most likely described `pvesh`'s own
   convenience encoding for shell safety, not the raw HTTP API.
 - The exact per-call ceiling is **61440 characters** - confirmed via
@@ -29,8 +29,8 @@ instead.
 pre-build a full list of every chunk's wire-ready string (`Chunk`
 objects from `split_into_chunks()`) *in addition to* the raw downloaded
 bytes it already held - roughly doubling peak memory, for content that
-Direct Network Transfer (docs/plan.md §7.6, issue #22) doesn't even use
-in wire-string form at all. Confirmed live: a large restore on a
+Direct Network Transfer (docs/push-to-guest.md) doesn't even use
+in wire-string form at all. A large restore on a
 memory-constrained deployment (512 MB LXC default) got OOM-killed by
 the kernel before the restore ever got far enough to check Direct
 Network Transfer's eligibility. `Chunk`/`split_into_chunks()`/
@@ -71,7 +71,7 @@ def chunk_count(total_bytes: int, chunk_size_bytes: int = DEFAULT_CHUNK_SIZE_BYT
 
 def scratch_filename(job_id: str, index: int) -> str:
     """Deterministic, collision-safe per-chunk scratch filename within a
-    job's own scratch directory (docs/plan.md §7.5)."""
+    job's own scratch directory (docs/push-to-guest.md)."""
     return f"{job_id}.part{index:05d}"
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# First-run helper (issue #52): issues a real (CA-issued) cert for
+# First-run helper: issues a real (CA-issued) cert for
 # pve-flr-portal via certbot's DNS-01 challenge, and wires up automatic
 # renewal. Run ONCE, as root, inside the container/host running the
 # portal:
@@ -89,7 +89,7 @@ if [ ! -f "$HOOK" ]; then
 fi
 if [ ! -x "$HOOK" ]; then
   # A file this project ships and fully controls - self-heal rather
-  # than making the admin chmod it by hand (confirmed live: a fresh
+  # than making the admin chmod it by hand (a fresh
   # git clone doesn't always carry the executable bit through).
   chmod +x "$HOOK"
 fi

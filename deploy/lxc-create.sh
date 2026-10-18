@@ -173,7 +173,7 @@ ask_value CTID "Container ID (CTID)" "$DEFAULT_CTID"
 # silently pick up e.g. the PVE host's own name instead of the intended
 # default the moment this runs anywhere HOSTNAME is already set (which is
 # effectively always - it's not something a clean environment lacks).
-# CT_HOSTNAME avoids the collision. Confirmed live 2026-09-01: an actual
+# CT_HOSTNAME avoids the collision. An actual
 # run named the container after the PVE host itself ("titan") instead of
 # "pve-flr-portal".
 ask_value CT_HOSTNAME "Container hostname" "pve-flr-portal"
@@ -263,8 +263,11 @@ if [ "$USE_ADVANCED" = "yes" ]; then
   fi
 fi
 
+# Passed straight through to install.sh - see its own
+# comment for what these do.
 INSTALL_CERTBOT="${INSTALL_CERTBOT:-1}"
 CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-rfc2136}"
+ENABLE_HOST_BACKUPS="${ENABLE_HOST_BACKUPS:-}"  # "true"/"false" to skip the prompt below
 
 echo
 msg_info "Settings:"
@@ -290,12 +293,36 @@ fi
 # this point, just consuming the resolved variables above)
 # ---------------------------------------------------------------------
 
+# Opt-in only, and only asked interactively - a non-interactive run (no
+# ENABLE_HOST_BACKUPS override, no tty) defaults to "false" rather than
+# hanging on `read` or silently patching a Proxmox-owned file. See
+# deploy/patch-pve-host-backups.sh and docs/api-reference.md for the
+# full detail behind this prompt's wording.
+if [ -z "$ENABLE_HOST_BACKUPS" ]; then
+  if [ -t 0 ]; then
+    echo
+    echo "This modifies the Proxmox Storage PBS backend to remove a"
+    echo "limitation preventing the browsing and file-level restore of"
+    echo "host backups, which is necessary for this application to"
+    echo "support them. A benefit is that host backups will also become"
+    echo "browsable in the PVE UI. It reapplies itself automatically"
+    echo "after pve-storage package updates. See"
+    echo "deploy/patch-pve-host-backups.sh for details."
+    read -r -p "Enable host-backup support now? [y/N] " _reply || _reply=""
+    case "$_reply" in
+      [yY]*) ENABLE_HOST_BACKUPS=true ;;
+      *) ENABLE_HOST_BACKUPS=false ;;
+    esac
+  else
+    ENABLE_HOST_BACKUPS=false
+  fi
+fi
+
 # TEMPLATE can still be overridden explicitly (TEMPLATE=debian-12-standard_...
 # bash deploy/lxc-create.sh) for a pinned/offline/reproducible run - but the
 # default now discovers whatever the latest debian-12-standard build
 # actually is, rather than a hardcoded version string that inevitably goes
-# stale as Debian ships point releases (issue #16 - confirmed live
-# 2026-09-01: a run failed outright with "no such template" against the
+# stale as Debian ships point releases (a run failed outright with "no such template" against the
 # previously pinned 12.7-1, which pveam's catalog had already moved past).
 if [ -z "${TEMPLATE:-}" ]; then
   msg_info "Looking up the latest debian-12-standard template"
@@ -348,7 +375,7 @@ pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq git ca
 # history to search - depth-1 clones don't fetch tags at all. Then pin
 # to the latest tagged GitHub Release (docs/dev/versioning.md) rather
 # than leaving the checkout on whatever unreleased commit happens to be
-# on main - issue #89. `deploy/update.sh` (also cloned in) is the
+# on main. `deploy/update.sh` (also cloned in) is the
 # supported way to move to a different/later release afterwards.
 pct exec "$CTID" -- bash -c "git clone '${REPO_URL}' /opt/pve-flr-portal"
 pct exec "$CTID" -- bash -c "
@@ -367,7 +394,7 @@ pct exec "$CTID" -- bash -c "
 # when run as `bash deploy/lxc-create.sh` from a local checkout - not
 # when curl-piped (`bash -c "$(curl ...)"`, the invocation this file's
 # own header comment documents first), where "$0" is just "bash" and
-# `dirname "$0"` resolves to "." Confirmed live 2026-09-01: a curl-piped
+# `dirname "$0"` resolves to "." A curl-piped
 # run failed with "failed to open ./install.sh for reading".
 pct exec "$CTID" -- env "INSTALL_CERTBOT=${INSTALL_CERTBOT}" "CERTBOT_DNS_PLUGIN=${CERTBOT_DNS_PLUGIN}" \
   bash /opt/pve-flr-portal/deploy/install.sh
@@ -451,6 +478,18 @@ if [ "$SETUP_LE" = "yes" ] && [ -n "$LE_DOMAINS" ]; then
   fi
 fi
 
+if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
+  echo "==> Enabling host-backup support on this PVE node"
+  # Runs on the PVE HOST, not inside the container - this script patches
+  # a file that only exists on the host. Same local-clone-vs-curl-piped
+  # fallback install.sh above already has to handle.
+  if [ -f "$(dirname "$0")/patch-pve-host-backups.sh" ]; then
+    bash "$(dirname "$0")/patch-pve-host-backups.sh"
+  else
+    bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/patch-pve-host-backups.sh)"
+  fi
+fi
+
 CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
 echo
 msg_ok "Done. pve-flr-portal is running in CT $CTID."
@@ -460,3 +499,7 @@ if [ "${#ENV_OVERRIDES[@]}" -eq 0 ]; then
   echo "    then: pct exec $CTID -- systemctl restart pve-flr-portal"
 fi
 echo "    To update later: pct exec $CTID -- bash /opt/pve-flr-portal/deploy/update.sh"
+if [ "$ENABLE_HOST_BACKUPS" = "true" ]; then
+  echo "    Host-backup support patched on THIS node only - on a cluster,"
+  echo "    also run deploy/patch-pve-host-backups.sh on every other node."
+fi

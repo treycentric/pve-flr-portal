@@ -7,7 +7,7 @@
         class="tree-toggle"
         data-filepath="{{ node.filepath }}"
         :class="{ 'is-open': open }"
-        @click="open = !open; trackTreeToggle('{{ node.filepath }}', open)"
+        @click="open = !open; trackTreeToggle($el.dataset.filepath, open)"
         hx-get="/api/tree?volume={{ volume | urlencode }}&filepath={{ node.filepath | urlencode }}&crumbs={{ node.crumbs_json | urlencode }}"
         hx-target="next ul"
         hx-swap="innerHTML"
@@ -16,7 +16,9 @@
         type="button"
         class="tree-label"
         data-crumbs='{{ node.crumbs_json }}'
-        :class="{ 'is-selected': volume === '{{ volume }}' && crumbs.length && crumbs[crumbs.length - 1].filepath === '{{ node.filepath }}' }"
+        data-filepath="{{ node.filepath }}"
+        data-volume="{{ volume }}"
+        :class="{ 'is-selected': volume === $el.dataset.volume && crumbs.length && crumbs[crumbs.length - 1].filepath === $el.dataset.filepath }"
         :disabled="loading"
         @click="setPath(JSON.parse($el.dataset.crumbs))">
         {% if node.type_label == 'Drive' %}

@@ -1,6 +1,6 @@
 """PH.4 per-user auth: PVE ticket login replacing the old shared API tokens.
 
-Pattern borrowed from PVE's own web UI (docs/plan.md §7.1): POST
+Pattern borrowed from PVE's own web UI (docs/architecture.md): POST
 credentials to /access/ticket once, then keep the session alive by
 re-POSTing the *current* ticket in place of a password well before its
 ~2h expiry, rather than forcing a full re-login. Our backend does this
@@ -8,14 +8,15 @@ refresh server-side, transparently - the browser only ever holds our
 own opaque session cookie, never the real PVE ticket.
 
 Session store is a plain in-memory dict: this is a single-process
-homelab tool (CLAUDE.md - no extra services), so a backend restart
+internal tool (CLAUDE.md - no extra services), so a backend restart
 logging everyone out is an acceptable tradeoff.
 """
 import asyncio
 import logging
+import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from fastapi import HTTPException, Request
@@ -30,7 +31,7 @@ _API_ROOT = f"https://{settings.pve_host}:8006/api2/json"
 # PVE ticket lifetime.
 _TICKET_REFRESH_AGE_SECONDS = 90 * 60
 
-# list_realms() retry/fallback (issue #31). A transient failure of the
+# list_realms() retry/fallback. A transient failure of the
 # unauthenticated /access/domains call must not leave the login page
 # with an empty realm <select> - the browser omits an option-less
 # select from the POST entirely, which surfaces as a baffling
@@ -52,6 +53,15 @@ class SessionData:
     csrf_token: str
     ticket_issued_at: float
     last_activity_at: float
+    # PVE's own computed-permissions summary, straight from
+    # /access/ticket's "cap" field (both the password and OIDC login
+    # paths return it - per PVE's own source, pve-access-
+    # control's AccessControl.pm/OpenId.pm). Bucketed by broad area
+    # ("dc", "nodes", "vms", "storage", ...), not by arbitrary path -
+    # see is_job_admin() below for what that means in practice. Kept
+    # fresh across a long session the same way the ticket itself is:
+    # _refresh_ticket() updates it from each refresh response too.
+    cap: dict = field(default_factory=dict)
 
 
 _sessions: dict[str, SessionData] = {}
@@ -69,7 +79,7 @@ async def list_realms() -> list[dict]:
     populate its realm dropdown.
 
     Retries a few times on failure, then returns the pam/pve fallback
-    rather than raising or returning an empty list (issue #31): the
+    rather than raising or returning an empty list: the
     login page must always have at least one selectable realm.
     """
     last_exc: Exception | None = None
@@ -93,7 +103,7 @@ async def list_realms() -> list[dict]:
 
 
 def _store_ticket(data: dict) -> str:
-    """Common tail of every login path (password or OIDC, issue #56):
+    """Common tail of every login path (password or OIDC):
     both `/access/ticket` and `/access/openid/login` hand back the same
     {username, ticket, CSRFPreventionToken} shape, so this is the one
     place a SessionData gets built and stashed in the session store."""
@@ -105,12 +115,42 @@ def _store_ticket(data: dict) -> str:
         csrf_token=data["CSRFPreventionToken"],
         ticket_issued_at=now,
         last_activity_at=now,
+        cap=data.get("cap") or {},
     )
     return session_id
 
 
+def is_job_admin(session: SessionData) -> bool:
+    """Does this session bypass RESTRICT_JOBS_TO_OWN? Checks
+    `cap["dc"]` - the bucket PVE's compute_api_permission uses for a
+    privilege granted at the bare root path "/" specifically, not
+    scoped to a storage/VM/node subtree - against settings.job_admin_privilege
+    (default Sys.Audit). See README's "Provisioning access" for the
+    recommended BackupAdmins role bundling this."""
+    return bool(session.cap.get("dc", {}).get(settings.job_admin_privilege))
+
+
+class TFARequired(Exception):
+    """Raised by login() when the account has a second factor
+    (TOTP or a recovery key - PVE's own second /access/ticket call
+    doesn't distinguish which) configured. `challenge` is PVE's own
+    signed, opaque intermediate value - not a real session ticket yet -
+    that finish_tfa_login() must echo back verbatim as `tfa-challenge`.
+    It encodes the already-verified username/password itself (confirmed
+    against PVE's own source, PVE/API2/AccessControl.pm's create_ticket:
+    the intermediate ticket is `assemble_ticket("!tfa!$tfa_info")`,
+    PVE's normal ticket-signing applied to a TFA-prefixed payload), so
+    the original password is never needed again on the second call."""
+
+    def __init__(self, challenge: str, username: str):
+        self.challenge = challenge
+        self.username = username
+
+
 async def login(username: str, password: str) -> str:
-    """Authenticate against PVE's ticket endpoint; returns our opaque session id."""
+    """Authenticate against PVE's ticket endpoint; returns our opaque
+    session id, or raises TFARequired if a second factor is needed -
+    call finish_tfa_login() next with the code the user enters."""
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         resp = await client.post(
             f"{_API_ROOT}/access/ticket",
@@ -118,12 +158,47 @@ async def login(username: str, password: str) -> str:
         )
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    data = resp.json()["data"]
+    if data.get("NeedTFA"):
+        raise TFARequired(challenge=data["ticket"], username=data["username"])
+    return _store_ticket(data)
+
+
+_TOTP_CODE_RE = re.compile(r"^\d{6,8}$")
+
+
+async def finish_tfa_login(username: str, code: str, challenge: str) -> str:
+    """Second factor: `code` is whatever the user entered - a
+    TOTP code or a one-time recovery key, PVE accepts either the same
+    way here, in `password` (mixing it with the unrelated `otp` param is
+    explicitly rejected server-side: "TFA response should be in
+    'password', not 'otp'"). **The value must be prefixed with which
+    method it's for** - `totp:123456` or `recovery:<key>` - confirmed
+    against PVE's own web UI (proxmox-widget-toolkit's TfaWindow.js,
+    `finishChallenge('totp:' + code)` / `finishChallenge('recovery:' +
+    key)`); a bare code is silently rejected regardless of whether it's
+    actually correct. This was a real bug - the Perl
+    API2 schema alone doesn't document the prefix requirement, only
+    PVE's own client does.
+
+    A recovery key is always four hyphen-separated groups of 4 hex
+    digits (`^[0-9a-f]{4}(-[0-9a-f]{4}){3}$`, per the same widget's own
+    input validation) and never looks like a bare 6-8 digit number, so
+    which prefix to use is unambiguous without a second input field."""
+    method = "totp" if _TOTP_CODE_RE.match(code) else "recovery"
+    async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
+        resp = await client.post(
+            f"{_API_ROOT}/access/ticket",
+            data={"username": username, "password": f"{method}:{code}", "tfa-challenge": challenge},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid authentication code")
     return _store_ticket(resp.json()["data"])
 
 
 async def oidc_auth_url(realm: str, redirect_url: str) -> str:
-    """Issue #56: the first leg of an OIDC/SSO login. Wraps PVE's
-    `POST /access/openid/auth-url` (confirmed against pve-access-
+    """The first leg of an OIDC/SSO login. Wraps PVE's
+    `POST /access/openid/auth-url` (see pve-access-
     control's PVE/API2/OpenId.pm - same call PVE's own web UI makes),
     which returns the identity provider's authorization URL to send the
     browser to. `redirect-url` is caller-supplied - PVE just forwards it
@@ -143,7 +218,7 @@ async def oidc_auth_url(realm: str, redirect_url: str) -> str:
 
 
 async def oidc_login(state: str, code: str, redirect_url: str) -> str:
-    """Issue #56: the second leg - the identity provider redirected the
+    """The second leg - the identity provider redirected the
     browser back to our callback with `state`/`code`; exchange them via
     PVE's `POST /access/openid/login` (same `redirect-url` as the
     auth-url call, required for PVE to complete the token exchange with
@@ -172,13 +247,14 @@ async def _refresh_ticket(session: SessionData) -> None:
     session.ticket = data["ticket"]
     session.csrf_token = data["CSRFPreventionToken"]
     session.ticket_issued_at = time.time()
+    session.cap = data.get("cap") or {}
 
 
 async def ensure_fresh_ticket(session: SessionData) -> None:
     """Public wrapper around the same staleness check get_session() applies
     to interactive requests, exposed for callers that hold a SessionData
     outside the request/response cycle - namely PH.5's background restore
-    jobs (docs/plan.md §7.5). A restore can run long past any single HTTP
+    jobs (docs/push-to-guest.md). A restore can run long past any single HTTP
     request, so a job needs to refresh its own ticket on this same policy
     rather than only ever refreshing on the next browser request (which
     may not come for a while, or ever, if the job was fire-and-forget)."""
@@ -205,7 +281,7 @@ async def _resolve_session(request: Request, *, touch: bool) -> SessionData:
     # Only genuine user activity resets the idle clock. Background polls
     # (the restore-jobs list + log pollers) pass touch=False, so a tab
     # left open on an otherwise-idle session still times out on schedule
-    # (issue #27, docs/plan.md §7.2) - the poll's own next 401 is then
+    # (docs/architecture.md) - the poll's own next 401 is then
     # what bounces the browser to /login.
     if touch:
         session.last_activity_at = now
@@ -215,7 +291,7 @@ async def _resolve_session(request: Request, *, touch: bool) -> SessionData:
         # PVE rejected the ticket refresh (ticket fully expired, account
         # disabled, PVE unreachable at the moment it was needed). The
         # session can't be kept alive - evict it and treat it as expired
-        # so the caller redirects to /login rather than 500ing (issue #27).
+        # so the caller redirects to /login rather than 500ing.
         _sessions.pop(session_id, None)
         raise HTTPException(
             status_code=401, detail="Session expired (PVE ticket refresh failed)"

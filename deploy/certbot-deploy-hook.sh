@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# certbot --deploy-hook / renew_hook for pve-flr-portal (issue #52).
+# certbot --deploy-hook / renew_hook for pve-flr-portal.
 # Installed automatically as the renew_hook by certbot-setup.sh - not
 # meant to be run by hand except to test it (see below).
 #
@@ -7,7 +7,7 @@
 # when it calls a deploy hook. This copies the freshly-issued
 # fullchain.pem/privkey.pem to wherever the portal's .env says its own
 # cert/key live, and restarts the service so it picks them up (the app
-# reads its cert only at startup - confirmed live during #47 testing).
+# reads its cert only at startup).
 #
 # tls.py never overwrites or deletes an admin-supplied cert - only a
 # broken *self-signed* one - so pointing it at a certbot-managed path
@@ -58,7 +58,7 @@ _install_cert() {
 
 _install_cert "TLS_CERT_FILE" "TLS_KEY_FILE" "main UI"
 
-# Data-plane cert (issue #47 §7.6.1) opts in separately - it needs a
+# Data-plane cert (docs/push-to-guest.md) opts in separately - it needs a
 # hostname SAN matching a RESTORE_DATA_NICS entry, which not every
 # certbot-managed domain necessarily is.
 if [ "$(_env_get "RESTORE_DATA_NIC_TLS_PREFERRED" "verify")" != "plaintext" ] \

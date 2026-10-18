@@ -1,5 +1,5 @@
 """Installing the Direct Network Transfer data-plane CA into a guest's
-trust store (issue #47, docs/plan.md §7.6.1), so `verify` mode works
+trust store (docs/push-to-guest.md), so `verify` mode works
 without the admin pre-provisioning the cert on every guest.
 
 Pure helpers only - the orchestration (probe the guest, `agent/file-write`

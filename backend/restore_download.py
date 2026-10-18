@@ -1,5 +1,5 @@
-"""Design C (docs/plan.md §7.6, issue #22): the single-use, short-TTL
-download token a Design C bootstrap script fetches its file against.
+"""Direct Network Transfer (docs/push-to-guest.md): the single-use,
+short-TTL download token a bootstrap script fetches its file against.
 
 The guest must never see the operator's PVE ticket - that's a live
 credential, and the whole point of running restores through this app in
@@ -27,7 +27,7 @@ class DownloadToken:
     job_id: str
     expires_at: float
     local_path: str | None = None
-    """Set only for a bundle restore (docs/plan.md §7.7, issue #24):
+    """Set only for a bundle restore (docs/push-to-guest.md):
     when present, the download endpoint serves this already-built local
     bundle file directly instead of re-proxying from PVE via
     job_id/source_volume/source_filepath - a bundle isn't something

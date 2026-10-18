@@ -18,7 +18,7 @@ API = pve_client._API_ROOT
 
 def base(volume: str) -> str:
     """file-restore URL base for a volume - the storage segment now comes
-    from the volid's own prefix, not a global setting (issue #43)."""
+    from the volid's own prefix, not a global setting."""
     return pve_client._file_restore_base(volume)
 
 
@@ -70,7 +70,7 @@ async def test_run_guest_exec_times_out(session_data, monkeypatch):
 
 @respx.mock
 async def test_run_guest_exec_honors_a_longer_explicit_timeout(session_data, monkeypatch):
-    # Confirmed live 2026-09-01: the ~15s default is nowhere near enough
+    # The ~15s default is nowhere near enough
     # for a command whose duration scales with file size (Direct Network
     # Transfer's fetch, hashing/concatenating a large file) -
     # restore_runner.py passes a much longer budget explicitly for those.
@@ -95,7 +95,7 @@ async def test_run_guest_exec_honors_a_longer_explicit_timeout(session_data, mon
 
 @respx.mock
 async def test_run_guest_exec_honors_a_non_localhost_node(session_data):
-    # Issue #51: a guest on another cluster node needs its own node in
+    # A guest on another cluster node needs its own node in
     # the URL, not the literal "localhost" (which PVE resolves to the
     # node serving the request).
     respx.post(f"{API}/nodes/pve2/qemu/133/agent/exec").mock(
@@ -220,7 +220,7 @@ async def test_list_backup_archives_merges_every_configured_storage(session_data
 @respx.mock
 async def test_list_backup_archives_never_raises_when_every_storage_fails(session_data, monkeypatch):
     """A totally inaccessible storage set must not 500 the portal - it
-    comes back as an empty listing with per-storage errors (issue #43)."""
+    comes back as an empty listing with per-storage errors."""
     _with_storages(monkeypatch, "s1", "s2")
     respx.get(f"{API}/nodes/localhost/storage").mock(return_value=httpx.Response(200, json={"data": []}))
     respx.get(f"{API}/nodes/localhost/storage/s1/content").mock(return_value=httpx.Response(500, text="boom"))
@@ -234,7 +234,7 @@ async def test_list_backup_archives_never_raises_when_every_storage_fails(sessio
 async def test_list_backup_archives_flags_a_typo_storage_id_distinctly(session_data, monkeypatch):
     """PVE's path ACL check returns 403 for a storage id that doesn't
     exist, same as for one the account can't see - the visible-storage
-    list disambiguates so the banner can say "typo" (issue #43)."""
+    list disambiguates so the banner can say "typo"."""
     _with_storages(monkeypatch, "pbs-real", "pbs-tpyo")
     respx.get(f"{API}/nodes/localhost/storage").mock(
         return_value=httpx.Response(200, json={"data": [{"storage": "pbs-real"}, {"storage": "local"}]})
@@ -277,7 +277,7 @@ async def test_list_path_raises_on_http_error(session_data):
 
 @respx.mock
 async def test_list_path_coalesces_identical_concurrent_requests(session_data):
-    """Issue #60: two scrub events landing on the same snapshot+path
+    """Two scrub events landing on the same snapshot+path
     before the first response comes back must share one outbound call -
     each cold call boots a helper VM on the PVE node."""
     calls = []
@@ -319,8 +319,45 @@ async def test_list_path_does_not_coalesce_across_different_users(session_data):
 
 
 @respx.mock
+async def test_list_path_serves_a_repeat_call_from_the_cache(session_data):
+    """PH.6: a backup snapshot is immutable, so once this
+    user has seen a (volume, path) listing it never needs a second live
+    call - this is what actually cuts down on how often the app hits
+    PVE's shared worker pool during a scrub session (mostly revisits)."""
+    calls = []
+
+    async def _track(request):
+        calls.append(1)
+        return httpx.Response(200, json={"data": [{"text": "etc"}]})
+
+    respx.get(f"{base('vol')}/list").mock(side_effect=_track)
+    out1 = await pve_client.list_path(session_data, "vol", "/")
+    out2 = await pve_client.list_path(session_data, "vol", "/")
+    assert out1 == out2 == [{"text": "etc"}]
+    assert len(calls) == 1
+
+
+@respx.mock
+async def test_list_path_does_not_share_cache_across_users(session_data):
+    """Same authorization reasoning as the in-flight-coalescing case
+    above: dir_cache is keyed by username too, not just (volume, path) -
+    see dir_cache.py's own module docstring."""
+    other = dataclasses.replace(session_data, username="mallory@pam")
+    calls = []
+
+    async def _track(request):
+        calls.append(1)
+        return httpx.Response(200, json={"data": []})
+
+    respx.get(f"{base('vol')}/list").mock(side_effect=_track)
+    await pve_client.list_path(session_data, "vol", "/")
+    await pve_client.list_path(other, "vol", "/")
+    assert len(calls) == 2
+
+
+@respx.mock
 async def test_list_path_caps_concurrent_calls_to_pve(session_data, monkeypatch):
-    """Issue #60: callers beyond FILE_RESTORE_LIST_MAX_CONCURRENCY queue
+    """Callers beyond FILE_RESTORE_LIST_MAX_CONCURRENCY queue
     for a slot rather than all firing at once and piling helper VMs onto
     the PVE node."""
     monkeypatch.setattr(pve_client, "_list_semaphore", asyncio.Semaphore(1))
@@ -456,7 +493,7 @@ async def test_fetch_source_metadata_parses_a_plain_tar_header(session_data):
 
 @respx.mock
 async def test_fetch_source_metadata_parses_a_zstd_framed_tar_header(session_data):
-    """Regression: PVE's tar=1 output is confirmed live to be
+    """Regression: PVE's tar=1 output is
     inconsistently formatted - sometimes plain tar, sometimes
     zstd-framed - for the same endpoint/parameter."""
     import zstandard

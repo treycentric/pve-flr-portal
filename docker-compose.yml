@@ -3,19 +3,22 @@
 services:
   pve-flr-portal:
     build: .
+    # The image runs as uid 10001, which can't write a ./certs that Docker
+    # created as root on a Linux host, so local dev runs it as root.
+    user: "0"
     ports:
       - "8008:8008"
     volumes:
       - ./.env:/app/.env:ro
       - ./certs:/app/certs
-      # Issue #30: the app's own state dir (PFR_DATA_DIR, default
+      # The app's own state dir (PFR_DATA_DIR, default
       # /app/data in the container). Named volume so it survives
       # `docker compose down` + a rebuild.
       - pve-flr-data:/app/data
     restart: unless-stopped
 
-  # Design C (docs/plan.md §7.6, issue #22) local testing only - not
-  # needed for ordinary use of the app. RESTORE_DATA_NICS' local_ip has
+  # Direct Network Transfer (docs/push-to-guest.md) local
+  # testing only - not needed for ordinary use of the app. RESTORE_DATA_NICS' local_ip has
   # to be an address the container can actually bind to from inside its
   # own network namespace; the default service above uses Docker's
   # bridge/NAT networking, which never gives a container the host's real
@@ -38,6 +41,7 @@ services:
   # `docker compose up`: docker compose --profile hostnet up pve-flr-portal-hostnet
   pve-flr-portal-hostnet:
     build: .
+    user: "0"  # as above
     network_mode: host
     volumes:
       - ./.env:/app/.env:ro

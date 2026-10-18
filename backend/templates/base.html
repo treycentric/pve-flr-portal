@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}File Level Restore Portal for Proxmox Backup Server{% endblock %}</title>
-  {# Theme (issue #29): resolve the persisted choice before first paint so
+  {# Theme: resolve the persisted choice before first paint so
      there is no light-to-dark flash. Kept in sync afterwards by userMenu
      in app.js - the resolution logic is duplicated there on purpose. #}
   <script>
@@ -23,12 +23,9 @@
     })();
   </script>
   <link rel="icon" type="image/png" href="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}">
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="/static/vendor/htmx.min.js?v={{ static_version('vendor/htmx.min.js') }}"></script>
   <script src="/static/app.js?v={{ static_version('app.js') }}"></script>
-  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <script defer src="/static/vendor/alpine.min.js?v={{ static_version('vendor/alpine.min.js') }}"></script>
   <link rel="stylesheet" href="/static/style.css?v={{ static_version('style.css') }}">
 </head>
 <body>

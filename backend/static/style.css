@@ -1,3 +1,33 @@
+/* Open Sans, vendored locally - served from /static instead
+   of Google Fonts, so the login page (where users type their PVE
+   password) never contacts a third party. Latin subset only, matching
+   this app's English-only UI text - backend/static/fonts/OFL.txt has
+   the license. */
+@font-face {
+  font-family: "Open Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("/static/fonts/open-sans-latin-400-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Open Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("/static/fonts/open-sans-latin-600-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "Open Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("/static/fonts/open-sans-latin-700-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
 :root {
   color-scheme: light;
   --navy: #16415c;
@@ -23,7 +53,7 @@
   --timeline-current-line: #f00;
 
   /* Surfaces/accents that used to be hard-coded inline - pulled out so
-     the dark theme (issue #29) can override them in one place. */
+     the dark theme can override them in one place. */
   --surface-raised: #ffffff;
   --surface-sunken: #eef1f4;
   --surface-hover: #e6ecf2;
@@ -45,7 +75,7 @@
   --timeline-dot-stroke: #000000;
 }
 
-/* Dark theme (issue #29). Palette follows Proxmox VE's own dark UI:
+/* Dark theme. Palette follows Proxmox VE's own dark UI:
    near-black blue-grey grounds, desaturated text, the same accent blue
    nudged lighter for contrast. `data-theme` is set before first paint
    by the inline script in base.html / login.html. */
@@ -89,7 +119,7 @@
   --timeline-dot-stroke: #0a0a0a;
 }
 
-/* "Proxmox Dark Theme" (issue #29) - patterned on Proxmox VE's own dark
+/* "Proxmox Dark Theme" - patterned on Proxmox VE's own dark
    theme (proxmox-widget-toolkit src/proxmox-dark/scss/abstracts/
    _variables.scss): neutral greys rather than blue-tinted, prominent
    borders, near-white text, a deep-blue primary and pale-blue links.
@@ -329,7 +359,27 @@ body {
 }
 
 .modal-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 14px 20px 0;
+}
+
+/* Pushes the scope toggle to the far end of the same row
+   as Cancel/View Log, without needing a second flex container. */
+.modal-filter-spacer {
+  flex: 1;
+}
+
+.scope-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.scope-toggle .btn-outline.is-active {
+  background: var(--link);
+  color: var(--surface);
+  border-color: var(--link);
 }
 
 .modal-filter-input {
@@ -636,7 +686,7 @@ body {
 }
 
 .modal-overlay--log {
-  /* Layers above the Restore Task modal, which can stay open underneath
+  /* Layers above the Restore Jobs modal, which can stay open underneath
      it - both use the same z-index:100 base from .modal-overlay. */
   z-index: 110;
 }
@@ -901,7 +951,7 @@ body {
   font-size: 14px;
 }
 
-/* Issue #56: wraps the username/password fields so Alpine's x-show can
+/* Wraps the username/password fields so Alpine's x-show can
    hide them together for an OpenID Connect realm. `.login-box` is a
    flex column that relies on each label/input being its own *direct*
    child to stack full-width - a plain wrapper div would become one
@@ -927,6 +977,18 @@ body {
 .login-submit {
   margin-top: 16px;
   height: 36px;
+}
+
+/* The 2FA code-entry step: a plain GET back to /login, not a form
+   action - resets to a clean username/password/realm form rather than
+   resubmitting anything, and abandons the (still technically valid
+   until it expires) TFA challenge rather than trying to reuse it. */
+.login-back-link {
+  display: block;
+  margin-top: 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 select.login-input {

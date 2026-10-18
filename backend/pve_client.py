@@ -1,11 +1,12 @@
 """Client for the PVE file-restore API and, as of PH.4, backup content
-listing - everything the app needs now comes from PVE alone (docs/plan.md
-§7.1). Auth is per-request: every call takes the caller's `SessionData`
+listing - everything the app needs now comes from PVE alone
+(docs/architecture.md). Auth is per-request: every call takes the
+caller's `SessionData`
 (PH.4 ticket-auth session) and sends it as PVE expects
 (`Cookie: PVEAuthCookie=...` + `CSRFPreventionToken`), rather than a
 static service-account token.
 
-Contract confirmed in docs/plan.md §3: storage-scoped calls
+Contract confirmed in docs/api-reference.md: storage-scoped calls
 (file-restore/*, storage/{id}/content, storage list) always use the
 literal node segment "localhost" - PVE proxies those cluster-wide
 regardless of which node actually holds the guest, so this is correct
@@ -13,7 +14,7 @@ even on a multi-node cluster. Guest-scoped calls (agent/*, /config) are
 different: PVE resolves "localhost" to *the node serving the request*,
 not the guest's own node, so those need the guest's real node -
 resolve_guest_node() below, threaded through as the `node` kwarg
-(issue #51). filepath is the literal string "/" for root and base64 for
+. filepath is the literal string "/" for root and base64 for
 anything deeper. The list response already hands back ready-to-use
 base64 filepath tokens for each entry, so callers should treat filepath
 as an opaque token from the API rather than re-deriving it from a
@@ -29,13 +30,13 @@ from dataclasses import dataclass, field
 import httpx
 import zstandard
 
+from . import dir_cache
 from .auth import SessionData, pve_headers
 from .config import settings
 from .guest_agent_lock import call_with_retries, guest_agent_command
 
-# Issue #20/#26: the zstd frame magic number - PVE's file-restore/
-# download?tar=1 output is confirmed live (docs/plan.md §7.5/§7.7,
-# 2026-09-28) to be inconsistently formatted - sometimes a genuine
+# The zstd frame magic number - PVE's file-restore/
+# download?tar=1 output is inconsistently formatted - sometimes a genuine
 # plain tar, sometimes zstd-framed (.tar.zst) - for the same endpoint/
 # parameter. Detect via this rather than assuming either way.
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
@@ -48,7 +49,7 @@ _log = logging.getLogger("pve_flr_portal.pve_client")
 def _storage_of(volume: str) -> str:
     """"pbs-ns-a:backup/vm/133/2026-…Z" -> "pbs-ns-a". The volid's own
     prefix is the storage a snapshot lives on - with multiple configured
-    storages (issue #43) the /storage/{id}/ URL segment for file-restore
+    storages the /storage/{id}/ URL segment for file-restore
     has to come from here, not from a single global setting."""
     return volume.split(":", 1)[0]
 
@@ -57,12 +58,12 @@ def _file_restore_base(volume: str) -> str:
     return f"{_API_ROOT}/nodes/localhost/storage/{_storage_of(volume)}/file-restore"
 
 # Conservative denylist, not a full shell-safety abstraction - acceptable
-# for a single-admin homelab tool where a path reaching this check is
+# for a single-admin tool where a path reaching this check is
 # either empty, a value guest_browse.py itself returned on a prior
 # browse call, or a user-typed destination directory that this same
 # check gates before it ever reaches a shell-interpreted guest-exec
 # command (concatenation, metadata restore) - never arbitrary external
-# input (docs/plan.md §7.5).
+# input (docs/push-to-guest.md).
 _UNSAFE_PATH_CHARS = re.compile(r"[\"'`;&|$<>\r\n]")
 
 
@@ -76,7 +77,7 @@ def check_path_safe(path: str) -> None:
 
 # App-internal guest type ("vm"/"ct", the second volid path segment - see
 # the docstring above) vs. PVE's actual API node-path segment ("qemu"/
-# "lxc", confirmed live against a real guest - docs/plan.md §7.5). PH.5's
+# "lxc" - docs/push-to-guest.md). PH.5's
 # guest-agent calls hit /nodes/{node}/{qemu|lxc}/{vmid}/... directly,
 # so every such call needs this translated first - everywhere else in the
 # app (grouping, the task picker, display) stays in "vm"/"ct" throughout.
@@ -93,9 +94,8 @@ def api_node_type(guest_type: str) -> str:
 async def _cluster_guests(session: SessionData) -> list[dict]:
     """Raw /cluster/resources?type=vm entries - each has (at least) `vmid`,
     `node`, and, when the caller can see it, `name`. Shared by
-    list_guest_names() (display names) and resolve_guest_node() (issue
-    #51 - the node segment a guest-scoped call needs on a multi-node
-    cluster), so both come from one API call rather than two."""
+    list_guest_names() (display names) and resolve_guest_node() (the node segment a guest-scoped call
+    needs on a multi-node cluster), so both come from one API call rather than two."""
     async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
         resp = await client.get(f"{_API_ROOT}/cluster/resources", params={"type": "vm"}, headers=pve_headers(session))
         resp.raise_for_status()
@@ -114,7 +114,7 @@ async def list_guest_names(session: SessionData) -> dict[str, str]:
 
 
 async def resolve_guest_node(session: SessionData, vmid: str) -> str:
-    """The real node a guest lives on (issue #51) - every guest-scoped
+    """The real node a guest lives on - every guest-scoped
     call (agent/*, /config) needs this instead of the literal
     "localhost", since PVE resolves "localhost" to *the node serving the
     request*, not the guest's own node. Storage-scoped calls
@@ -160,7 +160,7 @@ async def list_visible_storages(session: SessionData) -> set[str] | None:
     turn an opaque 403 on a per-storage call into a "check PVE_STORAGE
     for a typo" hint - PVE's path-based ACL check returns the same 403
     for a storage id that simply doesn't exist as for one the account
-    lacks access to (issue #43)."""
+    lacks access to."""
     try:
         async with httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=15.0) as client:
             resp = await client.get(f"{_API_ROOT}/nodes/localhost/storage", headers=pve_headers(session))
@@ -199,8 +199,8 @@ async def _list_backup_archives_one(client: httpx.AsyncClient, session: SessionD
 async def list_backup_archives(session: SessionData) -> "BackupListing":
     """All backup archives across every configured storage, straight from PVE
     (GET /nodes/localhost/storage/{storage}/content?content=backup) -
-    replaces the old direct-to-PBS admin API calls entirely (docs/plan.md
-    §7.1). Confirmed response shape against the real environment
+    replaces the old direct-to-PBS admin API calls entirely
+    (docs/architecture.md). Confirmed response shape against the real environment
     (2026-08-30): one entry per archive, e.g.
 
         {"vmid": 133, "size": ..., "volid": "pbs:backup/vm/133/<iso>Z",
@@ -215,7 +215,7 @@ async def list_backup_archives(session: SessionData) -> "BackupListing":
     itself requires, so a caller only ever sees archives for guests
     their own PVE account has that permission on.
 
-    Issue #43: iterates every configured storage (my cluster runs 3, one
+    Iterates every configured storage (my cluster runs 3, one
     per PBS namespace) and merges. A storage the caller can't read (403)
     or that is momentarily unreachable is recorded in the returned
     `.errors` and skipped, never raised — a single misconfigured or
@@ -256,10 +256,16 @@ _inflight_list_calls: dict[tuple[str, str, str], "asyncio.Task[list[dict]]"] = {
 
 
 async def list_path(session: SessionData, volume: str, filepath: str = "/") -> list[dict]:
-    """Issue #60: a cold `file-restore/list` call boots an ephemeral
+    """A cold `file-restore/list` call boots an ephemeral
     helper VM on the PVE node, and PVE exposes no API to cap or tear
-    those down directly (docs/plan.md §9.1 "Helper-VM stampede") - so
+    those down directly (docs/architecture.md "Helper-VM stampede") - so
     this throttles/coalesces the calls this app makes instead:
+      - PH.6: a persistent `dir_cache` hit skips all of the
+        below entirely - a backup snapshot is immutable, so once this
+        user has seen a (volume, path) listing it never needs fetching
+        again. This is what actually reduces load on PVE's shared,
+        node-wide API worker pool during a scrub session (mostly
+        revisits) - the mechanisms below only bound the worst case.
       - `_list_semaphore` caps how many calls are in flight to PVE at
         once (FILE_RESTORE_LIST_MAX_CONCURRENCY); callers beyond the cap
         queue rather than fail, so a fast timeline drag-scrub gets
@@ -271,11 +277,16 @@ async def list_path(session: SessionData, volume: str, filepath: str = "/") -> l
         just `(volume, filepath)`: file-restore access is permission-
         gated per PVE ticket, so sharing a result across two different
         users' sessions would let a second user see data PVE never
-        actually authorized for them.
+        actually authorized for them. `dir_cache` is keyed the same way
+        for the identical reason - see its own module docstring.
     `asyncio.shield` keeps a caller's own cancellation (e.g. the browser
     request disconnecting) from cancelling the underlying task while
     other callers may still be waiting on it.
     """
+    cached = await dir_cache.get(session.username, volume, filepath)
+    if cached is not None:
+        return cached
+
     key = (session.username, volume, filepath)
     task = _inflight_list_calls.get(key)
     if task is None:
@@ -299,7 +310,12 @@ async def _fetch_list(session: SessionData, volume: str, filepath: str) -> list[
                 headers=pve_headers(session),
             )
             resp.raise_for_status()
-            return resp.json()["data"]
+            data = resp.json()["data"]
+    # Written once per unique (username, volume, filepath) - inside the
+    # semaphore's single owning task, not by every coalesced caller -
+    # and only ever from a genuinely fresh, successful PVE response.
+    await dir_cache.set(session.username, volume, filepath, data)
+    return data
 
 
 def clear_list_path_state() -> None:
@@ -314,14 +330,14 @@ def clear_list_path_state() -> None:
 async def write_guest_file(
     session: SessionData, guest_type: str, vmid: str, path: str, content: str, *, node: str = "localhost"
 ) -> None:
-    """One `agent/file-write` call (PH.5, docs/plan.md §7.5) - a genuine
+    """One `agent/file-write` call (PH.5, docs/push-to-guest.md) - a genuine
     one-shot: no handle/offset, truncates and overwrites whatever was at
     `path`. `content` must already be the wire-ready string
-    (`restore_chunking.py`'s Latin-1 mapping of raw bytes, confirmed live
-    against a real guest to round-trip losslessly - NOT base64, which
+    (`restore_chunking.py`'s Latin-1 mapping of raw bytes, which round-trips
+    losslessly - NOT base64, which
     this endpoint does not decode). `guest_type` is the app-internal
     "vm"/"ct" value - translated to PVE's "qemu"/"lxc" node segment here.
-    `node` is the guest's real PVE node (issue #51, pve_client.resolve_guest_node) -
+    `node` is the guest's real PVE node (pve_client.resolve_guest_node) -
     defaults to "localhost", which still works for a single-node setup or
     a guest that happens to live on the API node.
     Runs under guest_agent_lock's per-vmid lock (serializes this app's own
@@ -363,7 +379,7 @@ async def run_guest_exec(
     """Runs one guest-exec command to completion (polling exec-status) and
     returns (exitcode, stdout, stderr). `guest_type` is the app-internal
     "vm"/"ct" value, translated here like every other guest-agent call.
-    `node` is the guest's real PVE node (issue #51, pve_client.resolve_guest_node) -
+    `node` is the guest's real PVE node (pve_client.resolve_guest_node) -
     defaults to "localhost" for a single-node setup or a guest that
     happens to live on the API node.
 
@@ -385,7 +401,7 @@ async def run_guest_exec(
 
     `timeout_seconds` defaults to ~15s - fine for the vast majority of
     calls this app makes (mkdir, an exists check, listing a directory),
-    which don't scale with file size. Confirmed live 2026-09-01 that this
+    which don't scale with file size. This
     default is nowhere near enough for a command whose duration DOES
     scale with content size - Direct Network Transfer's actual fetch,
     or hashing/concatenating a large file - restore_runner.py passes a
@@ -434,7 +450,7 @@ async def open_download(
     params = {"volume": volume, "filepath": filepath}
     if tar:
         params["tar"] = 1
-    # No timeout: cold lookups + large archives can legitimately take a while (§3).
+    # No timeout: cold lookups + large archives can legitimately take a while (docs/architecture.md, Known risks).
     client = httpx.AsyncClient(verify=settings.pve_verify_ssl, timeout=None)
     request = client.build_request(
         "GET", f"{_file_restore_base(volume)}/download", params=params, headers=pve_headers(session)
@@ -449,7 +465,7 @@ async def open_download(
 
 
 def decompress_zstd_prefix(buf: bytes) -> bytes:
-    """Issue #20/#26: `buf` may or may not be zstd-framed (see
+    """`buf` may or may not be zstd-framed (see
     ZSTD_MAGIC's docstring above) - detect and decompress if so, pass
     through unchanged otherwise. Uses a *streaming* reader, not a
     single-shot `decompress()`, since callers typically pass a
@@ -469,12 +485,11 @@ def decompress_zstd_prefix(buf: bytes) -> bytes:
 
 
 async def fetch_source_metadata(session: SessionData, volume: str, filepath: str) -> tuple[int, int, int, int] | None:
-    """Issue #20/#26: `file-restore/list`'s JSON never exposes uid/gid/
-    mode (only mtime/size, docs/plan.md §7.5) - but `file-restore/
+    """`file-restore/list`'s JSON never exposes uid/gid/
+    mode (only mtime/size, docs/push-to-guest.md) - but `file-restore/
     download?tar=1` wraps even a single file's content in a real tar
-    archive whose header carries the original uid/gid/mode *and* mtime,
-    confirmed live 2026-09-28 against a real Turnkey Linux guest
-    (non-default uid=1000/gid=1000 came back correctly, not a
+    archive whose header carries the original uid/gid/mode *and* mtime
+    (a non-default uid=1000/gid=1000 comes back correctly, not a
     tarfile-library default of 0/0).
 
     Reads only a bounded prefix of that stream (tar headers, including

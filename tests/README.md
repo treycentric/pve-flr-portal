@@ -43,8 +43,8 @@ npm run test:css
 - `.tar.zst` bundle downloads use the `zstandard` PyPI package (not
   stdlib `compression.zstd`, which is Python 3.14+ only) specifically so
   the app runs on the deploy target's Python 3.11 — see
-  `docs/plan.md` §10. Nothing here needs to skip itself by interpreter
-  version.
+  `docs/archive/design-rationale.md`. Nothing here needs to skip itself
+  by interpreter version.
 
 ## New functionality needs tests
 

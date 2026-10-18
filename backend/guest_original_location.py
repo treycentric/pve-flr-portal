@@ -1,10 +1,10 @@
-"""PH.5 follow-on (issue #68): resolves a destination directory from the
+"""PH.5 follow-on: resolves a destination directory from the
 browsed item's own *original* location on the guest, as a third option
 alongside the existing Browse/Manual-entry destination pickers.
 
 VM guests only - LXC containers can never reach this at all, since
 push-to-guest restore (guest_agent.get_restore_capabilities) is gated on
-qemu-guest-agent, which containers don't have (design_a/design_b are
+qemu-guest-agent, which containers don't have (file_write/guest_exec are
 always unavailable for guest_type == "ct" - see
 test_get_restore_capabilities_lxc_skips_agent_calls). The restore modal
 this feeds is simply never reachable for a container, so there is
@@ -13,7 +13,7 @@ nothing to resolve for one.
 The file-restore browser only ever exposes a path *within* a partition
 (or, for LVM, within a logical volume) - drive letters and Linux
 mountpoints are guest-side state nothing in the backup itself records
-(docs/plan.md §3's confirmed disk/part/lvm structure, and issue #66's
+(docs/api-reference.md's confirmed disk/part/lvm structure, and the
 LVM-elevation/part-flattening on top of it - see
 resolve_original_directory's docstring for the exact shapes this
 parses). The only place that drive-letter/mountpoint mapping exists is
@@ -28,8 +28,8 @@ destination here is a wrong write into a live guest, not a cosmetic
 mistake.
 
 **Disk identity for a plain (non-LVM) partition, Windows.** Confirmed
-live 2026-09-27 (docs/plan.md §7 "original location" real-world
-findings): PVE's disk label carries its own bus+index verbatim
+live 2026-09-27 (docs/archive/push-to-guest-findings.md): PVE's disk
+label carries its own bus+index verbatim
 (`drive-<bus><N>.img.fidx`), and for `sata`/`scsi` that maps to a real,
 address-based identity in the running guest - not just attachment
 order - via `_windows_disk_number_by_bus` below:
@@ -88,7 +88,7 @@ _DISK_LABEL_RE = re.compile(r"^drive-(ide|sata|scsi|virtio)(\d+)\.img\.fidx$")
 _BUS_TYPE_BY_PVE_BUS = {"ide": "ATA", "sata": "SATA", "scsi": "SAS"}
 _LUN_RE = re.compile(r"LUN (\d+)")
 
-# Issue #77 follow-on: both whole-VM guest-exec queries below
+# Both whole-VM guest-exec queries below
 # (Win32_DiskDrive/Get-PhysicalDisk bus info, and Get-Partition's drive
 # letters) already cover every disk/partition in one call regardless of
 # which single one a given request cares about - cached per vmid so
@@ -136,7 +136,7 @@ async def resolve_original_directory(
     """`crumbs` is the breadcrumb trail (as tracked client-side) of the
     folder the item(s) being restored live in - crumbs[0] is always the
     synthetic "Root" entry, crumbs[1:] are real file-restore/list labels
-    in order. Three shapes are recognized, all stemming from issue #66's
+    in order. Three shapes are recognized, all stemming from the
     LVM-elevation/part-flattening (added to main.py after this module was
     first written - a real regression this fixed, not a defensive
     "just in case"):
@@ -170,7 +170,7 @@ async def resolve_original_directory(
             session, vmid, guest_os_family, node, volume, disk_label, int(rest[0]), rest[1:]
         )
     # Legacy/defensive: an un-elevated `lvm` folder directly under a disk
-    # - not reachable through today's UI (issue #66 always hides it under
+    # - not reachable through today's UI (the LVM elevation always hides it under
     # a disk's own listing), but handled here rather than assumed
     # impossible, same spirit as the rest of this module.
     if second == "lvm" and len(rest) >= 2:
@@ -217,7 +217,7 @@ async def _resolve_partition(
 
 
 def disk_label_for_partition_listing(crumbs: list[dict]) -> str | None:
-    """Issue #77: given the crumb trail of a folder currently being
+    """Given the crumb trail of a folder currently being
     listed, returns the disk label if - and only if - that folder's own
     children are the numbered partition folders directly (i.e. this is
     a disk's flattened listing, or an unflattened disk's `part`
@@ -237,8 +237,7 @@ def disk_label_for_partition_listing(crumbs: list[dict]) -> str | None:
 async def resolve_windows_disk_number(
     session: SessionData, vmid: str, node: str, volume: str, disk_label: str
 ) -> int | None:
-    """Address-based match first (see module docstring for what's
-    confirmed live), falling back to the ordinal-position guess when the
+    """Address-based match first (see module docstring), falling back to the ordinal-position guess when the
     bus can't be resolved (ambiguous/multi-disk `ide`, untested
     `virtio`, or a guest-exec failure)."""
     disk_number = await _windows_disk_number_by_bus(session, vmid, node, disk_label)
@@ -257,7 +256,7 @@ def _cache_get(cache: dict[str, tuple[float, list[dict]]], vmid: str) -> list[di
 
 
 async def _fetch_partition_rows(session: SessionData, vmid: str, node: str) -> list[dict] | None:
-    """Issue #77 follow-on: one whole-VM `Get-Partition` call (every
+    """One whole-VM `Get-Partition` call (every
     disk's partitions, not just one) - cached per vmid (see module-level
     comment above). Returns None (never raises, never cached) on any
     guest-exec failure, same "unavailable, not a guess" posture as the
@@ -290,7 +289,7 @@ async def _fetch_partition_rows(session: SessionData, vmid: str, node: str) -> l
 
 
 async def list_windows_drive_letters(session: SessionData, vmid: str, node: str, disk_number: int) -> dict[str, str]:
-    """Issue #77: used to annotate the browse tree's partition labels,
+    """Used to annotate the browse tree's partition labels,
     not to resolve a single restore destination. Returns {} (never
     raises) whenever the underlying whole-VM fetch does - the tree
     simply shows plain partition numbers when this comes back empty."""
@@ -305,7 +304,7 @@ async def list_windows_drive_letters(session: SessionData, vmid: str, node: str,
 
 
 async def _fetch_disk_bus_rows(session: SessionData, vmid: str, node: str) -> list[dict] | None:
-    """Issue #77 follow-on: one whole-VM Win32_DiskDrive/Get-PhysicalDisk
+    """One whole-VM Win32_DiskDrive/Get-PhysicalDisk
     query (every disk's bus info, not just one) - cached per vmid (see
     module-level comment above). Returns None (never raises, never
     cached) on any guest-exec failure - the caller falls back to the
@@ -317,7 +316,7 @@ async def _fetch_disk_bus_rows(session: SessionData, vmid: str, node: str) -> li
     script = (
         # Get-PhysicalDisk's DeviceId is a *string* ("0", "1", ...) while
         # Win32_DiskDrive.Index is numeric - an un-cast hashtable lookup
-        # here silently misses every entry (confirmed live: every row
+        # here silently misses every entry (every row
         # came back BusType=$null), so both sides are cast to [string]
         # to guarantee a matching key type regardless of the underlying
         # CIM property type.
@@ -355,8 +354,7 @@ async def _fetch_disk_bus_rows(session: SessionData, vmid: str, node: str) -> li
 async def _windows_disk_number_by_bus(
     session: SessionData, vmid: str, node: str, disk_label: str
 ) -> int | None:
-    """Address-based disk match for sata/scsi (see module docstring for
-    what's confirmed live) - returns None for any unsupported bus,
+    """Address-based disk match for sata/scsi (see module docstring) - returns None for any unsupported bus,
     unresolvable/ambiguous result, or guest-exec failure, in which case
     the caller falls back to the ordinal-position guess exactly as
     before this existed."""

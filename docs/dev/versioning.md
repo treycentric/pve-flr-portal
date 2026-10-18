@@ -63,7 +63,7 @@ fix: correct off-by-one in tick spacing
 feat!: drop the shared PVE/PBS service token
 
 BREAKING CHANGE: per-user PVE ticket login replaces PVE_TOKEN_*/PBS_*
-env vars entirely; see docs/plan.md §7.1 for the migration.
+env vars entirely; see docs/architecture.md for the migration.
 ```
 
 A commit that doesn't match this format (or uses an excluded type) still

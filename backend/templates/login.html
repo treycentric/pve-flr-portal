@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Log in &mdash; File Level Restore Portal for Proxmox Backup Server</title>
   <link rel="icon" type="image/png" href="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}">
-  {# Theme (issue #29): match base.html - resolve before first paint. #}
+  {# Theme: match base.html - resolve before first paint. #}
   <script>
     (function () {
       var d = "{{ default_theme }}";
@@ -21,7 +21,6 @@
       } catch (e) {}
     })();
   </script>
-  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css?v={{ static_version('style.css') }}">
 </head>
 <body>
@@ -32,6 +31,28 @@
     </div>
   </header>
   <div class="login-wrap">
+    {% if tfa_challenge %}
+    {# 2FA second step: a plain form, no Alpine needed here - the
+       realm/openid branching above doesn't apply mid-2FA-flow. Carries
+       username/realm/the PVE-issued challenge back as hidden fields so
+       this route needs no server-side state for a login in progress;
+       the original password was already verified to get here and isn't
+       needed again (see auth.TFARequired's docstring). #}
+    <form class="login-box" method="post" action="/login">
+      <img class="about-logo login-logo" src="/static/assets/logo.png?v={{ static_version('assets/logo.png') }}" alt="">
+      <h2 class="login-title">Two-factor authentication</h2>
+      {% if error %}
+      <p class="login-error">{{ error }}</p>
+      {% endif %}
+      <input type="hidden" name="username" value="{{ tfa_username }}">
+      <input type="hidden" name="realm" value="{{ tfa_realm }}">
+      <input type="hidden" name="tfa_challenge" value="{{ tfa_challenge }}">
+      <label class="login-label" for="password">Authenticator code or recovery key</label>
+      <input class="login-input" type="text" id="password" name="password" autocomplete="one-time-code" autofocus required>
+      <button type="submit" class="btn-primary login-submit">Verify</button>
+      <a class="login-back-link" href="/login">&larr; Back</a>
+    </form>
+    {% else %}
     <form
       class="login-box"
       method="post"
@@ -41,12 +62,12 @@
         selectedType: 'pam',
         updateType() { this.selectedType = $refs.realm.selectedOptions[0]?.dataset.type || ''; },
         handleSubmit(event) {
-          // Issue #56: an OpenID Connect realm has no password to POST -
+          // An OpenID Connect realm has no password to POST -
           // send the browser into the SSO redirect flow instead of
           // submitting this form. A plain function-call expression here
           // (rather than an inline if/else statement block in @submit
           // itself) - Alpine's expression compiler for x-on rejects a
-          // leading `if` as a syntax error (confirmed live: it throws
+          // leading `if` as a syntax error (it throws
           // and never attaches the listener at all, so the form silently
           // falls through to its default POST - PVE then 422s on the
           // missing password field).
@@ -102,7 +123,8 @@
       </label>
       <button type="submit" class="btn-primary login-submit" x-text="selectedType === 'openid' ? 'Continue with SSO' : 'Log in'">Log in</button>
     </form>
+    {% endif %}
   </div>
-  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script defer src="/static/vendor/alpine.min.js?v={{ static_version('vendor/alpine.min.js') }}"></script>
 </body>
 </html>

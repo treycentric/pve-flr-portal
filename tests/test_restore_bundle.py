@@ -100,7 +100,7 @@ async def test_probe_tar_zst_support_false_on_nonzero_exit():
 async def test_probe_tar_zst_support_false_on_unexpected_output():
     # Exit code 0 but wrong content - shouldn't happen with a real tar,
     # but the probe shouldn't trust exit code alone (same lesson as
-    # copy /b's unreliable exit code, docs/plan.md §7.5).
+    # copy /b's unreliable exit code, docs/push-to-guest.md).
     async def fake_write(path, content):
         pass
 
@@ -204,10 +204,10 @@ class _FakeBundleClient:
 
 def _fake_directory_zip(files: dict[str, bytes], prefix: str = "") -> bytes:
     """A real, valid zip - what PVE's own default directory encoding
-    would hand back (docs/plan.md §7.7's correction: no tar=1 needed).
+    would hand back (docs/push-to-guest.md's correction: no tar=1 needed).
     `prefix`, when given, roots every entry under it - PVE's own zip for
     a directory already roots every entry under the directory's own name
-    (confirmed live 2026-09-02 by a doubled `Downloads/Downloads/` when
+    (by a doubled `Downloads/Downloads/` when
     this app's own code re-prefixed on top of that), so callers building
     a fixture for a directory selection should pass the item's own name
     here rather than leaving entries unprefixed."""
@@ -222,8 +222,7 @@ def _fake_directory_tar(
     files: dict[str, bytes], prefix: str = "", uid: int = 0, gid: int = 0, mode: int = 0o644, mtime: int = 0
 ) -> bytes:
     """A real, valid tar - what a non-Windows guest's directory item now
-    downloads via `tar=1` instead of the old default zip (issue #26,
-    confirmed live 2026-09-28 - real per-member uid/gid/mode/mtime
+    downloads via `tar=1` instead of the old default zip (real per-member uid/gid/mode/mtime
     survives this path). Same no-re-prefixing convention as
     `_fake_directory_zip` - pass the item's own name as `prefix` for a
     directory selection."""
@@ -243,7 +242,7 @@ def _fake_directory_tar(
 def _patch_bundle_download(monkeypatch, responses: dict):
     """responses maps filepath -> raw bytes PVE would return for it,
     used regardless of `tar` - or filepath -> {True: ..., False: ...}
-    when a test needs to distinguish (issue #26: a leaf item's metadata
+    when a test needs to distinguish (a leaf item's metadata
     probe always requests `tar=1` separately from its `tar=0` content
     download; a non-Windows directory item's content download IS
     `tar=1` now, not the old default `tar=0` zip)."""
@@ -297,7 +296,7 @@ async def test_build_bundle_zip_contains_every_item_plus_manifest(session_data, 
 
 async def test_build_bundle_reports_item_progress_with_content_length(session_data, monkeypatch, tmp_path):
     # 2026-09-02: the build phase (download + add-to-bundle) had no
-    # progress signal at all - confirmed live to look indistinguishable
+    # progress signal at all, which looked indistinguishable
     # from a hang on a large single-directory selection. Locks in that
     # on_item_progress fires with real byte counts, including the final
     # chunk reaching the item's full declared size.
@@ -362,7 +361,7 @@ async def test_build_bundle_reports_item_progress_without_content_length(session
 
 
 async def test_build_bundle_directory_entries_are_not_double_prefixed(session_data, monkeypatch, tmp_path):
-    # Confirmed live 2026-09-02: a restored "Downloads" directory landed
+    # A restored "Downloads" directory landed
     # as "Downloads/Downloads/..." in the destination - PVE's own zip
     # for a directory selection already roots every entry under the
     # directory's own name, and this code used to prepend item.name on
@@ -386,7 +385,7 @@ async def test_build_bundle_directory_entries_are_not_double_prefixed(session_da
 
 
 async def test_build_bundle_deletes_each_item_temp_file_as_it_is_consumed(session_data, monkeypatch, tmp_path):
-    # Confirmed live 2026-09-01: downloading every selected item to a
+    # Downloading every selected item to a
     # local temp file before building anything ran a real LXC
     # container's rootfs out of space ("[Errno 28] No space left on
     # device") on a multi-item selection. This locks in the fix - at
@@ -502,7 +501,7 @@ async def test_build_bundle_manifest_omits_directory_entries_from_source_tar(ses
         tmp_dir_ctx.cleanup()
 
 
-# --- issue #26: mtime always-on, ownership opt-in ---------------------
+# --- mtime always-on, ownership opt-in ---------------------
 
 
 async def test_build_bundle_leaf_item_gets_real_mtime_unconditionally(session_data, monkeypatch, tmp_path):
@@ -586,7 +585,7 @@ async def test_build_bundle_directory_ownership_applied_only_when_requested(sess
 
 async def test_build_bundle_restore_ownership_is_forced_off_for_windows(session_data, monkeypatch, tmp_path):
     """Defense-in-depth, same pattern as /api/restore's job-creation
-    time for single-file restore (#20): NTFS has no uid/gid/mode
+    time for single-file restore: NTFS has no uid/gid/mode
     concept, so this must never do anything for a Windows guest even if
     restore_ownership=True is passed in - the caller isn't trusted
     alone."""
@@ -635,8 +634,8 @@ async def test_build_bundle_windows_directory_gets_real_mtime_from_zip(session_d
 
 
 async def test_build_bundle_directory_handles_zstd_framed_tar_too(session_data, monkeypatch, tmp_path):
-    """Regression, directory side of the same live-reported bug #20's
-    single-file fix addressed: PVE's tar=1 output is confirmed
+    """Regression, directory side of the same bug the
+    single-file fix addressed: PVE's tar=1 output is
     inconsistently formatted - sometimes plain tar, sometimes zstd-
     framed - for a directory item too, not just a single file."""
     dir_tar = _fake_directory_tar({"passwd": b"x"}, prefix="etc/", mtime=1700000000)

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See [`docs/dev/versioning.md`](docs/dev/versioning.md) for how entries
 here are generated from commit messages.
 
+## [1.9.0] - 2026-10-12
+
+### Added
+- **restore-jobs:** show job owner, add mine/all visibility scoping (#122) (38f3f23)
+- **restore-jobs:** persist job history with retention + restart reconciliation (#127) (a0a7ffe)
+
+### Changed
+- **restore:** rename design_a/design_b to file_write/guest_exec, retire "Design C" jargon (#146) (c2664da)
+
+### Fixed
+- **restore-jobs:** restrict job cancellation to owner or job admin (#123) (ab01313)
+- **restore:** chmod quick-restored files and the guest CA anchor (#136) (5508536)
+- **security:** block cross-site writes, bind OIDC callback, forbid framing (#135) (d7a16af)
+
+## [1.8.0] - 2026-09-30
+
+### Added
+- **docker:** publish a production container image to GHCR (#107) (474c9b2)
+- **image:** sign published container images with cosign (#111) (7699d0f)
+- **auth:** support PVE 2FA/TOTP and recovery keys in the login flow (#15) (6ffe3b5)
+
+### Fixed
+- **deploy:** mark update.sh executable, matching install.sh/lxc-create.sh (#89) (06bc1e5)
+- **pve-client:** lower concurrency default to 2, and ship PH.6's directory-listing cache (#110) (e323080)
+- **frontend:** serve htmx and Alpine from /static instead of unpkg (#105) (2de5ad9)
+
+## [1.7.0] - 2026-09-29
+
+### Added
+- distinct icon for partition/LVM-volume filesystem roots (#83) (592ce02)
+- **deploy:** pin install/update to tagged releases instead of main (#90) (f616e8e)
+
+### Fixed
+- escape guest-controlled filepaths/names to prevent stored XSS (#101) (de8380f)
+
 ## [1.6.0] - 2026-09-25
 
 ### Added

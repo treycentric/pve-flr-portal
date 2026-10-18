@@ -29,7 +29,8 @@ _FALSY = ("0", "false", "no", "off", "")
 def _pve_verify() -> "bool | ssl.SSLContext | str":
     """PVE_VERIFY_SSL for the portal -> Proxmox API connection:
       false            -> don't verify Proxmox's cert (Proxmox default
-                          is self-signed; the common homelab setting);
+                          is self-signed; the common setting for an
+                          internal deployment);
       true (default)   -> verify against the *system* trust store
                           (Debian /etc/ssl/certs - so a CA you added
                           with `update-ca-certificates` is honoured -
@@ -81,7 +82,7 @@ def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     return val
 
 
-# Data-plane TLS modes for Direct Network Transfer (issue #47), weakest
+# Data-plane TLS modes for Direct Network Transfer, weakest
 # to strongest. `restore_network_pull` depends on this exact ordering to
 # walk the PREFERRED->MINIMUM downgrade ladder.
 TLS_MODES: tuple[str, ...] = ("plaintext", "insecure", "verify")
@@ -90,7 +91,7 @@ TLS_MODES: tuple[str, ...] = ("plaintext", "insecure", "verify")
 def _csv(name: str, default: str) -> tuple[str, ...]:
     """Comma-separated env var -> tuple of trimmed, non-empty entries,
     order preserved, duplicates dropped. Used for PVE_STORAGE, which
-    accepts one *or more* storage ids (issue #43)."""
+    accepts one *or more* storage ids."""
     raw = os.environ.get(name)
     raw = default if raw is None else raw
     seen: dict[str, None] = {}
@@ -114,7 +115,7 @@ def _theme(name: str, default: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     pve_host: str
-    # One or more PBS-backed storage ids (issue #43). My cluster has 3
+    # One or more PBS-backed storage ids. My cluster has 3
     # PBS storages, each on a different PBS namespace; PVE hides the
     # namespace inside the storage config, so from here "3 namespaces" is
     # just "3 storage ids". Enumeration queries every entry and merges;
@@ -126,7 +127,7 @@ class Settings:
     pve_verify_ssl: object
 
     # PH.4: per-user PVE ticket auth replaces the old shared PVE/PBS API
-    # tokens (docs/plan.md §7.1) - no PBS credentials or static PVE token
+    # tokens (docs/architecture.md) - no PBS credentials or static PVE token
     # exist anymore, everything goes through the logged-in user's own
     # PVE session.
     session_idle_timeout_minutes: int
@@ -134,31 +135,36 @@ class Settings:
     port: int
     tls_cert_file: str
     tls_key_file: str
+    # Whether run.py serves with uvicorn's auto-reload (restart on a code
+    # change). On by default for a source checkout; the container image
+    # turns it off (PFR_RELOAD=false), since its code never changes under
+    # it and reload adds a file-watching supervisor process.
+    reload: bool
 
     # PH.5: minimum gap this app waits between the *end* of one
     # guest-agent command and the *start* of its own next one, on the
-    # same guest (docs/plan.md §7.5). guest_agent_lock.py already
+    # same guest (docs/push-to-guest.md). guest_agent_lock.py already
     # prevents this app's own commands from overlapping (correctness);
     # this is about not monopolizing the channel once it's free - a
     # scheduled PBS backup's fs-freeze or another admin's `qm agent`
     # call still needs a turn, especially once a multi-chunk restore is
     # sending many sequential guest-agent commands back to back.
     # Defaults to 0 (disabled) since the right value is workload-
-    # dependent and there's no evidence yet of what a typical homelab
+    # dependent and there's no evidence yet of what a typical deployment
     # needs - tune up via GUEST_AGENT_MIN_COMMAND_GAP_SECONDS if a
     # restore is observed crowding out other guest-agent users.
     guest_agent_min_command_gap_seconds: float
 
-    # Design C / "Direct Network Transfer" (docs/plan.md §7.6, issue #22,
-    # shipped v1.1.0): the data-plane NIC(s) a restore's network-pull
-    # download endpoint may be served from, one entry per non-routable subnet a
+    # Direct Network Transfer (docs/push-to-guest.md): the data-plane
+    # NIC(s) a restore's network-pull download endpoint may be served
+    # from, one entry per non-routable subnet a
     # target guest might live in. Raw JSON here, parsed by
     # restore_network_pull.parse_data_nics() - kept as a plain string
     # rather than parsed eagerly so a malformed value fails where it's
     # used (with a clear error) instead of crashing the whole app at
     # import time over a feature most deployments won't configure.
-    # Empty by default - Design C is simply never offered until an admin
-    # opts in by setting this.
+    # Empty by default - Direct Network Transfer is simply never offered
+    # until an admin opts in by setting this.
     restore_data_nics_json: str
     # How long a single-use network-pull download token stays valid
     # before it's treated as expired - long enough for guest-exec to
@@ -172,16 +178,15 @@ class Settings:
     # kernels. Set it explicitly to share the port if your setup allows.
     restore_data_nic_port: int
 
-    # Direct Network Transfer data-plane TLS (issue #47, docs/plan.md
-    # §7.6.1). `plaintext` = HTTP listener (pre-#47 behaviour);
+    # Direct Network Transfer data-plane TLS
+    # (docs/push-to-guest.md). `plaintext` = HTTP listener (the behaviour before data-plane TLS);
     # `insecure`/`verify` = HTTPS listener. The ladder: per guest,
     # resolve the strongest mode in
     # [minimum, preferred] that the detected fetch tool can actually do
     # (curl/wget/python/Invoke-WebRequest/WinHttpRequest can skip-verify;
     # certutil/bitsadmin can't; bash /dev/tcp has no TLS at all). If none
-    # qualifies, `on_unmet` decides: `fallback` (use Design B - the
-    # chunked write over QMP, which never touches the data network) or
-    # `fail`.
+    # qualifies, `on_unmet` decides: `fallback` (use the chunked write
+    # over QMP, which never touches the data network) or `fail`.
     #
     # `verify` (the default): the guest validates the data-plane cert.
     # `install_ca` controls whether this app puts the cert into the
@@ -212,22 +217,45 @@ class Settings:
 
     # pve_client.run_guest_exec()'s default ~15s poll budget is sized for
     # commands that don't scale with file size (mkdir, an exists check).
-    # Confirmed live 2026-09-01: nowhere near enough for one that does -
+    # Nowhere near enough for one that does -
     # Direct Network Transfer's actual fetch, or hashing/concatenating a
     # large file. Used explicitly for just those calls, not as a new
     # blanket default.
     restore_long_running_exec_timeout_seconds: float
 
-    # Issue #29: the colour theme a browser gets before the visitor has
+    # The colour theme a browser gets before the visitor has
     # made their own choice (stored client-side in localStorage). One of
     # auto|light|dark; "auto" follows the OS but resolves to dark when
     # the OS states no preference. Purely a default - a logged-in user
     # can still switch themes from the user menu.
     default_theme: str
 
-    # Issue #60: caps how many `file-restore/list` calls this app has
+    # Off by default - matches the original "one shared task
+    # list" behavior exactly, so turning this on is purely opt-in. When
+    # on, a user only sees their own restore jobs (GET /api/restore-jobs
+    # enforces this server-side, not just a UI filter) unless they hold
+    # job_admin_privilege - see auth.is_job_admin().
+    restrict_jobs_to_own: bool
+    # The PVE privilege that bypasses restrict_jobs_to_own, checked via
+    # the `cap` block PVE's own /access/ticket already returns at login/
+    # refresh (auth.SessionData.cap) - specifically cap["dc"], the
+    # category for privileges granted at the bare root path "/" (PVE's
+    # RPCEnvironment::compute_api_permission buckets by broad area, not
+    # arbitrary paths - "dc" is what a root-level grant becomes). Expects
+    # a role (conventionally named "BackupAdmins") bundling this
+    # privilege, granted at "/" specifically - see README's "Provisioning
+    # access". No separate "path" setting: cap has no finer-grained path
+    # information than which bucket a grant landed in, so one isn't
+    # meaningful to expose here.
+    job_admin_privilege: str
+
+    # How many days a terminal restore job's persisted history row is
+    # kept before an opportunistic sweep deletes it.
+    job_history_retention_days: int
+
+    # Caps how many `file-restore/list` calls this app has
     # in flight to PVE at once. Each cold call boots an ephemeral helper
-    # VM on the PVE node (~3s, docs/plan.md §3) - Proxmox exposes no API
+    # VM on the PVE node (~3s, docs/api-reference.md) - Proxmox exposes no API
     # to list or stop those VMs directly (they're not visible as regular
     # guests and self-terminate on PVE's own internal idle timeout), so
     # the only lever this app has is limiting how many it triggers.
@@ -235,11 +263,21 @@ class Settings:
     # timeline drag-scrub gets serialized, not rejected. Paired with
     # in-flight request coalescing (pve_client.list_path) for the exact-
     # duplicate case (two scrubs landing on the same snapshot+path).
+    #
+    # Default lowered from 4 to 2 after a real host
+    # instability report during timeline scrubbing. PVE's own privileged
+    # API worker pool (pvedaemon/pveproxy, confirmed via
+    # PVE/Service/pvedaemon.pm and PVE/Service/pveproxy.pm: hardcoded
+    # `max_workers => 3`) is shared *node-wide* across every user and
+    # every operation - not scoped to this app or to file-restore alone.
+    # Setting this to 3 would still let this app claim every available
+    # slot during a fast scrub, starving all other node traffic for that
+    # window; 2 guarantees at least 1 slot stays free at all times.
     file_restore_list_max_concurrency: int
 
-    # Issue #30: one writable directory for the app's own small, durable
+    # One writable directory for the app's own small, durable
     # state. Nothing writes here yet - it exists so the features that
-    # will need persistence (#29's per-user prefs, #14's session store,
+    # will need persistence (per-user prefs, a persistent session store,
     # PH.6's dir_cache) share one deploy-provisioned location instead of
     # each inventing their own. Default "data" for a source checkout;
     # the systemd unit and docker-compose point it at a real volume.
@@ -251,7 +289,7 @@ class Settings:
     def pve_storage(self) -> str:
         """The first configured storage id. Kept for the handful of
         callers/tests that only need "a" storage; new code that lists
-        backups should iterate `pve_storages` (issue #43)."""
+        backups should iterate `pve_storages`."""
         return self.pve_storages[0]
 
 
@@ -263,7 +301,7 @@ def _storages_required() -> tuple[str, ...]:
 
 
 def _tls_preferred_and_minimum() -> tuple[str, str]:
-    """PREFERRED and MINIMUM data-plane TLS modes (issue #47). MINIMUM
+    """PREFERRED and MINIMUM data-plane TLS modes. MINIMUM
     must not be stricter than PREFERRED - caught here rather than as a
     confusing "no mode qualifies" at restore time."""
     preferred = _choice("RESTORE_DATA_NIC_TLS_PREFERRED", "verify", TLS_MODES)
@@ -287,8 +325,9 @@ settings = Settings(
     port=_int("PORT", 8008),
     tls_cert_file=_get("TLS_CERT_FILE", "certs/portal.crt"),
     tls_key_file=_get("TLS_KEY_FILE", "certs/portal.key"),
+    reload=_bool("PFR_RELOAD", True),
     guest_agent_min_command_gap_seconds=_float("GUEST_AGENT_MIN_COMMAND_GAP_SECONDS", 0.0),
-    file_restore_list_max_concurrency=_int("FILE_RESTORE_LIST_MAX_CONCURRENCY", 4),
+    file_restore_list_max_concurrency=_int("FILE_RESTORE_LIST_MAX_CONCURRENCY", 2),
     restore_data_nics_json=_get("RESTORE_DATA_NICS", "[]"),
     restore_download_token_ttl_seconds=_float("RESTORE_DOWNLOAD_TOKEN_TTL_SECONDS", 120.0),
     restore_data_nic_port=_int("RESTORE_DATA_NIC_PORT", 0),
@@ -304,6 +343,9 @@ settings = Settings(
     restore_data_nic_tls_ca_file=_get("RESTORE_DATA_NIC_TLS_CA_FILE", ""),
     restore_long_running_exec_timeout_seconds=_float("RESTORE_LONG_RUNNING_EXEC_TIMEOUT_SECONDS", 1800.0),
     default_theme=_theme("DEFAULT_THEME", "auto"),
+    restrict_jobs_to_own=_bool("RESTRICT_JOBS_TO_OWN", False),
+    job_admin_privilege=_get("JOB_ADMIN_PRIVILEGE", "Sys.Audit"),
+    job_history_retention_days=_int("JOB_HISTORY_RETENTION_DAYS", 7),
     data_dir=_path("PFR_DATA_DIR", "data"),
 )
 

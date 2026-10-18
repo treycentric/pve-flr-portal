@@ -1,4 +1,4 @@
-// --- Session expiry (issue #27) ---
+// --- Session expiry ---
 // A 401 from any /api call means the server-side session is gone - idle
 // timeout, or a PVE ticket that could no longer be refreshed
 // (auth.get_session). The backend answers fetch() callers with a plain
@@ -67,9 +67,16 @@ function restoreJobsWidget() {
   return {
     open: false,
     jobs: [],
+    // "all" unless the server tells us otherwise on the
+    // first response (RESTRICT_JOBS_TO_OWN on means it starts at
+    // "mine" instead) - canSeeAll gates whether the toggle even
+    // renders, since there's no point offering "all" to a restricted,
+    // non-admin user who can't actually use it.
+    scope: 'all',
+    canSeeAll: true,
     selectedId: null,
-    // Drag offset for the modal (docs/plan.md §7.5's UI section) - an
-    // inline transform on the modal box, reset only on a fresh page
+    // Drag offset for the modal - an inline transform on the modal
+    // box, reset only on a fresh page
     // load so the position persists across repeated opens/closes.
     dragX: 0,
     dragY: 0,
@@ -106,8 +113,10 @@ function restoreJobsWidget() {
       return this.jobs.filter((j) => ACTIVE_STATUSES.includes(j.status)).length;
     },
     get selectedCancellable() {
+      // can_cancel folds in ownership/admin, not just
+      // "still active" - the server is the real enforcement either way.
       const job = this.jobs.find((j) => j.id === this.selectedId);
-      return !!job && job.cancellable;
+      return !!job && job.can_cancel;
     },
     init() {
       this.refresh();
@@ -115,14 +124,22 @@ function restoreJobsWidget() {
     },
     async refresh() {
       try {
-        const resp = await apiFetch('/api/restore-jobs');
+        const resp = await apiFetch('/api/restore-jobs?scope=' + encodeURIComponent(this.scope));
         if (!resp.ok) return;
-        this.jobs = await resp.json();
+        const data = await resp.json();
+        this.jobs = data.jobs;
+        this.scope = data.scope;
+        this.canSeeAll = data.can_see_all;
       } catch (e) {
         // Transient failure - keep showing the last known list rather
         // than flashing it empty on every hiccup.
       }
       if (this.logOpen) await this.refreshLog();
+    },
+    setScope(scope) {
+      if (scope === this.scope) return;
+      this.scope = scope;
+      this.refresh();
     },
     async cancelSelected() {
       if (!this.selectedId || !this.selectedCancellable) return;
@@ -206,7 +223,7 @@ function restoreJobsWidget() {
   };
 }
 
-// Theme (issue #29). The choice is persisted client-side only (no
+// Theme. The choice is persisted client-side only (no
 // backend, no session) in localStorage under `pfr_theme`, one of
 // 'auto' | 'light' | 'dark'. 'auto' follows the OS, but with no
 // explicit OS preference it resolves to dark. base.html / login.html
@@ -298,7 +315,12 @@ function userMenu(identity) {
     },
     logout() {
       this.open = false;
-      window.location = '/logout';
+      // POST, not a GET navigation - a cross-site link/img must not be able to log the user out.
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = '/logout';
+      document.body.appendChild(form);
+      form.submit();
     },
   };
 }
@@ -311,7 +333,7 @@ function fileGridState() {
     sortKey: 'name',
     sortDir: 'asc',
 
-    // --- PH.5 restore modal (docs/plan.md §7.5) ---
+    // --- PH.5 restore modal (docs/push-to-guest.md) ---
     restoreOpen: false,
     restoreDestDir: '',
     restoreOverwrite: false,
@@ -319,9 +341,8 @@ function fileGridState() {
     // hence reusing restoreBrowseAvailable below rather than a separate
     // flag). restoreMetadata restores mtime (file-restore/list's own
     // metadata). restoreOwnership restores uid/gid/mode, fetched
-    // separately via a tar=1 file-restore/download (confirmed live
-    // 2026-09-28 - the JSON list API never exposes this, but PVE's tar
-    // output does) - Linux/BSD only, disabled in the template for a
+    // separately via a tar=1 file-restore/download (the JSON list API never exposes
+    // this, but PVE's tar output does) - Linux/BSD only, disabled in the template for a
     // Windows guest (NTFS ACLs can't be restored via any file-restore
     // API Proxmox exposes; a Proxmox limitation, not fixable here).
     restoreMetadata: false,
@@ -331,20 +352,20 @@ function fileGridState() {
     restoreError: null,
     restoreSubmitted: false,
     // Browsing the guest filesystem needs VM.GuestAgent.Unrestricted
-    // (guest-exec, no dedicated QGA listing command - docs/plan.md §7.5),
+    // (guest-exec, no dedicated QGA listing command - docs/push-to-guest.md),
     // so it's only offered when that's available; otherwise restoreDestDir
     // stays a plain typed field.
     restoreBrowseAvailable: false,
     // 'original' | 'browse' | 'manual' - which destination picker is
     // showing. Replaces a plain browse/manual boolean now that there are
-    // three (issue #68).
+    // three.
     restoreDestMode: 'manual',
     restoreBrowsePath: null,
     restoreBrowseParent: null,
     restoreBrowseEntries: [],
     restoreBrowseLoading: false,
     restoreBrowseError: null,
-    // Issue #68: "restore to original location" - resolved server-side
+    // "restore to original location" - resolved server-side
     // from the item's own path (guest_original_location.py), so it needs
     // the same guest-exec grant as Browse mode. Attempted optimistically
     // whenever that grant is available (see openRestore) and stepped
@@ -478,7 +499,7 @@ function fileGridState() {
         // Only steer the shared destination field while Browse is the
         // active mode - openRestore() also pre-warms this in the
         // background while "Original location" is showing, and that must
-        // not clobber the original-location result racing it (issue #68).
+        // not clobber the original-location result racing it.
         if (data.path && this.restoreDestMode === 'browse') this.restoreDestDir = data.path;
       } catch (e) {
         this.restoreBrowseError = 'Could not list that folder: ' + e;
@@ -511,13 +532,12 @@ function fileGridState() {
         body.set('snapshot_time', this._snapshotTime);
         body.set('dest_dir', this.restoreDestDir);
         body.set('overwrite', this.restoreOverwrite ? 'true' : 'false');
-        // Applies to both single-file and bundle restore (issue #26 -
-        // Linux/BSD only; the server independently forces this off for
+        // Applies to both single-file and bundle restore (Linux/BSD only; the server independently forces this off for
         // a Windows guest regardless of what's sent here).
         body.set('restore_ownership', this.restoreOwnership ? 'true' : 'false');
         if (this.isSingleFile) {
           // Single-leaf-file restore - unchanged from before multi-file
-          // restore existed (docs/plan.md §7.7, issue #24).
+          // restore existed (docs/push-to-guest.md).
           body.set('filepath', sel[0].filepath);
           body.set('name', sel[0].name);
           body.set('restore_metadata', this.restoreMetadata ? 'true' : 'false');
@@ -625,7 +645,7 @@ function fileGridState() {
   };
 }
 
-// Five discrete zoom levels (issue #18). Each level fixes the view span
+// Five discrete zoom levels. Each level fixes the view span
 // and the tick/label scheme (see _ticks* below); it does NOT bound
 // panning -- the user can keep dragging left/right past any snapshot at
 // every level. Spans are approximate (real months/years vary in length)
@@ -680,7 +700,7 @@ function portalApp(rawSnapshots, guest) {
     history: [],
     historyIndex: -1,
 
-    // --- PH.5 restore state (docs/plan.md §7.5) ---
+    // --- PH.5 restore state (docs/push-to-guest.md) ---
     // {type, vmid, label} for the currently-viewed guest - static for the
     // whole page load (switching guest is a full navigation, see taskPicker's
     // confirm()), so capabilities are fetched once here rather than on every
@@ -732,7 +752,7 @@ function portalApp(rawSnapshots, guest) {
     // groupsInView() groups snapshots by this and draws each group's marker
     // at xFor(bucketStart), so it lands exactly on a tick; zooming out
     // merges snapshots whose buckets coincide, zooming in spreads them
-    // back apart (issue #18).
+    // back apart.
     _bucketStart(date) {
       switch (this.zoomLevel) {
         case 1: {
@@ -961,7 +981,7 @@ function portalApp(rawSnapshots, guest) {
       // where its marker is actually drawn, per groupsInView) under the
       // fixed red center line, preserving the active zoom level. "Anytime
       // an actual snapshot is selected it centers on the thick red line"
-      // (issue #18).
+      //.
       //
       // This pan + repaint happens BEFORE any of the awaits below, so the
       // callout moves to the clicked snapshot the instant it is clicked.
@@ -1001,12 +1021,12 @@ function portalApp(rawSnapshots, guest) {
     // is currently selected, 1-based, matching the row numbers in the list
     // picker. It is not a count of how many are grouped here -- a lone
     // snapshot always reads "1", and it only differs from 1 when a
-    // later member of a multi-snapshot group is picked (issue #18).
+    // later member of a multi-snapshot group is picked.
     _calloutPosition(group) {
       return group.items.findIndex((s) => s.volume === this.selectedVolume) + 1;
     },
 
-    // What a click on a marker does (issue #18 callout semantics):
+    // What a click on a marker does (callout semantics):
     //  - a lone snapshot selects immediately (and centers on the red line);
     //  - a multi-snapshot callout (the pale-blue numbered circle) opens the
     //    tall list box anchored over the callout for the user to pick one --
@@ -1415,7 +1435,7 @@ function portalApp(rawSnapshots, guest) {
           // Unselected marker: the small pale-blue numbered pill + tail. A
           // lone snapshot still shows its "1"; several collapsed onto one
           // tick show the count. Clicking a count > 1 opens the list picker
-          // (activateGroup); it never auto-selects (issue #18).
+          // (activateGroup); it never auto-selects.
           // Grows upward from the tail at y=-8 so the tail stays attached
           // to the dot; the hit area (-26..10) still covers the taller pill.
           const bubble = document.createElementNS(NS, 'rect');
@@ -1604,7 +1624,7 @@ function portalApp(rawSnapshots, guest) {
         if (!ul || ul.tagName !== 'UL') break;
         const fetchUrl = btn.getAttribute('hx-get');
         try {
-          // Issue #80's partition/disk readability probes add a
+          // The partition/disk readability probes add a
           // file-restore/list round trip per child on top of the
           // listing itself - a disk with several partitions can take
           // several seconds to expand here. Reuses the file grid's own
