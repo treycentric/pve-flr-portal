@@ -37,16 +37,19 @@ git config --system --add safe.directory "$APP_DIR"
 
 echo "==> Installing OS packages"
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip
+# --no-install-recommends: python3-pip alone recommends build-essential and
+# python3-dev (gcc, g++, make, ...), none of which this needs - the
+# dependencies install from wheels, and the venv carries its own pip.
+apt-get install -y -qq --no-install-recommends python3 python3-venv
 
 if [ "$INSTALL_CERTBOT" = "1" ]; then
   echo "==> Installing certbot + dns-${CERTBOT_DNS_PLUGIN} plugin"
-  apt-get install -y -qq certbot
+  apt-get install -y -qq --no-install-recommends certbot
   # Separate call: a missing/renamed plugin package (Debian's certbot
   # DNS plugins occasionally don't exist for every provider on every
   # release) should be a warning, not abort the whole install over an
   # optional feature.
-  apt-get install -y -qq "python3-certbot-dns-${CERTBOT_DNS_PLUGIN}" || \
+  apt-get install -y -qq --no-install-recommends "python3-certbot-dns-${CERTBOT_DNS_PLUGIN}" || \
     echo "    Warning: python3-certbot-dns-${CERTBOT_DNS_PLUGIN} not available - certbot installed, but deploy/container/certbot-setup.sh needs this plugin package too."
 fi
 

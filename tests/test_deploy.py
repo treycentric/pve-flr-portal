@@ -112,3 +112,14 @@ def test_unit_template_grants_write_access_to_certs_only():
     match = re.search(r"^ReadWritePaths=(.+)$", text, re.MULTILINE)
     assert match is not None, "no ReadWritePaths= line in the unit template"
     assert match.group(1).strip() == "__APP_DIR__/certs"
+
+
+def test_only_the_needed_os_packages_are_installed():
+    # recommends of python3-pip are the whole compiler toolchain; the venv has its own pip
+    install = _script("install.sh")
+    installer = _script("lxc-create.sh")
+    lines = [line for line in (install + installer).splitlines() if "apt-get install" in line]
+    assert lines
+    for line in lines:
+        assert "--no-install-recommends" in line, line
+    assert not re.search(r"python3-pip|build-essential|python3-dev|\bgcc\b", "\n".join(lines))
