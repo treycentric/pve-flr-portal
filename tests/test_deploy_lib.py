@@ -1,4 +1,4 @@
-"""deploy/lib/settings.sh - the pieces shared by the installer and the
+"""deploy/host/lib/settings.sh - the pieces shared by the installer and the
 management tool: the container's net0 value (built and parsed), the portal's
 .env (read, and patched in place), Direct Network Transfer's mapping, and the
 settings registry. Run in bash against a fake `pct` (tests/fakes/pct)."""
@@ -8,7 +8,7 @@ import subprocess
 import pytest
 from pve_fakes import DEPLOY, FakePve
 
-LIB = (DEPLOY / "lib" / "settings.sh").as_posix()
+LIB = (DEPLOY / "host" / "lib" / "settings.sh").as_posix()
 
 
 @pytest.fixture
@@ -472,7 +472,7 @@ def test_the_installer_creates_the_chosen_roles_from_the_containers_checkout(pve
 
     from pve_fakes import DEPLOY as D
 
-    text = (D / "lxc-create.sh").read_text(encoding="utf-8")
+    text = (D / "host" / "lxc-create.sh").read_text(encoding="utf-8")
     block = re.search(r'^if \[ -n "\$CREATE_ROLES" \]; then\n.*?^fi\n', text, re.S | re.M).group(0)
     pve.add_ct(207)
     deploy = pve.ct(207) / "fs" / "opt" / "pve-flr-portal" / "deploy"
@@ -493,7 +493,7 @@ def test_the_installer_says_what_to_do_when_the_release_lacks_the_roles_tool(pve
 
     from pve_fakes import DEPLOY as D
 
-    text = (D / "lxc-create.sh").read_text(encoding="utf-8")
+    text = (D / "host" / "lxc-create.sh").read_text(encoding="utf-8")
     block = re.search(r'^if \[ -n "\$CREATE_ROLES" \]; then\n.*?^fi\n', text, re.S | re.M).group(0)
     pve.add_ct(207)  # no deploy/host/pfr-roles.sh in this container's release
     result = pve.bash(f'set -uo pipefail\nsource "{LIB}"\nCTID=207\nCREATE_ROLES=FileRestoreReader\n{block}\n')
@@ -536,7 +536,7 @@ def test_a_release_without_the_roles_tool_still_installs_the_command(pve, tmp_pa
 def test_the_installer_prefers_the_roles_tool_installed_on_the_host(pve, tmp_path):
     import re
 
-    text = (DEPLOY / "lxc-create.sh").read_text(encoding="utf-8")
+    text = (DEPLOY / "host" / "lxc-create.sh").read_text(encoding="utf-8")
     block = re.search(r'^if \[ -n "\$CREATE_ROLES" \]; then\n.*?^fi\n', text, re.S | re.M).group(0)
     pve.add_ct(207)  # the container's release has no roles tool: the host's copy is what runs
     sbin = tmp_path / "sbin"

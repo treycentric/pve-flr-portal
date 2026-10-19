@@ -10,7 +10,7 @@
 #   pve-flr-portal list                     the containers it manages
 #   pve-flr-portal adopt [CTID...]          start managing existing installs
 #
-# Installed as /usr/local/sbin/pve-flr-portal by deploy/lxc-create.sh, also
+# Installed as /usr/local/sbin/pve-flr-portal by deploy/host/lxc-create.sh, also
 # linked as pve-flr-portal-config and pve-flr-portal-update. Run as root on the
 # node that hosts the container.
 #
@@ -273,15 +273,48 @@ pull_file() {
   return 1
 }
 
+# release_candidates REL - where a file of the deploy tree is looked for: REL
+# (the host/ or container/ layout) first, then the flat deploy/ layout of
+# earlier releases. Everything that reads a container's checkout or a GitHub
+# ref goes through this, so a host runs against releases of either layout.
+release_candidates() {
+  echo "$1"
+  case "$1" in
+    host/* | container/*) echo "${1#*/}" ;;
+  esac
+}
+
+# pull_release_file CTID REL DEST - pull_file for the first candidate that exists.
+pull_release_file() {
+  local rel
+  for rel in $(release_candidates "$2"); do
+    pull_file "$1" "$APP_DIR/deploy/$rel" "$3" && return 0
+  done
+  return 1
+}
+
+# release_path CTID REL - the path inside the container of the first candidate
+# that exists; fails when none does.
+release_path() {
+  local rel
+  for rel in $(release_candidates "$2"); do
+    if pct exec "$1" -- test -f "$APP_DIR/deploy/$rel" 2>/dev/null; then
+      echo "$APP_DIR/deploy/$rel"
+      return 0
+    fi
+  done
+  return 1
+}
+
 fetch_tools() {
   note "Fetching the management tools from container $1 - please wait..."
   tmp_new TOOLS_DIR -d
   mkdir -p "$TOOLS_DIR/lib"
-  if ! pull_file "$1" "$APP_DIR/deploy/pfr-manage.sh" "$TOOLS_DIR/pfr-manage.sh" \
-    || ! pull_file "$1" "$APP_DIR/deploy/lib/settings.sh" "$TOOLS_DIR/lib/settings.sh"; then
+  if ! pull_release_file "$1" host/pfr-manage.sh "$TOOLS_DIR/pfr-manage.sh" \
+    || ! pull_release_file "$1" host/lib/settings.sh "$TOOLS_DIR/lib/settings.sh"; then
     local ver
     ver="$(ct_version "$1")"
-    die "Container $1 runs v${ver#v}, a release that predates the management tools (it has no deploy/pfr-manage.sh). Update it first: pve-flr-portal update $1 - and if it still lacks them afterwards, no release includes them yet."
+    die "Container $1 runs v${ver#v}, a release that predates the management tools (it has no pfr-manage.sh). Update it first: pve-flr-portal update $1 - and if it still lacks them afterwards, no release includes them yet."
   fi
 }
 
@@ -316,10 +349,6 @@ repo_url() {
   esac
 }
 
-# install_from_container CTID REL DEST - copy deploy/REL out of the
-# container's checkout to DEST, only if it differs. The replacement is atomic
-# (a new file moved over the old), so a copy that is running right now is
-# unaffected. A release that doesn't have the file is skipped.
 # install_file TMP DEST LABEL [MARKER] - put TMP at DEST, only if it differs.
 # TMP must parse as a script (and contain MARKER, when given), or nothing is
 # installed. The replacement is atomic (a new file moved over the old), so a
@@ -344,7 +373,7 @@ install_file() {
 install_from_container() {
   local ctid="$1" rel="$2" dest="$3" marker="${4:-}" tmp
   tmp_new tmp
-  if ! pull_file "$ctid" "$APP_DIR/deploy/$rel" "$tmp"; then
+  if ! pull_release_file "$ctid" "$rel" "$tmp"; then
     return 0
   fi
   install_file "$tmp" "$dest" "container $ctid" "$marker"
@@ -380,7 +409,7 @@ refresh_host_pieces() {
   link_host_command
   install_from_container "$ctid" host/pfr-roles.sh "$ROLES_TOOL" "$ROLES_MARKER"
   if [ -f "$SBIN/pve-flr-portal-patch-host-backups.sh" ]; then
-    install_from_container "$ctid" patch-pve-host-backups.sh "$SBIN/pve-flr-portal-patch-host-backups.sh"
+    install_from_container "$ctid" host/patch-pve-host-backups.sh "$SBIN/pve-flr-portal-patch-host-backups.sh"
   fi
 }
 
@@ -419,7 +448,7 @@ github_slug() {
 # the host command (and the host-backup patch script, if installed) from the
 # first ref that has the command.
 refresh_from_github() {
-  local slug ref tmp raw
+  local slug ref tmp raw cand
   slug="$(github_slug)"
   for ref in $(github_refs); do
     raw="https://raw.githubusercontent.com/${slug}/${ref}/deploy"
@@ -433,10 +462,13 @@ refresh_from_github() {
         install_file "$tmp" "$ROLES_TOOL" "GitHub ($ref)" "$ROLES_MARKER"
       fi
       if [ -f "$SBIN/pve-flr-portal-patch-host-backups.sh" ]; then
-        tmp_new tmp
-        if curl -fsSL "$raw/patch-pve-host-backups.sh" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-          install_file "$tmp" "$SBIN/pve-flr-portal-patch-host-backups.sh" "GitHub ($ref)"
-        fi
+        for cand in $(release_candidates host/patch-pve-host-backups.sh); do
+          tmp_new tmp
+          if curl -fsSL "$raw/$cand" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            install_file "$tmp" "$SBIN/pve-flr-portal-patch-host-backups.sh" "GitHub ($ref)"
+            break
+          fi
+        done
       fi
       return 0
     fi
@@ -495,7 +527,9 @@ if [ -n "\$(git status --porcelain)" ]; then
 fi
 git fetch --quiet --tags origin
 $(legacy_checkout "$1" "$2")
-INSTALL_CERTBOT=0 bash deploy/install.sh
+INSTALL=deploy/container/install.sh
+[ -f "\$INSTALL" ] || INSTALL=deploy/install.sh
+INSTALL_CERTBOT=0 bash "\$INSTALL"
 EOF
 }
 
@@ -503,7 +537,7 @@ EOF
 # and does it have git? Then the steps above can be run for the person.
 legacy_possible() {
   pct exec "$1" -- test -d "$APP_DIR/.git" 2>/dev/null \
-    && pct exec "$1" -- test -f "$APP_DIR/deploy/install.sh" 2>/dev/null \
+    && release_path "$1" container/install.sh >/dev/null \
     && pct exec "$1" -- sh -c 'command -v git >/dev/null 2>&1' 2>/dev/null
 }
 
@@ -526,7 +560,7 @@ EOF
 # update_one CTID TARGET -> 0 updated, 10 already up to date, 11 declined,
 # anything else failed. TARGET is empty/latest, main, or a version.
 update_one() {
-  local ctid="$1" target="$2" name current latest want url snapshot="" take=0 legacy=0 rc=0 args=()
+  local ctid="$1" target="$2" name current latest want url snapshot="" take=0 legacy=0 rc=0 args=() update_script
   name=$(pct config "$ctid" | sed -n 's/^hostname: *//p')
   current="$(norm "$(ct_version "$ctid")")"
   latest="$(latest_release "$ctid")"
@@ -550,7 +584,8 @@ update_one() {
     echo "  (unreleased work from main - not a tested release)"
   fi
   # Checked before anything is asked or snapshotted.
-  if ! pct exec "$ctid" -- test -f "$APP_DIR/deploy/update.sh" 2>/dev/null; then
+  update_script="$(release_path "$ctid" container/update.sh || true)"
+  if [ -z "$update_script" ]; then
     if legacy_possible "$ctid"; then
       legacy=1
       echo "  (installed before update.sh existed: the equivalent steps are run - fetch, check out the"
@@ -592,7 +627,7 @@ update_one() {
   if [ "$legacy" = "1" ]; then
     pct exec "$ctid" -- bash -c "$(legacy_script "$target" "$latest")" || rc=$?
   else
-    pct exec "$ctid" -- bash "$APP_DIR/deploy/update.sh" "${args[@]}" || rc=$?
+    pct exec "$ctid" -- bash "$update_script" "${args[@]}" || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     echo "The update failed in container $ctid." >&2
@@ -713,17 +748,19 @@ cmd_host_tools() {
 # given, contains it. Sets VAR to the temp file and GOT_REF to the ref.
 GOT_REF=""
 download_deploy_file() {
-  local rel="$1" var="$2" marker="${3:-}" slug ref tmp
+  local rel="$1" var="$2" marker="${3:-}" slug ref tmp cand
   slug="$(github_slug)"
   for ref in $(github_refs); do
-    tmp_new tmp
-    if curl -fsSL "https://raw.githubusercontent.com/${slug}/${ref}/deploy/$rel" -o "$tmp" 2>/dev/null \
-      && [ -s "$tmp" ] && bash -n "$tmp" 2>/dev/null \
-      && { [ -z "$marker" ] || grep -q "$marker" "$tmp"; }; then
-      GOT_REF="$ref"
-      printf -v "$var" '%s' "$tmp"
-      return 0
-    fi
+    for cand in $(release_candidates "$rel"); do
+      tmp_new tmp
+      if curl -fsSL "https://raw.githubusercontent.com/${slug}/${ref}/deploy/$cand" -o "$tmp" 2>/dev/null \
+        && [ -s "$tmp" ] && bash -n "$tmp" 2>/dev/null \
+        && { [ -z "$marker" ] || grep -q "$marker" "$tmp"; }; then
+        GOT_REF="$ref"
+        printf -v "$var" '%s' "$tmp"
+        return 0
+      fi
+    done
   done
   return 1
 }
@@ -734,7 +771,7 @@ download_deploy_file() {
 cmd_install() {
   local script
   note "Fetching the installer from GitHub - please wait..."
-  download_deploy_file lxc-create.sh script '^PFR_LIB_API_WANTED=' \
+  download_deploy_file host/lxc-create.sh script '^PFR_LIB_API_WANTED=' \
     || die "Could not download the installer from GitHub. Check the network."
   echo "Using the installer from $GOT_REF." >&2
   bash "$script" "$@"

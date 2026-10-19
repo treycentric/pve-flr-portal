@@ -1,6 +1,7 @@
 """Light coverage for run.py's data-plane wiring. The actual
 socket bind / uvicorn serve isn't exercised here - just the cert-prep
 and the plaintext/HTTPS decision."""
+
 import importlib
 from dataclasses import replace
 
@@ -32,12 +33,14 @@ def test_prepare_data_plane_cert_covers_what_the_url_presents(_dp_paths):
     cert, _key = _dp_paths
     nics = [
         DataNic("10.0.5.0/24", "10.0.5.5", hostname="restore.dc1.lan"),  # URL uses the name
-        DataNic("10.0.6.0/24", "10.0.6.5"),                              # URL uses the IP
+        DataNic("10.0.6.0/24", "10.0.6.5"),  # URL uses the IP
     ]
     run._prepare_data_plane_cert(nics)
-    san = x509.load_pem_x509_certificate(cert.read_bytes()).extensions.get_extension_for_class(
-        x509.SubjectAlternativeName
-    ).value
+    san = (
+        x509.load_pem_x509_certificate(cert.read_bytes())
+        .extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        .value
+    )
     # the hostname'd NIC contributes only its DNS name, not its IP
     assert {str(v) for v in san.get_values_for_type(x509.IPAddress)} == {"10.0.6.5"}
     assert "restore.dc1.lan" in san.get_values_for_type(x509.DNSName)

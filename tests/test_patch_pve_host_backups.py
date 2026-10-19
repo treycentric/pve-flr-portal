@@ -1,4 +1,4 @@
-"""Checks on deploy/patch-pve-host-backups.sh.
+"""Checks on deploy/host/patch-pve-host-backups.sh.
 
 Can't exercise the real thing end-to-end - it needs root and a real PVE
 host's PBSPlugin.pm. What's checked here: the script is valid bash, and
@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "deploy" / "patch-pve-host-backups.sh"
+SCRIPT = ROOT / "deploy" / "host" / "patch-pve-host-backups.sh"
 
 _GIT_BASH = Path(r"C:\Program Files\Git\usr\bin\bash.exe")
 BASH = str(_GIT_BASH) if _GIT_BASH.is_file() else "bash"
@@ -26,7 +26,7 @@ OLD_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct');"
 LEGACY_NEW_LINE_1 = "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host');"
 NEW_LINE_1 = (
     "next if !($btype eq 'vm' || $btype eq 'ct' || $btype eq 'host'); "
-    "# patched by pve-flr-portal, see deploy/patch-pve-host-backups.sh"
+    "# patched by pve-flr-portal, see deploy/host/patch-pve-host-backups.sh"
 )
 OLD_LINE_2 = "next if $bid !~ m/^\\d+$/;"
 NEW_LINE_2 = "next if $btype ne 'host' && $bid !~ m/^\\d+$/;"
@@ -198,4 +198,3 @@ def test_script_installs_a_dpkg_hook_that_reapplies_itself():
     text = SCRIPT.read_text(encoding="utf-8")
     assert "DPkg::Post-Invoke" in text
     assert "/etc/apt/apt.conf.d/" in text
-

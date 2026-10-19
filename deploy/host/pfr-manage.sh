@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Management tool for one installed pve-flr-portal container, run on the PVE
 # host by the `pve-flr-portal` command (which copies this file and
-# deploy/lib/settings.sh out of the container's own checkout, so the screens
+# deploy/host/lib/settings.sh out of the container's own checkout, so the screens
 # always match the release that is installed). Run as root on the node that
 # hosts the container.
 #

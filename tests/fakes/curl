@@ -19,7 +19,14 @@ done
 if [ -n "${FAKE_RAW_DIR:-}" ]; then
   ref=$(printf '%s' "$url" | sed -n 's|^https://raw.githubusercontent.com/[^/]*/[^/]*/\([^/]*\)/.*|\1|p')
   name="${url##*/}"
-  if [ -n "$ref" ] && [ -f "$FAKE_RAW_DIR/$ref/$name" ]; then
+  # the path under deploy/ is tried first, so a test can serve either layout...
+  rel=$(printf '%s' "$url" | sed -n 's|^.*/deploy/||p')
+  if [ -n "$ref" ] && [ -n "$rel" ] && [ -f "$FAKE_RAW_DIR/$ref/deploy/$rel" ]; then
+    cp "$FAKE_RAW_DIR/$ref/deploy/$rel" "$out"
+    exit 0
+  fi
+  # ...then the bare file name, unless FAKE_RAW_STRICT is set
+  if [ -z "${FAKE_RAW_STRICT:-}" ] && [ -n "$ref" ] && [ -f "$FAKE_RAW_DIR/$ref/$name" ]; then
     cp "$FAKE_RAW_DIR/$ref/$name" "$out"
     exit 0
   fi

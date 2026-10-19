@@ -1,4 +1,4 @@
-"""The installer's setting resolution (deploy/lib/settings.sh), exercised for real.
+"""The installer's setting resolution (deploy/host/lib/settings.sh), exercised for real.
 
 Creating a container needs a PVE host, so these source the shared library
 in a bash subprocess with no terminal attached - the unattended path - run
@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LIB = ROOT / "deploy" / "lib" / "settings.sh"
+LIB = ROOT / "deploy" / "host" / "lib" / "settings.sh"
 
 _GIT_BASH = Path(r"C:\Program Files\Git\usr\bin\bash.exe")
 BASH = str(_GIT_BASH) if _GIT_BASH.is_file() else "bash"

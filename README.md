@@ -205,7 +205,7 @@ appear, no matter how permissions are configured.** PVE's own
 every storage content listing unconditionally, before any permission
 check ever runs — even `root@pam` can't see one in
 PVE's own GUI. There's no supported PVE API path around this. Run
-`deploy/patch-pve-host-backups.sh` on every PVE node first (opt-in,
+`deploy/host/patch-pve-host-backups.sh` on every PVE node first (opt-in,
 explained in full there and offered during `lxc-create.sh`) — only
 once that's done does the rest of this section's permission setup
 actually matter. See `docs/api-reference.md` for the full trace.
@@ -253,7 +253,7 @@ whether or not PVE itself made the backup.
 
 **This also unlocks host backups in PVE's own native "Backups" tab**,
 including its own File Restore button — not just this app, since
-`deploy/patch-pve-host-backups.sh` works by fixing what PVE itself
+`deploy/host/patch-pve-host-backups.sh` works by fixing what PVE itself
 hands back, the same way regardless of caller. `Restore`,
 `Show Configuration`, and `Change Protection` on a host backup's row in
 PVE's GUI don't work correctly - PVE didn't design those for a backup
@@ -464,7 +464,7 @@ needed on the portal's own side).
 Run on the PVE host itself, as root:
 
 ```
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)" install-host-tools --install
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/host/install-host-tools.sh)" install-host-tools --install
 ```
 
 That is two steps in one: it installs the `pve-flr-portal` command on the host
@@ -476,7 +476,7 @@ later, which is handy for dev/test instances - run the first command without
 `bash -c "$(curl ...)"` as shown rather than `curl ... | bash`: piping would
 take the terminal away from the installer's dialogs.) The installer itself can
 still be run directly: `bash -c "$(curl -fsSL
-https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/lxc-create.sh)"`.
+https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/host/lxc-create.sh)"`.
 
 Guided setup at a real terminal: a welcome screen, then a short
 Back/Next wizard for the essentials, then a review screen where you can
@@ -500,9 +500,9 @@ change anything before it starts.
 
 Every question can also be answered up front via an environment variable
 (`CTID`/`STORAGE`/`BRIDGE`/`PVE_HOST`/etc. - see the top of the script and
-`deploy/lib/settings.sh` for the full list), which skips that question in the
+`deploy/host/lib/settings.sh` for the full list), which skips that question in the
 wizard - so a scripted/unattended run (e.g. `STORAGE=local-zfs BRIDGE=vmbr1
-bash deploy/lxc-create.sh`) works without prompts, and a run with no terminal
+bash deploy/host/lxc-create.sh`) works without prompts, and a run with no terminal
 attached silently takes defaults for anything not pre-set instead of hanging
 on a prompt nobody can answer.
 
@@ -511,8 +511,10 @@ static. IPv4 can't be turned off: the portal listens on IPv4 only and the
 install and update fetch from GitHub, which is IPv4-only.
 
 **What is fetched, and from where.** The command above runs
-`deploy/lxc-create.sh` from `main`; to pin the installer itself, use a release
-tag in the URL (e.g. `.../v1.9.0/deploy/lxc-create.sh`). Everything else comes
+`deploy/host/lxc-create.sh` from `main`; to pin the installer itself, use a release
+tag in the URL (e.g. `.../v2.0.0/deploy/host/lxc-create.sh`; releases before 2.0
+have it at `deploy/lxc-create.sh`, which still works on `main` as a forwarding
+stub). Everything else comes
 from the latest tagged release (falling back to `main` only if there is none,
 or the release predates the file): the shared settings library the installer
 uses, the app and its scripts in the container's checkout, and the host-backup
@@ -521,10 +523,10 @@ always match the installed release.
 
 To install a specific version instead of the latest release - a tag, or a
 branch to try work that isn't released yet - set `PFR_VERSION`, e.g.
-`PFR_VERSION=v1.9.0 bash deploy/lxc-create.sh`. The shared library and the
+`PFR_VERSION=v1.9.0 bash deploy/host/lxc-create.sh`. The shared library and the
 management tools then come from that version too.
 
-Already have a container? Run `deploy/install.sh` inside it instead
+Already have a container? Run `deploy/container/install.sh` inside it instead
 (non-interactive - edit `.env` by hand). Rationale for LXC over a
 Debian package on the host or a full VM/OVA is in
 `docs/archive/design-rationale.md`.
@@ -576,7 +578,7 @@ those.
 have it yet.* Install the command on the PVE host (as root):
 
 ```
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/host/install-host-tools.sh)"
 pve-flr-portal adopt      # start managing the existing install(s)
 pve-flr-portal update     # bring them up to date - older installs are handled too
 ```
@@ -599,7 +601,7 @@ It shows the installed and the new version (with a link to the release notes),
 asks you to confirm, and - if the container's storage supports snapshots -
 offers to take one first so the update can be rolled back
 (`pct rollback <CTID> <snapshot>`; the snapshot is left for you to delete with
-`pct delsnapshot`). It then runs `deploy/update.sh` inside the container and
+`pct delsnapshot`). It then runs `deploy/container/update.sh` inside the container and
 tells you the version it ended up on. If the container is already on the
 latest release it says so and does nothing (`--force` updates anyway).
 
@@ -625,9 +627,9 @@ If the container isn't a git checkout, or has no `git` or `install.sh`, nothing
 is changed and the command prints the same steps for you to run by hand. After
 the update the container has `update.sh`, so later updates take the normal path.
 
-`deploy/update.sh` can also be run yourself inside the container: `bash
-deploy/update.sh` for the latest release, `bash deploy/update.sh v1.4.0` (or
-`1.4.0`) to pin, or `bash deploy/update.sh main` for unreleased work. It
+`deploy/container/update.sh` can also be run yourself inside the container: `bash
+deploy/container/update.sh` for the latest release, `bash deploy/container/update.sh v1.4.0` (or
+`1.4.0`) to pin, or `bash deploy/container/update.sh main` for unreleased work. It
 reinstalls dependencies if `requirements.txt` changed and restarts the
 service; it refuses to run if the install directory has local/uncommitted
 changes rather than discarding them. See `docs/archive/design-rationale.md`
@@ -733,23 +735,23 @@ container IP.)
 
 **TLS certificates → Let's Encrypt (DNS-01).** The
 self-signed cert above works fine but triggers a browser warning.
-`deploy/install.sh` installs `certbot` + a DNS-01 plugin
+`deploy/container/install.sh` installs `certbot` + a DNS-01 plugin
 (`CERTBOT_DNS_PLUGIN`, default `rfc2136`) by default
 (`INSTALL_CERTBOT=1`). DNS-01 is used instead of `http-01` because this
 app is often deployed internally, with no port 80/443 exposed to the
 internet for Let's Encrypt to reach — the challenge is proven via a DNS
 TXT record instead.
 
-1. Copy `deploy/rfc2136-credentials.ini.example` (or the equivalent for
+1. Copy `deploy/container/rfc2136-credentials.ini.example` (or the equivalent for
    your plugin) to `/etc/letsencrypt/<plugin>-credentials.ini` inside
    the container, fill in real values, `chmod 600` it.
-2. `bash deploy/certbot-setup.sh flr.example.com` — issues the cert,
+2. `bash deploy/container/certbot-setup.sh flr.example.com` — issues the cert,
    installs it at `TLS_CERT_FILE`/`TLS_KEY_FILE`, restarts the service,
-   and wires up automatic renewal (`certbot.timer` + `deploy/certbot-deploy-hook.sh`
+   and wires up automatic renewal (`certbot.timer` + `deploy/container/certbot-deploy-hook.sh`
    as the renewal hook — no separate step needed after this).
 3. Want the Direct Network Transfer data-plane cert issued too (instead
    of its own auto-generated self-signed one)? Pass its hostname as an
-   extra domain (`bash deploy/certbot-setup.sh flr.example.com
+   extra domain (`bash deploy/container/certbot-setup.sh flr.example.com
    flr-data.example.com`) and set `PFR_ACME_DATA_PLANE=1` in `.env`
    first.
 
@@ -757,7 +759,7 @@ TXT record instead.
 [acme2certifier](https://github.com/grindsa/acme2certifier) instance
 fronting your own internal PKI): set `ACME_SERVER` to that server's
 directory URL, e.g. `ACME_SERVER=https://acme.internal.example.com/directory
-bash deploy/certbot-setup.sh flr.internal.example.com`. certbot records
+bash deploy/container/certbot-setup.sh flr.internal.example.com`. certbot records
 the server in the certificate's own renewal config, so `certbot renew`
 keeps using it automatically — no extra step. If that server's own TLS
 cert isn't from a publicly-trusted CA, its issuing CA needs to be

@@ -4,8 +4,8 @@
 # validation), the whiptail dialogs (with a plain-prompt fallback), and the
 # helpers that read and write a container's configuration.
 #
-# Sourced - never executed - by deploy/lxc-create.sh (the installer) and
-# deploy/pfr-manage.sh (the host management tool). Nothing here runs at
+# Sourced - never executed - by deploy/host/lxc-create.sh (the installer) and
+# deploy/host/pfr-manage.sh (the host management tool). Nothing here runs at
 # source time beyond defining functions and the registry.
 #
 # Bump PFR_LIB_API on an incompatible change: the installer refuses a
@@ -217,7 +217,7 @@ def DNS_SERVERS "DNS servers" str "" "" basic '^([0-9A-Fa-f:.]+([ ,]+[0-9A-Fa-f:
 def SEARCH_DOMAIN "DNS search domain" str "" "" basic '^([A-Za-z0-9.-]+)?$' "USE_STATIC_IP=yes||IPV6_MODE=static" "For example example.com. Leave blank to use the PVE host's setting."
 def PVE_HOST "PVE host" str "$DEFAULT_PVE_HOST" PVE_HOST basic '^[^[:space:]]+$' "" "The hostname or IP the portal uses to reach the Proxmox API (usually this host)."
 def PVE_STORAGE "PBS storage(s) to browse" str pbs PVE_STORAGE basic "" "" "Select the Proxmox Backup Server storage(s) the portal will browse backups from. Choose more than one if your backups are spread across several PBS storages or namespaces."
-def ENABLE_HOST_BACKUPS "Host-backup support" enum false "" basic "false=No|true=Yes - patch this PVE node now" "" "Lets the portal browse and restore from HOST-type backups.\n\nThis modifies the Proxmox Storage PBS backend on this PVE host to remove a limitation that prevents browsing and file-level restore of host backups. A side benefit: host backups also become browsable in the PVE UI.\n\nThe change reapplies itself automatically after pve-storage package updates. See deploy/patch-pve-host-backups.sh for details. On a cluster, run that script on every other node too."
+def ENABLE_HOST_BACKUPS "Host-backup support" enum false "" basic "false=No|true=Yes - patch this PVE node now" "" "Lets the portal browse and restore from HOST-type backups.\n\nThis modifies the Proxmox Storage PBS backend on this PVE host to remove a limitation that prevents browsing and file-level restore of host backups. A side benefit: host backups also become browsable in the PVE UI.\n\nThe change reapplies itself automatically after pve-storage package updates. See deploy/host/patch-pve-host-backups.sh for details. On a cluster, run that script on every other node too."
 
 def CREATE_ROLES "PVE roles to create" str "" "" basic "" "" "The PVE roles your users get access through. Creating a role grants nothing by itself - you still grant it to each user (see the README's Provisioning Access) - and existing roles are left alone.\n\nFileRestoreReader: browse and download backups.\nFileRestoreOperator: restore files into running guests (PVE 9 or newer).\nFileRestoreReaderHost: browse host backups. It includes Datastore.Allocate, which is full admin on that storage, so use it only on a storage dedicated to host backups.\n\nThe installer creates the ones you select."
 
@@ -1331,6 +1331,28 @@ pfr_pull() {
   return 1
 }
 
+# pfr_release_path CTID REL - the path inside the container's checkout of
+# deploy/REL (host/ or container/ layout), else the flat deploy/ path of
+# earlier releases; fails when neither exists. The container runs whichever
+# release was cloned, which can be either layout.
+pfr_release_path() {
+  local rel
+  for rel in "$2" "${2#*/}"; do
+    if pct exec "$1" -- test -f "$PFR_APP_DIR/deploy/$rel" 2>/dev/null; then
+      echo "$PFR_APP_DIR/deploy/$rel"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# pfr_pull_release CTID REL DEST - pfr_pull for deploy/REL in either layout.
+pfr_pull_release() {
+  local path
+  path="$(pfr_release_path "$1" "$2")" || return 1
+  pfr_pull "$1" "$path" "$3"
+}
+
 # pfr_install_host_command CTID - install the host command
 # (/usr/local/sbin/pve-flr-portal, plus its -config/-update links) from the
 # container's own checkout, so it is the release that was just installed.
@@ -1338,7 +1360,7 @@ pfr_pull() {
 pfr_install_host_command() {
   local sbin="${PFR_SBIN:-/usr/local/sbin}" tmp
   pfr_mktemp tmp
-  if ! pfr_pull "$1" "$PFR_APP_DIR/deploy/host/pve-flr-portal" "$tmp"; then
+  if ! pfr_pull_release "$1" host/pve-flr-portal "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1347,7 +1369,7 @@ pfr_install_host_command() {
   ln -sf pve-flr-portal "$sbin/pve-flr-portal-config"
   ln -sf pve-flr-portal "$sbin/pve-flr-portal-update"
   # The roles tool lives next to it (a release can predate it).
-  if pfr_pull "$1" "$PFR_APP_DIR/deploy/host/pfr-roles.sh" "$tmp"; then
+  if pfr_pull_release "$1" host/pfr-roles.sh "$tmp"; then
     install -m 755 "$tmp" "$sbin/pve-flr-portal-roles.new"
     mv -f "$sbin/pve-flr-portal-roles.new" "$sbin/pve-flr-portal-roles"
   fi

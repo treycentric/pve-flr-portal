@@ -15,7 +15,7 @@
 # sees a valid file and leaves it alone.
 #
 # Test it manually with: RENEWED_LINEAGE=/etc/letsencrypt/live/<name> \
-#   bash deploy/certbot-deploy-hook.sh
+#   bash deploy/container/certbot-deploy-hook.sh
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/pve-flr-portal}"

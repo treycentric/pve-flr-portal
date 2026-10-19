@@ -9,9 +9,8 @@ from backend import pve_client
 
 
 def _with_storages(monkeypatch, *ids):
-    monkeypatch.setattr(
-        pve_client, "settings", dataclasses.replace(pve_client.settings, pve_storages=tuple(ids))
-    )
+    monkeypatch.setattr(pve_client, "settings", dataclasses.replace(pve_client.settings, pve_storages=tuple(ids)))
+
 
 API = pve_client._API_ROOT
 

@@ -53,9 +53,7 @@ async def test_list_directories_rejects_unsafe_path(session_data):
 async def test_list_directories_linux_root(session_data):
     _exec_route().mock(return_value=httpx.Response(200, json={"data": {"pid": 42}}))
     _status_route().mock(
-        return_value=httpx.Response(
-            200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "/etc\n/var\n/home\n"}}
-        )
+        return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": "/etc\n/var\n/home\n"}})
     )
     result = await list_directories(session_data, "vm", "133", "linux", None)
     assert result["path"] == "/"
@@ -140,9 +138,7 @@ async def test_windows_subfolder_listing_embeds_path_in_command_not_a_trailing_a
     # _check_path_safe already rejects `'`), with no extra trailing
     # element in the command array.
     exec_route = _exec_route().mock(return_value=httpx.Response(200, json={"data": {"pid": 1}}))
-    _status_route().mock(
-        return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": ""}})
-    )
+    _status_route().mock(return_value=httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0, "out-data": ""}}))
     await list_directories(session_data, "vm", "133", "windows", "C:\\Program Files")
 
     from urllib.parse import parse_qs

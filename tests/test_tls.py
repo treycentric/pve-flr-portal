@@ -74,7 +74,7 @@ def test_refreshes_our_own_torn_pair(tmp_path, caplog):
     # Our own auto-generated cert next to a mismatched key (a torn write
     # from a restart loop) -> KEY_VALUES_MISMATCH at uvicorn startup
     # unless we re-issue it here.
-    cert.write_bytes(_real_pair(tmp_path, "a")[0])       # has the autogen marker
+    cert.write_bytes(_real_pair(tmp_path, "a")[0])  # has the autogen marker
     key.write_bytes(_real_pair(tmp_path, "b")[1])
     with caplog.at_level("WARNING"):
         ensure_self_signed_cert(cert, key, common_name="pve.example")
@@ -117,6 +117,7 @@ def test_leaves_an_unreadable_pair_alone(tmp_path, caplog):
 
 
 # --- data-plane cert ---------------------------------------
+
 
 def test_data_plane_cert_carries_ip_and_dns_sans(tmp_path):
     cert = tmp_path / "certs" / "data-plane.crt"

@@ -126,9 +126,7 @@ def test_guest_os_family_detected_from_osinfo():
 
 
 def test_guest_os_family_unknown_when_no_osinfo():
-    caps = parse_capabilities(
-        vm_config={"agent": "1"}, agent_info=None, permissions={}, pve_version_major=9
-    )
+    caps = parse_capabilities(vm_config={"agent": "1"}, agent_info=None, permissions={}, pve_version_major=9)
     assert caps.guest_os_family is None
 
 
@@ -290,9 +288,7 @@ async def test_get_restore_capabilities_targets_the_guests_real_node(session_dat
     # On a multi-node cluster, every guest-scoped call here
     # must target the guest's real node, not the literal "localhost".
     _mock_cluster_node(node="pve2")
-    respx.get(f"{API}/nodes/pve2/qemu/133/config").mock(
-        return_value=httpx.Response(200, json={"data": {"agent": "1"}})
-    )
+    respx.get(f"{API}/nodes/pve2/qemu/133/config").mock(return_value=httpx.Response(200, json={"data": {"agent": "1"}}))
     respx.get(f"{API}/access/permissions").mock(
         return_value=httpx.Response(200, json={"data": {"/vms/133": {"VM.GuestAgent.FileWrite": 1}}})
     )
@@ -300,9 +296,7 @@ async def test_get_restore_capabilities_targets_the_guests_real_node(session_dat
     respx.get(f"{API}/nodes/pve2/qemu/133/agent/info").mock(
         return_value=httpx.Response(200, json={"data": {"supported_commands": []}})
     )
-    respx.get(f"{API}/nodes/pve2/qemu/133/agent/get-osinfo").mock(
-        return_value=httpx.Response(200, json={"data": {}})
-    )
+    respx.get(f"{API}/nodes/pve2/qemu/133/agent/get-osinfo").mock(return_value=httpx.Response(200, json={"data": {}}))
 
     caps = await get_restore_capabilities(session_data, "vm", "133")
     assert caps.node == "pve2"
@@ -312,9 +306,7 @@ async def test_get_restore_capabilities_targets_the_guests_real_node(session_dat
 @respx.mock
 async def test_get_restore_capabilities_lxc_skips_agent_calls(session_data):
     _mock_cluster_node()
-    respx.get(f"{API}/nodes/localhost/lxc/133/config").mock(
-        return_value=httpx.Response(200, json={"data": {}})
-    )
+    respx.get(f"{API}/nodes/localhost/lxc/133/config").mock(return_value=httpx.Response(200, json={"data": {}}))
     respx.get(f"{API}/access/permissions").mock(return_value=httpx.Response(200, json={"data": {}}))
     respx.get(f"{API}/version").mock(return_value=httpx.Response(200, json={"data": {"version": "9.2.4"}}))
 

@@ -28,8 +28,16 @@ _GIT_BASH = Path(r"C:\Program Files\Git\usr\bin\bash.exe")
 BASH = str(_GIT_BASH) if _GIT_BASH.is_file() else "bash"
 
 
+def _path(name: str) -> Path:
+    """A deploy script by its file name: host/ scripts run on the node, container/ ones inside."""
+    for sub in ("container", "host"):
+        if (DEPLOY / sub / name).exists():
+            return DEPLOY / sub / name
+    raise AssertionError(f"no deploy script named {name}")
+
+
 def _script(name: str) -> str:
-    return (DEPLOY / name).read_text(encoding="utf-8")
+    return _path(name).read_text(encoding="utf-8")
 
 
 def test_deploy_scripts_are_valid_bash():
@@ -37,7 +45,7 @@ def test_deploy_scripts_are_valid_bash():
         # .as_posix() - Git Bash parses forward slashes fine but mangles
         # a raw Windows backslash path, since backslash is bash's own
         # escape character.
-        result = subprocess.run([BASH, "-n", (DEPLOY / name).as_posix()], capture_output=True, text=True)
+        result = subprocess.run([BASH, "-n", _path(name).as_posix()], capture_output=True, text=True)
         assert result.returncode == 0, f"{name}: {result.stderr}"
 
 
@@ -100,7 +108,7 @@ def test_install_and_update_verify_ownership_and_mode_took_effect():
 
 
 def test_unit_template_grants_write_access_to_certs_only():
-    text = (DEPLOY / "pve-flr-portal.service.template").read_text(encoding="utf-8")
+    text = (DEPLOY / "container" / "pve-flr-portal.service.template").read_text(encoding="utf-8")
     match = re.search(r"^ReadWritePaths=(.+)$", text, re.MULTILINE)
     assert match is not None, "no ReadWritePaths= line in the unit template"
     assert match.group(1).strip() == "__APP_DIR__/certs"

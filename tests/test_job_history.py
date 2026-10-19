@@ -64,9 +64,7 @@ async def test_evict_expired_does_not_orphan_log_entries(session_data):
 
     with job_history._lock:
         conn = job_history._get_conn()
-        orphaned = conn.execute(
-            "SELECT COUNT(*) FROM job_log_entries WHERE job_id = ?", (job.id,)
-        ).fetchone()[0]
+        orphaned = conn.execute("SELECT COUNT(*) FROM job_log_entries WHERE job_id = ?", (job.id,)).fetchone()[0]
     assert orphaned == 0
 
 

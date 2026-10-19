@@ -102,8 +102,8 @@ def test_config_hands_off_to_the_tools_in_the_containers_checkout(pve):
     # go on as a non-root user / without a terminal
     assert result.returncode != 0
     assert "root" in result.stderr or "terminal" in result.stderr
-    assert "pct pull 207 /opt/pve-flr-portal/deploy/pfr-manage.sh" in pve.log("calls.log")
-    assert "pct pull 207 /opt/pve-flr-portal/deploy/lib/settings.sh" in pve.log("calls.log")
+    assert "pct pull 207 /opt/pve-flr-portal/deploy/host/pfr-manage.sh" in pve.log("calls.log")
+    assert "pct pull 207 /opt/pve-flr-portal/deploy/host/lib/settings.sh" in pve.log("calls.log")
 
 
 def test_config_on_a_release_without_the_tools_says_to_update_first(pve):
@@ -117,13 +117,13 @@ def test_config_on_a_release_without_the_tools_says_to_update_first(pve):
 def test_update_passes_its_arguments_to_update_sh_in_the_container(pve):
     pve.add_ct(207, tags="pve-flr-portal")
     assert stub(pve, "update", "207", "v1.4.0", "-y", "--no-snapshot").returncode == 0
-    assert "bash /opt/pve-flr-portal/deploy/update.sh v1.4.0" in pve.log("exec.log")
+    assert "bash /opt/pve-flr-portal/deploy/container/update.sh v1.4.0" in pve.log("exec.log")
 
 
 def test_the_config_and_update_names_dispatch_to_their_commands(pve):
     pve.add_ct(207, tags="pve-flr-portal")
     assert stub(pve, "-y", "--no-snapshot", name="pve-flr-portal-update").returncode == 0
-    assert "deploy/update.sh" in pve.log("exec.log")
+    assert "deploy/container/update.sh" in pve.log("exec.log")
     result = stub(pve, name="pve-flr-portal-config")
     assert "predates the management tools" in result.stderr
 
@@ -139,13 +139,20 @@ def test_deploy_scripts_are_executable_in_git():
     import subprocess
 
     out = subprocess.run(
-        ["git", "ls-files", "--stage", "deploy/pfr-manage.sh", "deploy/host/pve-flr-portal", "deploy/lxc-create.sh"],
+        ["git", "ls-files", "--stage", "deploy"],
         cwd=DEPLOY.parent,
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    assert out.count("100755") == 3, out
+    scripts = [
+        line for line in out.splitlines() if line.split("\t")[1].endswith(".sh") or line.endswith("/pve-flr-portal")
+    ]
+    scripts = [line for line in scripts if "/lib/" not in line]
+    assert len(scripts) >= 10, out
+    assert all(line.startswith("100755") for line in scripts), [
+        line for line in scripts if not line.startswith("100755")
+    ]
 
 
 def test_an_empty_tools_file_in_the_container_is_never_run(pve):
@@ -208,7 +215,7 @@ def test_update_shows_old_and_new_version_and_runs_update_sh(pve):
     assert result.returncode == 0, result.stderr
     assert "v1.9.0 -> v1.10.0" in result.stdout
     assert "https://github.com/octo/portal/releases/tag/v1.10.0" in result.stdout
-    assert "bash /opt/pve-flr-portal/deploy/update.sh" in pve.log("exec.log")
+    assert "bash /opt/pve-flr-portal/deploy/container/update.sh" in pve.log("exec.log")
     assert "now at v1.10.0" in result.stdout
     assert pve.read(207, "/opt/pve-flr-portal/VERSION").strip() == "1.10.0"
 
@@ -391,7 +398,7 @@ def _exec_script(pve: FakePve) -> str:
 
 def test_a_legacy_container_is_updated_by_running_the_equivalent_steps(pve):
     _legacy(pve)
-    _write(_new_release_files(pve) / "update.sh", "#!/usr/bin/env bash\n")  # the release it moves to has update.sh
+    _write(_new_release_files(pve) / "container" / "update.sh", "#!/usr/bin/env bash\n")  # the release has update.sh
     result = stub(pve, "update", "-y")
     assert result.returncode == 0, result.stderr
     assert "installed before update.sh existed: the equivalent steps are run" in result.stdout
@@ -399,10 +406,11 @@ def test_a_legacy_container_is_updated_by_running_the_equivalent_steps(pve):
     assert "git config --system --add safe.directory /opt/pve-flr-portal" in script
     assert "git fetch --quiet --tags origin" in script
     assert "git checkout --quiet v1.10.0" in script
-    assert "INSTALL_CERTBOT=0 bash deploy/install.sh" in script  # an update doesn't add certbot
+    assert 'INSTALL_CERTBOT=0 bash "$INSTALL"' in script  # an update doesn't add certbot
+    assert "deploy/container/install.sh" in script and "deploy/install.sh" in script  # either layout
     assert "now at v1.10.0" in result.stdout
     # it ends up with update.sh, so the next update takes the normal path
-    assert pve.read(207, "/opt/pve-flr-portal/deploy/update.sh") is not None
+    assert pve.read(207, "/opt/pve-flr-portal/deploy/container/update.sh") is not None
 
 
 def test_a_legacy_update_is_confirmed_and_can_snapshot_first(pve):

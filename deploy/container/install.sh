@@ -3,17 +3,17 @@
 # that already has this repo checked out. Run as root from inside the
 # target container/host:
 #
-#   bash deploy/install.sh
+#   bash deploy/container/install.sh
 #
 # lxc-create.sh calls this automatically after creating the container;
 # run it by hand if you provisioned the container/machine yourself.
 set -euo pipefail
 
-APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+APP_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 APP_USER="pveflr"
 SERVICE_NAME="pve-flr-portal"
 # certbot + a DNS-01 plugin, so an admin who wants a real
-# (CA-issued) cert can run deploy/certbot-setup.sh once instead of
+# (CA-issued) cert can run deploy/container/certbot-setup.sh once instead of
 # hand-writing a renewal hook. Ready to go by default but skippable
 # (INSTALL_CERTBOT=0) since the self-signed cert tls.py generates works
 # fine without it. rfc2136 is the default plugin - DNS-01 is the right
@@ -47,7 +47,7 @@ if [ "$INSTALL_CERTBOT" = "1" ]; then
   # release) should be a warning, not abort the whole install over an
   # optional feature.
   apt-get install -y -qq "python3-certbot-dns-${CERTBOT_DNS_PLUGIN}" || \
-    echo "    Warning: python3-certbot-dns-${CERTBOT_DNS_PLUGIN} not available - certbot installed, but deploy/certbot-setup.sh needs this plugin package too."
+    echo "    Warning: python3-certbot-dns-${CERTBOT_DNS_PLUGIN} not available - certbot installed, but deploy/container/certbot-setup.sh needs this plugin package too."
 fi
 
 if ! id "$APP_USER" >/dev/null 2>&1; then
@@ -86,7 +86,7 @@ check_mode "$APP_DIR/.env" "640"
 
 echo "==> Installing systemd unit"
 sed "s#__APP_DIR__#${APP_DIR}#g; s#__APP_USER__#${APP_USER}#g" \
-  "$APP_DIR/deploy/pve-flr-portal.service.template" > "/etc/systemd/system/${SERVICE_NAME}.service"
+  "$APP_DIR/deploy/container/pve-flr-portal.service.template" > "/etc/systemd/system/${SERVICE_NAME}.service"
 
 systemctl daemon-reload
 # enable (idempotent) + restart, not `enable --now` - `--now` won't
@@ -101,4 +101,4 @@ echo
 echo "Edit $APP_DIR/.env (PVE_HOST, PVE_STORAGE) then:"
 echo "  systemctl restart $SERVICE_NAME"
 echo
-echo "To update later, run: bash $APP_DIR/deploy/update.sh"
+echo "To update later, run: bash $APP_DIR/deploy/container/update.sh"

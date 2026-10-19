@@ -4,8 +4,8 @@
 # renewal. Run ONCE, as root, inside the container/host running the
 # portal:
 #
-#   bash deploy/certbot-setup.sh flr.example.com
-#   bash deploy/certbot-setup.sh flr.example.com flr-data.example.com
+#   bash deploy/container/certbot-setup.sh flr.example.com
+#   bash deploy/container/certbot-setup.sh flr.example.com flr-data.example.com
 #
 # DNS-01 is used instead of http-01 because this app is often deployed
 # internally, with no port 80/443 exposed to the internet for Let's
@@ -17,7 +17,7 @@
 #   - certbot + python3-certbot-dns-<plugin> installed (install.sh does
 #     this by default - INSTALL_CERTBOT=1, CERTBOT_DNS_PLUGIN=rfc2136).
 #   - The plugin's credentials file in place and chmod 600 - see
-#     deploy/rfc2136-credentials.ini.example for the rfc2136 default.
+#     deploy/container/rfc2136-credentials.ini.example for the rfc2136 default.
 #
 # Override via environment variables:
 #   CERTBOT_DNS_PLUGIN         (default: rfc2136)
@@ -51,7 +51,7 @@
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
-  echo "Usage: bash deploy/certbot-setup.sh <domain> [more domains...]" >&2
+  echo "Usage: bash deploy/container/certbot-setup.sh <domain> [more domains...]" >&2
   exit 1
 fi
 
@@ -60,10 +60,10 @@ CERTBOT_CREDENTIALS_FILE="${CERTBOT_CREDENTIALS_FILE:-/etc/letsencrypt/${CERTBOT
 CERTBOT_PROPAGATION_SECONDS="${CERTBOT_PROPAGATION_SECONDS:-30}"
 APP_DIR="${APP_DIR:-/opt/pve-flr-portal}"
 CERT_NAME="$1"
-HOOK="$APP_DIR/deploy/certbot-deploy-hook.sh"
+HOOK="$APP_DIR/deploy/container/certbot-deploy-hook.sh"
 
 if ! command -v certbot >/dev/null 2>&1; then
-  echo "certbot is not installed - re-run deploy/install.sh with INSTALL_CERTBOT=1, or 'apt-get install certbot'." >&2
+  echo "certbot is not installed - re-run deploy/container/install.sh with INSTALL_CERTBOT=1, or 'apt-get install certbot'." >&2
   exit 1
 fi
 
@@ -74,7 +74,7 @@ fi
 
 if [ ! -f "$CERTBOT_CREDENTIALS_FILE" ]; then
   echo "Credentials file not found: $CERTBOT_CREDENTIALS_FILE" >&2
-  echo "See deploy/${CERTBOT_DNS_PLUGIN}-credentials.ini.example (if this plugin ships one) and copy/fill it in first." >&2
+  echo "See deploy/container/${CERTBOT_DNS_PLUGIN}-credentials.ini.example (if this plugin ships one) and copy/fill it in first." >&2
   exit 1
 fi
 
@@ -144,4 +144,4 @@ RENEWED_LINEAGE="/etc/letsencrypt/live/$CERT_NAME" "$HOOK"
 
 echo
 echo "==> Done. Certificate issued for: $*"
-echo "    Renews automatically via certbot.timer; deploy/certbot-deploy-hook.sh reinstalls it each time."
+echo "    Renews automatically via certbot.timer; deploy/container/certbot-deploy-hook.sh reinstalls it each time."

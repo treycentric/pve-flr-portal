@@ -3,14 +3,14 @@
 # for a host that has an older portal install and doesn't have the command
 # yet, or whose copy is out of date. Run as root on the PVE host:
 #
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)"
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/host/install-host-tools.sh)"
 #
 #   bash install-host-tools.sh [CTID] [--install]
 #
 # --install then runs `pve-flr-portal install` (the guided installer) as soon
 # as the command is in place - one command from nothing to a new container:
 #
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/install-host-tools.sh)" install-host-tools --install
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/treycentric/pve-flr-portal/main/deploy/host/install-host-tools.sh)" install-host-tools --install
 #
 # (Written with `bash -c`, not `curl ... | bash`, so the installer's dialogs
 # keep the terminal.)

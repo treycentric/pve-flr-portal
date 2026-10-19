@@ -289,12 +289,12 @@ listener.
 #### CA-issued certificates (certbot, DNS-01)
 
 The self-signed default works but triggers a browser warning.
-`deploy/install.sh` installs `certbot` + a DNS-01 plugin
+`deploy/container/install.sh` installs `certbot` + a DNS-01 plugin
 (`CERTBOT_DNS_PLUGIN`, default `rfc2136`) by default;
-`deploy/certbot-setup.sh <domain>...` issues a cert via DNS-01 (chosen
+`deploy/container/certbot-setup.sh <domain>...` issues a cert via DNS-01 (chosen
 over `http-01` since this app is often deployed internally, with no port
 80/443 exposed to the internet), installs it at
-`TLS_CERT_FILE`/`TLS_KEY_FILE` via `deploy/certbot-deploy-hook.sh`, and
+`TLS_CERT_FILE`/`TLS_KEY_FILE` via `deploy/container/certbot-deploy-hook.sh`, and
 registers that hook as the cert's `renew_hook` so `certbot.timer` renews
 automatically from then on. `PFR_ACME_DATA_PLANE=1` extends the same
 hook to also install the issued cert at
@@ -325,10 +325,22 @@ non-default key size. Both land in the same `renewalparams` as
 ## Deployment and management
 
 The recommended deployment is an unprivileged LXC container on the PVE host
-(`deploy/lxc-create.sh`, run from the host). Management stays on the host
+(`deploy/host/lxc-create.sh`, run from the host). Management stays on the host
 side, as plain shell, with no extra service and no state beyond what the
 portal already keeps:
 
+- **Layout.** `deploy/host/` holds what runs on the PVE node (installer,
+  shared library, management tool, host command, roles tool, host-backup patch,
+  the bootstrap), `deploy/container/` what runs inside the container
+  (install/update, certbot, the unit template). Earlier releases had one flat
+  `deploy/`, and a host manages containers on either: every read of a
+  container's checkout or of a GitHub ref tries the current path and then the
+  flat one, and three flat paths remain as compatibility: `update.sh` and
+  `lxc-create.sh` forward to the new scripts (so the old curl one-liner and
+  habits keep working), and the unit template is kept as a copy because an
+  `update.sh` that is already running from an earlier release reads it after
+  checking out the new one. They go away in 3.0.
+  The container image excludes `deploy/` entirely.
 - **Discovery by tag.** The installer tags the container `pve-flr-portal`
   (a Proxmox tag, visible in the UI, and carried along by migration and
   restore-from-backup). `pve-flr-portal adopt` tags an older install.
@@ -340,11 +352,11 @@ portal already keeps:
   container's own checkout* (copied out with `pct pull`). The tools therefore
   always match the installed release, and new settings appear without
   touching the host. The same pattern is used for the host-backup patch.
-- **A shared settings library.** `deploy/lib/settings.sh` holds the settings
+- **A shared settings library.** `deploy/host/lib/settings.sh` holds the settings
   registry (each setting's label, default, validation and `.env` key), the
   whiptail dialogs (with a plain-prompt fallback), and the helpers that build
   and parse a container's `net0` and read and patch its `.env`. The installer
-  (`lxc-create.sh`) and the management tool (`deploy/pfr-manage.sh`) both
+  (`lxc-create.sh`) and the management tool (`deploy/host/pfr-manage.sh`) both
   source it, in `install` and `config` mode respectively. A curl-piped
   installer fetches it from the latest release (falling back to `main` if
   the release predates it or has a different `PFR_LIB_API`).
@@ -375,7 +387,7 @@ portal already keeps:
   the installer, and runs it at the terminal. `install-host-tools.sh
   --install` chains that after installing the command, for a one-command
   start.
-- **Installing the host command** needs no container: `deploy/install-host-tools.sh`
+- **Installing the host command** needs no container: `deploy/host/install-host-tools.sh`
   (curl-pipeable) fetches the stub from the latest release - or `PFR_VERSION`,
   or `main` if the release predates it - or copies it from a container's
   checkout, and refuses an empty, unparsable or foreign file. `pve-flr-portal
@@ -387,7 +399,7 @@ portal already keeps:
   release that predates the management tools, so it can't come from the
   container): the installed version from the container's `VERSION`, the latest
   from `git ls-remote --tags origin` run *in* the container, an optional
-  `pct snapshot` as a rollback point, then `deploy/update.sh` in the
+  `pct snapshot` as a rollback point, then `deploy/container/update.sh` in the
   container - or, for an install that predates `update.sh` but is a git
   checkout with `install.sh`, the equivalent steps (fetch, check out,
   `install.sh`, without certbot). Afterwards the stub and (if installed) the host-backup patch

@@ -126,6 +126,11 @@ case "$cmd" in
     shift # --
     prog="$1"; shift
     case "$prog" in
+      env)
+        # `env VAR=value ... command`: run the command, as the real one does
+        while [ "$#" -gt 0 ] && [[ "$1" == *=* ]]; do export "$1"; shift; done
+        exec "$0" exec "$id" -- "$@"
+        ;;
       true) broken "$id" && exit 1; exit 0 ;;
       test)
         case "$1" in

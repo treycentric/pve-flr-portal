@@ -17,6 +17,7 @@ URL = HTTPS_URL  # back-compat alias for the tests below
 
 # --- parse_data_nics --------------------------------------------------
 
+
 def test_parse_data_nics_empty_or_blank_means_unconfigured():
     assert parse_data_nics("") == []
     assert parse_data_nics("   ") == []
@@ -69,6 +70,7 @@ def test_parse_data_nics_rejects_malformed_cidr_or_ip():
 
 # --- select_data_nic ----------------------------------------------------
 
+
 def test_select_data_nic_matches_the_subnet_containing_a_guest_ip():
     nics = [DataNic("10.0.5.0/24", "10.0.5.5"), DataNic("10.0.6.0/24", "10.0.6.5")]
     assert select_data_nic(["10.0.6.42"], nics) == nics[1]
@@ -96,6 +98,7 @@ def test_select_data_nic_first_match_wins_when_multiple_nics_could_match():
 
 
 # --- detect_fetch_tool ---------------------------------------------------
+
 
 def _exec_returning(results: dict[str, tuple[int, str, str]]):
     """Fake exec_fn: matches a canned result by a substring of the probe
@@ -159,6 +162,7 @@ async def test_detect_fetch_tool_tolerates_a_probe_raising_and_tries_the_next_on
 
 
 # --- data-plane TLS ladder ----------------------------------
+
 
 def test_tool_supports_tls_capability_matrix():
     for tool in ("curl", "wget", "python3", "Invoke-WebRequest", "cscript", "certutil", "bitsadmin", "bash"):
@@ -255,10 +259,19 @@ def test_build_fetch_command_cscript_insecure_sets_ssl_ignore_option():
 
 def test_build_fetch_command_curl_plaintext_and_insecure():
     assert build_fetch_command("curl", HTTP_URL, DEST_POSIX, "linux", tls="plaintext").exec_argv == [
-        "curl", "-fsSL", "-o", DEST_POSIX, HTTP_URL,
+        "curl",
+        "-fsSL",
+        "-o",
+        DEST_POSIX,
+        HTTP_URL,
     ]
     assert build_fetch_command("curl", HTTPS_URL, DEST_POSIX, "linux", tls="insecure").exec_argv == [
-        "curl", "-fsSL", "-k", "-o", DEST_POSIX, HTTPS_URL,
+        "curl",
+        "-fsSL",
+        "-k",
+        "-o",
+        DEST_POSIX,
+        HTTPS_URL,
     ]
     assert "-k" not in build_fetch_command("curl", HTTPS_URL, DEST_POSIX, "linux", tls="verify").exec_argv
     # Windows guest -> the real curl.exe binary (not the PowerShell alias).
@@ -267,11 +280,17 @@ def test_build_fetch_command_curl_plaintext_and_insecure():
 
 def test_build_fetch_command_wget_insecure_adds_no_check_certificate():
     assert build_fetch_command("wget", HTTPS_URL, DEST_POSIX, "linux", tls="insecure").exec_argv == [
-        "wget", "-q", "--no-check-certificate", "-O", DEST_POSIX, HTTPS_URL,
+        "wget",
+        "-q",
+        "--no-check-certificate",
+        "-O",
+        DEST_POSIX,
+        HTTPS_URL,
     ]
-    assert "--no-check-certificate" not in build_fetch_command(
-        "wget", HTTPS_URL, DEST_POSIX, "linux", tls="verify"
-    ).exec_argv
+    assert (
+        "--no-check-certificate"
+        not in build_fetch_command("wget", HTTPS_URL, DEST_POSIX, "linux", tls="verify").exec_argv
+    )
 
 
 def test_build_fetch_command_python_streams_and_threads_an_unverified_context():

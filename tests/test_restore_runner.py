@@ -210,9 +210,7 @@ async def test_readonly_clear_failure_does_not_fail_the_restore(manager, session
 
     async def fake_exec(session, guest_type, vmid, argv, **kwargs):
         if argv[0] == "chattr":
-            raise httpx.HTTPStatusError(
-                "x", request=httpx.Request("POST", "http://x"), response=httpx.Response(500)
-            )
+            raise httpx.HTTPStatusError("x", request=httpx.Request("POST", "http://x"), response=httpx.Response(500))
         return 0, "", ""
 
     monkeypatch.setattr(pve_client, "write_guest_file", fake_write)
