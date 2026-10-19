@@ -2,8 +2,7 @@
 # Compatibility shim: lxc-create.sh moved to deploy/host/lxc-create.sh. This
 # keeps the old curl one-liner and `bash deploy/lxc-create.sh` working: it runs
 # the sibling host/lxc-create.sh from a checkout, else downloads that script
-# (from PFR_VERSION, default main) and runs it. Removed in the next major
-# release.
+# (from PFR_VERSION, default main) and runs it. Removed in 3.0.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"

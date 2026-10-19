@@ -335,10 +335,11 @@ portal already keeps:
   (install/update, certbot, the unit template). Earlier releases had one flat
   `deploy/`, and a host manages containers on either: every read of a
   container's checkout or of a GitHub ref tries the current path and then the
-  flat one, and the flat paths remain in a current release as forwarding stubs
-  (plus a copy of the unit template) so an update that is already running from
-  an earlier release, the old curl one-liner and certbot renewal hooks written
-  by an earlier install keep working. They go away in the next major release.
+  flat one, and three flat paths remain as compatibility: `update.sh` and
+  `lxc-create.sh` forward to the new scripts (so the old curl one-liner and
+  habits keep working), and the unit template is kept as a copy because an
+  `update.sh` that is already running from an earlier release reads it after
+  checking out the new one. They go away in 3.0.
   The container image excludes `deploy/` entirely.
 - **Discovery by tag.** The installer tags the container `pve-flr-portal`
   (a Proxmox tag, visible in the UI, and carried along by migration and

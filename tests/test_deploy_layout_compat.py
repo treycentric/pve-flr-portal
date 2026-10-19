@@ -28,16 +28,8 @@ from test_host_command import (
     stub,
 )
 
-# Everything under deploy/ that any release (or main, for the certbot scripts)
-# has told people or their installs to use, by its old, flat path.
-OLD_PATHS = [
-    "install.sh",
-    "update.sh",
-    "lxc-create.sh",
-    "pve-flr-portal.service.template",
-    "certbot-setup.sh",
-    "certbot-deploy-hook.sh",
-]
+# What an earlier release or install still reaches by its old, flat path.
+OLD_PATHS = ["update.sh", "lxc-create.sh", "pve-flr-portal.service.template"]
 
 
 @pytest.fixture
@@ -228,7 +220,7 @@ def test_the_old_service_template_matches_the_new_one():
     assert old == new
 
 
-@pytest.mark.parametrize("name", ["install.sh", "update.sh", "certbot-setup.sh", "certbot-deploy-hook.sh"])
+@pytest.mark.parametrize("name", ["update.sh"])
 def test_a_container_script_shim_forwards_its_arguments_and_environment(name, tmp_path):
     tree = tmp_path / "deploy"
     (tree / "container").mkdir(parents=True)

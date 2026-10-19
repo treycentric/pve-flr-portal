@@ -125,11 +125,11 @@ Companion docs, kept separate on purpose:
     have it)
   - `container/` (inside the LXC): `install.sh`, `update.sh`, the `certbot-*`
     scripts, the systemd unit template, the rfc2136 credentials example
-  - the old flat paths (`install.sh`, `update.sh`, `lxc-create.sh`,
-    `certbot-*.sh`, the unit template) are compatibility stubs/copies for
-    existing installs, docs and certbot renewal hooks - remove them in the
-    next major release; `tests/test_deploy_layout_compat.py` covers both
-    layouts. Anything reading a container's checkout or a GitHub ref looks in
+  - the old flat paths `update.sh`, `lxc-create.sh` (forwarding stubs) and
+    the unit template (a copy: a 1.x `update.sh` that is already running reads
+    it after checking out the new release) are compatibility for existing
+    installs and pasted one-liners - remove them in 3.0;
+    `tests/test_deploy_layout_compat.py` covers both layouts. Anything reading a container's checkout or a GitHub ref looks in
     the new location first, then the old one.
   - `Dockerfile` / `docker-compose.yml` are at the repo root; the image doesn't
     contain `deploy/`.
