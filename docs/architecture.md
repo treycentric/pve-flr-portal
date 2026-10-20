@@ -341,6 +341,17 @@ portal already keeps:
   `update.sh` that is already running from an earlier release reads it after
   checking out the new one. They go away in 3.0.
   The container image excludes `deploy/` entirely.
+- **Minimal OS packages.** The container needs only `python3`, `python3-venv`
+  (the portal runs from its own venv and pip), `git` and `ca-certificates`,
+  plus certbot and a DNS plugin when enabled. Everything is installed with
+  `--no-install-recommends` (recommends of `python3-pip` are the whole compiler
+  toolchain) and the package cache is cleared afterwards. Installs before 2.0
+  did pull the toolchain in: `deploy/container/slim-packages.sh` removes it
+  (and the unused system pip) after showing the apt plan, and refuses if the
+  plan includes anything outside the toolchain (python, git, certbot,
+  base system). The host command runs it from `pve-flr-portal slim`, and offers
+  it after an update that moves a container from before 2.0; the offer never
+  removes anything without a terminal and an explicit yes.
 - **Discovery by tag.** The installer tags the container `pve-flr-portal`
   (a Proxmox tag, visible in the UI, and carried along by migration and
   restore-from-backup). `pve-flr-portal adopt` tags an older install.

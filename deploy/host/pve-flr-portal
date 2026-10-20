@@ -80,6 +80,11 @@ Commands:
                            --no-snapshot  don't ask about a snapshot
                            --force        update even if already up to date
   status [CTID]          Show the installed version, service state and address.
+  slim [CTID] [-y]       Remove the build tools (gcc, g++, make, ...) that
+                         installs before 2.0 pulled in by accident, and the
+                         unused system pip. Shows what would go and asks.
+                         `update` offers this after moving such a container
+                         to 2.0 or later.
   host-tools [CTID]      Install or update the host-side pieces (this command, its
                          -config/-update links, the roles tool, and the
                          host-backup patch script if installed). Downloads them from GitHub - the latest
@@ -557,6 +562,77 @@ isn't a git checkout this command can update for you. Update it by hand - its
 EOF
 }
 
+# slim_container CTID MODE - remove the build tools earlier installs pulled in
+# by accident (and the unused system pip), after showing what would go and
+# asking. MODE "ask" is the offer after an update: quiet when there is nothing
+# to do, and without a terminal (or with -y, which is about the update) it only
+# says how. MODE "now" is the slim command.
+slim_container() {
+  local ctid="$1" mode="$2" script plan rc=0
+  script="$(release_path "$ctid" container/slim-packages.sh || true)"
+  if [ -z "$script" ]; then
+    if [ "$mode" = "now" ]; then
+      echo "Container $ctid runs a release without the package clean-up. Update it first: pve-flr-portal update $ctid" >&2
+      return 1
+    fi
+    return 0
+  fi
+  plan="$(pct exec "$ctid" -- bash "$script" check 2>&1)" || rc=$?
+  case "$rc" in
+    0) ;;
+    3)
+      if [ "$mode" = "now" ]; then
+        echo "Container $ctid has nothing to clean up."
+      fi
+      return 0
+      ;;
+    *)
+      if [ "$mode" = "now" ]; then
+        echo "$plan" >&2
+        return 1
+      fi
+      return 0
+      ;;
+  esac
+  echo "Container $ctid has build tools that installs before 2.0 pulled in by accident (the portal doesn't use them):"
+  echo "$plan"
+  if [ "$mode" = "ask" ] && { [ "$ASSUME_YES" = "1" ] || ! have_tty; }; then
+    echo "Remove them with: pve-flr-portal slim $ctid"
+    return 0
+  fi
+  if [ "$ASSUME_YES" != "1" ]; then
+    have_tty || die "Removing packages without a terminal needs -y."
+    if ! ask_yes "Remove them?"; then
+      echo "Left as is. Remove them later with: pve-flr-portal slim $ctid"
+      return 0
+    fi
+  fi
+  pct exec "$ctid" -- bash "$script" apply || {
+    echo "The clean-up did not finish in container $ctid." >&2
+    return 1
+  }
+  return 0
+}
+
+# slim [CTID] [-y]
+cmd_slim() {
+  local explicit=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -y|--yes) ASSUME_YES=1 ;;
+      -*) die "Unknown option $1 (see --help)." ;;
+      *)
+        [[ "$1" =~ ^[0-9]+$ ]] && [ -z "$explicit" ] || die "'$1' is not a container ID (see --help)."
+        explicit="$1"
+        ;;
+    esac
+    shift
+  done
+  choose_ct "$explicit"
+  ensure_running "$CTID"
+  slim_container "$CTID" now
+}
+
 # update_one CTID TARGET -> 0 updated, 10 already up to date, 11 declined,
 # anything else failed. TARGET is empty/latest, main, or a version.
 update_one() {
@@ -641,6 +717,10 @@ update_one() {
   case "$target" in
     ""|latest|main) refresh_host_pieces "$ctid" ;;
   esac
+  # Installs before 2.0 left a compiler toolchain behind: offer to remove it.
+  if [ "$current" != "2.0.0" ] && [ "$(printf '%s\n' "$current" 2.0.0 | sort -V | head -1)" = "$current" ]; then
+    slim_container "$ctid" ask || true
+  fi
   return 0
 }
 
@@ -844,6 +924,7 @@ main() {
     config) cmd_config "$@" ;;
     update) cmd_update "$@" ;;
     status) cmd_status "$@" ;;
+    slim) cmd_slim "$@" ;;
     host-tools) cmd_host_tools "$@" ;;
     install) cmd_install "$@" ;;
     roles) cmd_roles "$@" ;;

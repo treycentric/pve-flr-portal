@@ -53,6 +53,10 @@ if [ "$INSTALL_CERTBOT" = "1" ]; then
     echo "    Warning: python3-certbot-dns-${CERTBOT_DNS_PLUGIN} not available - certbot installed, but deploy/container/certbot-setup.sh needs this plugin package too."
 fi
 
+# Downloaded packages and the package lists are only needed while installing.
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+
 if ! id "$APP_USER" >/dev/null 2>&1; then
   echo "==> Creating service user $APP_USER"
   useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"

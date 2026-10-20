@@ -123,8 +123,10 @@ Companion docs, kept separate on purpose:
     inspects and deletes the PVE roles), `patch-pve-host-backups.sh`, and
     `install-host-tools.sh` (installs the host command on a host that doesn't
     have it)
-  - `container/` (inside the LXC): `install.sh`, `update.sh`, the `certbot-*`
-    scripts, the systemd unit template, the rfc2136 credentials example
+  - `container/` (inside the LXC): `install.sh`, `update.sh`,
+    `slim-packages.sh` (removes build tools that pre-2.0 installs pulled in),
+    the `certbot-*` scripts, the systemd unit template, the rfc2136
+    credentials example
   - the old flat paths `update.sh`, `lxc-create.sh` (forwarding stubs) and
     the unit template (a copy: a 1.x `update.sh` that is already running reads
     it after checking out the new release) are compatibility for existing

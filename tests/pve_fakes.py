@@ -43,7 +43,7 @@ class FakePve:
         wt = self.bin / "whiptail"
         shutil.copy(ROOT / "tests" / "fakes" / "whiptail", wt)
         wt.chmod(wt.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        for tool in ("pveum", "pveversion"):
+        for tool in ("pveum", "pveversion", "apt-get", "dpkg-query", "id"):
             fake_tool = self.bin / tool
             shutil.copy(ROOT / "tests" / "fakes" / tool, fake_tool)
             fake_tool.chmod(fake_tool.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

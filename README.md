@@ -544,6 +544,7 @@ on the node that hosts the container:
 | `pve-flr-portal config [CTID]` | A welcome screen, then the review screen filled in from the container's current configuration. Changed settings are marked `*`; "Apply changes" lists what will change before doing anything. |
 | `pve-flr-portal update [CTID] [version]` | Shows the installed and new version, asks to confirm, then runs `update.sh` in the container (see "Updating"). |
 | `pve-flr-portal status [CTID]` | Installed version, whether a newer release is available, service state and address. |
+| `pve-flr-portal slim [CTID]` | Removes the build tools (gcc, g++, make, ...) that installs before 2.0 pulled in by accident, and the unused system pip. Shows exactly what would go and asks first (`-y` to skip the question). `update` offers it after moving such a container to 2.0 or later; with `-y` or without a terminal it only tells you the command. Refuses if the removal would touch anything but build tools. |
 | `pve-flr-portal list` | The containers it manages, with their versions. |
 | `pve-flr-portal adopt [CTID...]` | Starts managing existing installs (below). |
 | `pve-flr-portal host-tools [CTID]` | Installs or updates the host-side pieces: this command, its `-config`/`-update` links, and the host-backup patch script if installed. Downloads them from GitHub (the latest release; `PFR_VERSION` picks another), so it works on a node that runs no portal container; with a CTID it copies them from that container's release instead. |

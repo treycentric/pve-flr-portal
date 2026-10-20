@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# A stand-in for apt-get, for the package clean-up script.
+#   $FAKE_APT_DIR/plan      what `apt-get -s purge` prints
+#   $FAKE_APT_DIR/apt.log   every call
+echo "apt-get $*" >> "$FAKE_APT_DIR/apt.log"
+case "$*" in
+  "-s purge"*) cat "$FAKE_APT_DIR/plan" ;;
+  "purge "*) : > "$FAKE_APT_DIR/installed" ;;
+esac
+exit 0

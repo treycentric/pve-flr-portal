@@ -156,6 +156,11 @@ case "$cmd" in
       hostname) echo "192.168.1.50" ;;
       bash)
         echo "bash $*" >> "$d/exec.log"
+        if [ "${1##*/}" = "slim-packages.sh" ]; then
+          # the clean-up script really runs, against the fake apt-get/dpkg-query
+          mkdir -p "$(ct "$id")/apt"
+          FAKE_ROOT=1 FAKE_APT_DIR="$(ct "$id")/apt" exec bash "$(ct "$id")/fs$1" "${@:2}"
+        fi
         if [ "$1" = "-c" ]; then
           # the legacy (pre-update.sh) update script: fetch, check out, install.sh
           [ -f "$(ct "$id")/dirty" ] && { echo "The install directory has local changes" >&2; exit 1; }
