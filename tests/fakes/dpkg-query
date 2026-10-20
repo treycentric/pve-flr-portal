@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# A stand-in for dpkg-query -W -f='${db:Status-Abbrev}' PKG: "ii " for the
+# packages listed in $FAKE_APT_DIR/installed, a failure for the rest.
+pkg="${*: -1}"
+if grep -qx "$pkg" "$FAKE_APT_DIR/installed" 2>/dev/null; then
+  printf 'ii '
+else
+  exit 1
+fi

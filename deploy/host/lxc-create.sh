@@ -189,7 +189,7 @@ for _ in $(seq 1 30); do
 done
 
 msg_info "Installing pve-flr-portal inside container $CTID"
-pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null"
+pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null"
 # Full clone (not --depth 1) so the tag lookup below has the full tag
 # history to search - depth-1 clones don't fetch tags at all. Then pin
 # to the latest tagged GitHub Release (docs/dev/versioning.md) rather
